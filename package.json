@@ -1,0 +1,16 @@
+{
+  "name": "rpgm-mwg-player",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local RPG Maker game launcher with an mw_games-ready runtime boundary.",
+  "scripts": {
+    "start": "node src/server.js",
+    "scan": "node src/server.js --scan",
+    "convert:mv": "node tools/convert-mv.js",
+    "validate:mwgp": "node tools/validate-mwgp.js"
+  },
+  "dependencies": {
+    "@datamoc/mw_games": "^0.7.8"
+  }
+}
