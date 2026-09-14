@@ -163,6 +163,12 @@ class Combiner extends Filter.Processor {
       ...reopen_children
     ]);
 
+    // A later reopening's `def foo` replaces an earlier one - two same-named methods
+    // (or worse, two `initialize`s - a hard "class may only have one constructor"
+    // SyntaxError) can't both survive being merged into one JS class body the way they
+    // could coexist as separate `Class.prototype.foo = ...` reopening assignments.
+    merged_children = this._dedupe_defs(merged_children);
+
     // Reorder: put class variable assignments (cvasgn) first
     // JavaScript requires static fields to be declared before use
     merged_children = this._reorder_class_body(merged_children);
@@ -187,6 +193,47 @@ class Combiner extends Filter.Processor {
       superclass,
       merged_body
     ) : s("module", orig_name, merged_body)
+  };
+
+  // Keep only the last of any same-named :def/:defs/:casgn nodes in a (already merged)
+  // class body, matching Ruby's reopening semantics - a later definition or constant
+  // assignment replaces an earlier one, it does not coexist alongside it. Two survivors
+  // with the same name is not just redundant here, it can be a hard SyntaxError (two
+  // `initialize`s, or two `let NAME = ...` class-constant declarations in one scope).
+  _dedupe_key(node, index) {
+    if (node.type === "def") {
+      return ["def", node.children[0]]
+    } else if (node.type === "defs" && node.children[0]?.type === "self") {
+      return ["defs", node.children[1]]
+    } else if (node.type === "casgn" && node.children[0] == null) {
+      return ["casgn", node.children[1]]
+    } else {
+      return ["unique", index]
+    }
+  };
+
+  _dedupe_defs(children) {
+    let last_index = {};
+
+    for (let index = 0; index < children.length; index++) {
+      let node = children[index];
+      if (typeof node !== "object" || node == null || !("type" in node)) continue;
+      last_index[this._dedupe_key(node, index)] = index
+    };
+
+    let kept = [];
+
+    for (let index = 0; index < children.length; index++) {
+      let node = children[index];
+
+      if (typeof node !== "object" || node == null || !("type" in node)) {
+        kept.push(node)
+      } else if (last_index[this._dedupe_key(node, index)] === index) {
+        kept.push(node)
+      }
+    };
+
+    return kept
   };
 
   // Extract children from a body node

@@ -18182,13 +18182,24 @@ const Ruby2JS = (() => {
       ))
     };
 
+    static SPECIAL_GVARS = {
+      "$~": "$MATCH",
+      "$&": "$MATCH0",
+      "$'": "$POSTMATCH",
+      "$`": "$PREMATCH"
+    };
+
     on_lvar($var) {
       if ($var === "$!") {
         return this.put("$EXCEPTION")
       } else if (this._ast.type === "lvar") {
         return this.put(this.jsvar($var))
-      } else {
+      } else if (Converter.SPECIAL_GVARS[$var]) {
+        return this.put(Converter.SPECIAL_GVARS[$var])
+      } else if (/^\$\w+$/.test(($var ?? "").toString())) {
         return this.put($var)
+      } else {
+        return this.put(`$g${($var ?? "").toString().replaceAll(/\W/g, "") ?? ""}`)
       }
     };
 
@@ -18197,8 +18208,12 @@ const Ruby2JS = (() => {
         return this.put("$EXCEPTION")
       } else if (this._ast.type === "lvar") {
         return this.put(this.jsvar($var))
-      } else {
+      } else if (Converter.SPECIAL_GVARS[$var]) {
+        return this.put(Converter.SPECIAL_GVARS[$var])
+      } else if (/^\$\w+$/.test(($var ?? "").toString())) {
         return this.put($var)
+      } else {
+        return this.put(`$g${($var ?? "").toString().replaceAll(/\W/g, "") ?? ""}`)
       }
     };
 

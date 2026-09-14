@@ -178,6 +178,12 @@ module Ruby2JS
         # Ruby's array + is not the same as JS's + operator
         merged_children = merge_definitions([*orig_children, *reopen_children])
 
+        # A later reopening's `def foo` replaces an earlier one - two same-named methods
+        # (or worse, two `initialize`s - a hard "class may only have one constructor"
+        # SyntaxError) can't both survive being merged into one JS class body the way they
+        # could coexist as separate `Class.prototype.foo = ...` reopening assignments.
+        merged_children = dedupe_defs(merged_children)
+
         # Reorder: put class variable assignments (cvasgn) first
         # JavaScript requires static fields to be declared before use
         merged_children = reorder_class_body(merged_children)
@@ -194,6 +200,42 @@ module Ruby2JS
         else
           s(:module, orig_name, merged_body)
         end
+      end
+
+      # Keep only the last of any same-named :def/:defs/:casgn nodes in a (already merged)
+      # class body, matching Ruby's reopening semantics - a later definition or constant
+      # assignment replaces an earlier one, it does not coexist alongside it. Two survivors
+      # with the same name is not just redundant here, it can be a hard SyntaxError (two
+      # `initialize`s, or two `let NAME = ...` class-constant declarations in one scope).
+      def dedupe_key(node, index)
+        if node.type == :def
+          [:def, node.children[0]]
+        elsif node.type == :defs and node.children[0]&.type == :self
+          [:defs, node.children[1]]
+        elsif node.type == :casgn and node.children[0].nil?
+          [:casgn, node.children[1]]
+        else
+          # Unique per node so it's never treated as a duplicate of anything else.
+          [:unique, index]
+        end
+      end
+
+      def dedupe_defs(children)
+        last_index = {}
+        children.each_with_index do |node, index|
+          next unless node.respond_to?(:type)
+          last_index[dedupe_key(node, index)] = index
+        end
+
+        kept = []
+        children.each_with_index do |node, index|
+          if not node.respond_to?(:type)
+            kept << node
+          elsif last_index[dedupe_key(node, index)] == index
+            kept << node
+          end
+        end
+        kept
       end
 
       # Extract children from a body node
