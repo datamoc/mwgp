@@ -4162,20 +4162,31 @@ const Ruby2JS = (() => {
           } else if (modname.type === "class_module" && modname.children.slice(2).every(child => (
             nonprop(child)
           ))) {
-            return this.s("begin", ...modname.children.slice(2).map(pair => (
-              ["class", "module"].includes(pair.type) ? this.s(
-                "send",
-                target,
-                `${pair.children.first.children.last ?? ""}=`,
-                pair
-              ) : this.s(
-                "send",
-                target,
-                "[]=",
-                this.s("sym", pair.children.first),
-                pair.updated("defm", [null, ...pair.children.slice(1)])
-              )
-            )))
+            return this.s("begin", ...modname.children.slice(2).map((pair) => {
+              let class_name, qualified_name;
+
+              if (["class", "module"].includes(pair.type)) {
+                class_name = pair.children.first.children.last;
+
+                qualified_name = pair.children.first.updated(
+                  null,
+                  [target, class_name]
+                );
+
+                return pair.updated(
+                  null,
+                  [qualified_name, ...pair.children.slice(1)]
+                )
+              } else {
+                return this.s(
+                  "send",
+                  target,
+                  "[]=",
+                  this.s("sym", pair.children.first),
+                  pair.updated("defm", [null, ...pair.children.slice(1)])
+                )
+              }
+            }))
           } else {
             return this.s(
               "send",

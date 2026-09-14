@@ -111,7 +111,20 @@ module Ruby2JS
                     # ...; end; end` reopening `module A`. `pair.children.first` here is
                     # the class/module's own name node, not a method symbol; attach it
                     # as a named property instead of wrapping that node inside `:sym`.
-                    s(:send, target, "#{pair.children.first.children.last}=", pair)
+                    #
+                    # `pair`'s own name is still just `B` (unqualified) at this point, not
+                    # `A::B` - left alone, parsing `pair` as-is re-enters `A`'s namespace
+                    # scope under an unqualified key, so it won't be recognized as
+                    # reopening the SAME `B` a bare `class A::B` elsewhere resolves to, and
+                    # everything inside it ends up qualified as bare `B` rather than `A.B`.
+                    # Qualify it against `target` (here, `A`) and let the class converter's
+                    # own (already-correct, and used everywhere else) compound-const
+                    # handling emit the declaration/reopening-assignment itself - wrapping
+                    # it in another assignment here would double up with the self-assigning
+                    # output it already produces for a reopened class.
+                    class_name = pair.children.first.children.last
+                    qualified_name = pair.children.first.updated(nil, [target, class_name])
+                    pair.updated(nil, [qualified_name, *pair.children[1..-1]])
                   else
                     s(:send, target, :[]=, s(:sym, pair.children.first),
                     pair.updated(:defm, [nil, *pair.children[1..-1]]))
