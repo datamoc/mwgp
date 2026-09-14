@@ -15,7 +15,11 @@ check(Number.isInteger(project.version) && project.version >= 1, 'version must b
 check(Array.isArray(project.maps) && project.maps.length > 0, 'maps must be a non-empty array');
 check(project.initialMapId == null || project.maps.some(map => map.id === project.initialMapId), 'initialMapId must refer to a map');
 
-const allowed = new Set(['say', 'ask', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'if', 'move', 'transfer', 'picture', 'erasePicture', 'sound', 'turn']);
+const allowed = new Set([
+  'say', 'ask', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
+  'breakLoop', 'exitEvent', 'move', 'transfer', 'picture', 'erasePicture', 'sound', 'turn',
+  'screenFade', 'screenFlash'
+]);
 let eventCount = 0, commandCount = 0;
 for (const map of project.maps || []) {
   const data = map.data;
@@ -36,6 +40,11 @@ function validateCommands(commands, eventId, mapId) {
       check(command.if.switch || command.if.variable, `if command in event ${eventId} on map ${mapId} has no supported condition`);
       validateCommands(command.then || [], eventId, mapId);
       validateCommands(command.else || [], eventId, mapId);
+    }
+    if (command.loop) validateCommands(command.loop, eventId, mapId);
+    if (command.branches) {
+      for (const branch of command.branches) validateCommands(branch || [], eventId, mapId);
+      if (command.cancelBranch) validateCommands(command.cancelBranch, eventId, mapId);
     }
   }
 }

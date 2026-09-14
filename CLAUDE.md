@@ -66,26 +66,39 @@ project's own `assets/` root), and `POST /api/launch` (spawns a native `Game.exe
 
 Reads `www/data/*.json` from an MV project and emits one `mwgp.json`. The interesting part is
 `convertCommands`/`parseBlock`: it walks MV's flat, indent-delimited event command list
-recursively to rebuild nested `if`/`else` blocks (MV codes 111/411/412) and inlines common
-event calls (code 117, depth-limited to 8 to avoid cycles) — then translates only a subset of
-MV's command codes into a small, explicit MWGP vocabulary:
+recursively to rebuild nested `if`/`else` blocks (MV codes 111/411/412), Loop/Break Loop
+(112/113/413), and Show Choices' per-choice/cancel branches (102/402/403/404), and inlines
+common event calls (code 117, depth-limited to 8 to avoid cycles) — then translates only a
+subset of MV's command codes into a small, explicit MWGP vocabulary:
 
 ```
-say, ask, wait, setSwitch, setVariable, addVariable, if, move, transfer, picture, erasePicture, sound, turn
+say, ask, wait, setSwitch, setVariable, addVariable, copyVariable, if, loop, breakLoop,
+exitEvent, move, transfer, picture, erasePicture, sound, turn, screenFade, screenFlash
 ```
+
+Self switches (MV's per-map-event 'A'-'D' switches) are not a separate vocabulary entry —
+they're folded into `setSwitch`/the `if` condition's `switch` key via a synthesized
+`self:<mapId>:<eventId>:<ch>` string key, reusing `GameState`'s single switch namespace
+instead of teaching the runtime a second switch kind.
 
 **This vocabulary is a contract shared by four files**, and they must be kept in sync when a
 command is added or changed:
-1. `tools/convert-mv.js` (`convertCommand`) — produces it from MV command codes.
+1. `tools/convert-mv.js` (`convertCommand`/`parseBlock`) — produces it from MV command codes.
 2. `tools/convert-mv.js` (`buildCompatibilityReport`) — classifies every MV command code seen
    in the project as `supported`/`partial`/`unsupported`, written into the manifest as
    `compatibility.commands` (a data-driven priority list for what to convert next).
 3. `tools/validate-mwgp.js` (`allowed` set) — rejects any manifest command key not in the list.
 4. The players — `src/player/pixi-core.js`'s `prepareEventCommands` only needs to handle the
-   commands that require a scene/renderer callback (`transfer`, `picture`, `erasePicture`,
-   `sound`, `turn`, a portrait-bearing `say`/`ask`); the rest (`say`, `ask`, `setSwitch`,
-   `setVariable`, `addVariable`, `wait`, `move`, `if`) pass straight through to
-   `mw_games`'s own `Rpg.EventRunner`, which already understands that shape natively.
+   commands that require a scene/renderer callback or JS-level control flow mw_games's fixed
+   `EventRunner.step()` can't express on its own (`transfer`, `picture`, `erasePicture`,
+   `sound`, `turn`, `screenFade`, `screenFlash`, `loop`, `breakLoop`, `exitEvent`,
+   `copyVariable`, a choice command with `branches`, a portrait-bearing `say`/`ask`); each is
+   rewritten into a `call` closure the runner's own generic escape hatch supports. `loop` and
+   `exitEvent` unwind via a thrown sentinel (`BreakLoopSignal`/`ExitEventSignal`) caught by
+   `runLoop`/`runPage` respectively, since `EventRunner.run()` has no other way to stop a list
+   mid-flight. The rest (`say`, `ask` without `branches`, `setSwitch`, `setVariable`,
+   `addVariable`, `wait`, `move`, `if`) pass straight through to `mw_games`'s own
+   `Rpg.EventRunner`, which already understands that shape natively.
    `src/player/core.js` (the canvas fallback) instead re-interprets raw MV command codes
    itself and does not go through this vocabulary at all — it's a separate, simpler code path.
 
@@ -135,12 +148,33 @@ state, compatibility diagnostics. It exists to eventually upstream those into `m
 shrink the workarounds in `pixi-core.js`. Check it before changing autotile/event-presentation
 code in `pixi-core.js`, and update it if a workaround is added or removed.
 
-### Vendored, not-yet-integrated code
+### Vendored transpilers (`transpilers/`, gitignored)
 
 `transpilers/opal-master` and `transpilers/ruby2js-master` are full vendored copies of two
-Ruby-to-JS transpilers, staged for a future RGSS/Ruby import pipeline (converting XP/VX/Ace
-projects, analogous to `convert-mv.js` for MV) once the MV pipeline is stable. Nothing in
-`src/` or `tools/` currently imports from them.
+Ruby-to-JS transpilers. `opal-master` is still unused. `ruby2js-master` is not: its self-hosted
+JS build (`demo/selfhost/ruby2js.js`, no Ruby needed at conversion time) is imported directly by
+`tools/transpile-ruby.mjs`, `tools/transpile-rgss-scripts.mjs`, `tools/bundle-rgss-scripts.mjs`,
+and `tools/rgss-call-filter.mjs` — the RGSS/Pokémon-Essentials-in-browser effort (see
+`.remember`/session memory for status) runs Essentials' real Ruby scripts through it.
+
+**This copy carries real patches, not pristine vendor code**, in
+`lib/ruby2js/converter/{class,converter,def,hash}.rb` — fixes for gaps hit while bundling
+Essentials' whole script corpus into one conversion (class-body `if`/`unless` modifiers e.g.
+`alias foo bar unless method_defined?(:foo)`; a `$Range` runtime class with no iterator; a
+`==` comparison on AST nodes that the self-host build compiles to JS reference equality instead
+of structural equality; an implicit block parameter appended after a rest parameter). Rebuild
+the self-hosted bundle after touching any of those files — `rake`'s own task for the specific
+file doesn't work from this checkout (its shell command assumes bash `VAR=val cmd` syntax `sh()`
+doesn't support here), so run the step it wraps directly instead:
+```
+cd transpilers/ruby2js-master
+BUNDLE_GEMFILE="$PWD/Gemfile" bundle exec ruby demo/selfhost/scripts/transpile_bundle.rb > demo/selfhost/ruby2js.js.new
+node --check demo/selfhost/ruby2js.js.new && mv demo/selfhost/ruby2js.js.new demo/selfhost/ruby2js.js
+```
+**`transpilers/` is `.gitignore`d, so none of this is version-controlled** — these patches
+exist only on disk. Losing or resetting the directory silently loses them; there's no `git
+status` signal that they're gone. Worth resolving (un-ignore this fork, or extract the patches
+elsewhere) before relying on this further.
 
 ## Adding support for a new MV event command
 

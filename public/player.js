@@ -12,7 +12,7 @@ if (query.has('x') && query.has('y')) project.player = { ...(project.player || {
 if (project.assets?.kind === 'decoded') project.assets.root = `/api/mwgp/${id}/assets`;
 document.querySelector('#title').textContent = project.display?.title || 'MWGP Player';
 try {
-  const { startMwgPixi } = await import('/pixi-core.js');
+  const { startMwgPixi } = await import(`/pixi-core.js?v=${Date.now()}`);
   await startMwgPixi(document.querySelector('#game'), project);
 } catch (error) {
   console.warn('Pixi player unavailable, using compatibility renderer', error);

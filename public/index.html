@@ -1,32 +1,11 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>RPGM Player</title>
-  <style>
-    :root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#10131b;color:#f4f6fb}
-    body{max-width:980px;margin:0 auto;padding:48px 24px} h1{font-size:42px;margin:0 0 8px} p{color:#aeb6c8}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:32px}
-    .card{background:#191e2a;border:1px solid #2e374a;border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:12px}
-    .card h2{font-size:18px;margin:0;overflow-wrap:anywhere}.engine{font-size:12px;color:#8ea4d8;text-transform:uppercase;letter-spacing:.08em}
-    button{border:0;border-radius:9px;background:#6f8cff;color:white;font-weight:700;padding:11px 14px;cursor:pointer;margin-top:auto}button:hover{background:#829bff}
-    #status{margin-top:24px;color:#94a3b8}.empty{padding:24px;border:1px dashed #39445b;border-radius:12px}
-  </style>
-</head>
-<body>
-  <h1>RPGM Player</h1><p>Local catalog for RPG Maker games. Games stay in their own folders and are started with their packaged runtime.</p>
-  <section id="games" class="grid"></section><div id="status">Scanning projects…</div>
-  <script>
-    const list = document.querySelector('#games'), status = document.querySelector('#status');
-    async function load() {
-      const catalog = await fetch('/api/games').then(r => r.json());
-      const games = [...catalog.mwgp.map(g => ({...g, engine:'MWGP / mw_games'})), ...catalog.rpgm];
-      list.innerHTML = games.length ? games.map(g => `<article class="card"><div class="engine">${g.engine}</div><h2>${escapeHtml(g.name)}</h2>${g.kind === 'mwgp' ? '<button onclick="location.href=\'/player.html?id='+encodeURIComponent(g.id)+'\'">Play MWGP</button>' : '<button data-id="'+g.id+'">Play native</button>'}</article>`).join('') : '<div class="empty">No project found.</div>';
-      status.textContent = `${games.length} project${games.length === 1 ? '' : 's'} found`;
-      list.querySelectorAll('button').forEach(button => button.onclick = async () => { button.disabled = true; const result = await fetch('/api/launch', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({id:button.dataset.id})}).then(r=>r.json()); status.textContent = result.ok ? `Started ${result.name}` : result.error; button.disabled = false; });
-    }
-    function escapeHtml(value){return value.replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
-    load().catch(() => status.textContent = 'Could not scan the games folder.');
-  </script>
-</body>
-</html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RPGM Player</title>
+<style>:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#10131b;color:#f4f6fb}body{max-width:980px;margin:0 auto;padding:48px 24px}h1{font-size:42px;margin:0 0 8px}p{color:#aeb6c8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:32px}.card{background:#191e2a;border:1px solid #2e374a;border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:12px}.card h2{font-size:18px;margin:0;overflow-wrap:anywhere}.engine{font-size:12px;color:#8ea4d8;text-transform:uppercase;letter-spacing:.08em}button{border:0;border-radius:9px;background:#6f8cff;color:white;font-weight:700;padding:11px 14px;cursor:pointer;margin-top:auto}#status{margin-top:24px;color:#94a3b8}.empty{padding:24px;border:1px dashed #39445b;border-radius:12px}</style></head>
+<body><h1>RPGM Player</h1><p>Local catalog for RPG Maker games. Games stay in their own folders and are started with their packaged runtime.</p><section id="games" class="grid"></section><div id="status">Scanning projects…</div>
+<script>
+const list=document.querySelector('#games'),status=document.querySelector('#status');
+async function load(){const catalog=await fetch('/api/games').then(r=>r.json());const games=[...catalog.mwgp.map(g=>({...g,engine:'MWGP / mw_games'})),...catalog.rpgm];list.innerHTML=games.length?games.map(g=>`<article class="card"><div class="engine">${g.engine}</div><h2>${escapeHtml(g.name)}</h2>${g.kind==='mwgp'?'<button data-mwgp-id="'+g.id+'">Play MWGP</button>':'<button data-id="'+g.id+'">Play native</button>'}</article>`).join(''):'<div class="empty">No project found.</div>';status.textContent=`${games.length} project${games.length===1?'':'s'} found`;
+list.querySelectorAll('button[data-mwgp-id]').forEach(button=>button.onclick=()=>{location.href=`/player.html?id=${encodeURIComponent(button.dataset.mwgpId)}`;});
+list.querySelectorAll('button[data-id]').forEach(button=>button.onclick=async()=>{button.disabled=true;const result=await fetch('/api/launch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:button.dataset.id})}).then(r=>r.json());status.textContent=result.ok?`Started ${result.name}`:result.error;button.disabled=false;});}
+function escapeHtml(value){return value.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}load().catch(()=>status.textContent='Could not scan the games folder.');
+</script></body></html>

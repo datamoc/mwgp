@@ -13,14 +13,20 @@ const port = Number(process.env.RPGM_PORT || 4173);
 function detectGame(folderName) {
   const folder = join(gamesRoot, folderName);
   if (!statSafe(folder)?.isDirectory()) return null;
-  const mv = existsSync(join(folder, 'www', 'index.html'));
+  // MV nests the game under www/; MZ (and some MV web exports) put data/js/index.html
+  // directly at the project root. System.json is the RPG Maker fingerprint that tells
+  // a real project apart from an unrelated web app that happens to ship a data/ folder.
+  const mvRoot = existsSync(join(folder, 'www', 'data', 'System.json')) ? join(folder, 'www') : null;
+  const flatRoot = !mvRoot && existsSync(join(folder, 'data', 'System.json')) ? folder : null;
+  const gameRoot = mvRoot || flatRoot;
   const rgss = existsSync(join(folder, 'Game.ini')) && existsSync(join(folder, 'Game.exe'));
-  if (!mv && !rgss) return null;
+  if (!gameRoot && !rgss) return null;
+  const isMz = gameRoot && existsSync(join(gameRoot, 'js', 'rmmz_core.js'));
   return {
     id: Buffer.from(folderName, 'utf8').toString('base64url'),
     name: folderName,
-    engine: mv ? 'RPG Maker MV/MZ' : 'RPG Maker XP/VX/Ace (RGSS)',
-    kind: mv ? 'mv' : 'rgss',
+    engine: gameRoot ? (isMz ? 'RPG Maker MZ' : 'RPG Maker MV') : 'RPG Maker XP/VX/Ace (RGSS)',
+    kind: gameRoot ? 'mv' : 'rgss',
     executable: join(folder, 'Game.exe')
   };
 }
