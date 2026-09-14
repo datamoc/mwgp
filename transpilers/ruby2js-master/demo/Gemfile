@@ -1,0 +1,15 @@
+source 'https://rubygems.org'
+
+gem 'rake'
+gem 'ruby2js', path: File.expand_path('..', __dir__)
+gem 'nokogiri'  # includes HTML5 parsing (formerly nokogumbo)
+gem 'execjs'
+gem 'opal', '~> 1.0'
+gem 'regexp_parser'
+
+group :demo do
+  gem 'rack', '>= 3.0'
+  gem 'rackup'
+  gem 'puma'
+  gem 'sinatra', '>= 4.0'
+end

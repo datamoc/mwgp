@@ -1,0 +1,3270 @@
+require 'ruby2js'
+require 'ruby2js/inflector'
+
+module Ruby2JS
+  module Filter
+    module Rails
+      module Helpers
+        include SEXP
+        # Note: This filter overrides Erb's hook methods (process_erb_block_append,
+        # process_erb_block_helper). In the filter list, Rails::Helpers must come
+        # BEFORE Erb so the overrides take precedence in Ruby2JS's filter chain.
+
+        # Browser databases - these run in browser with History API navigation
+        BROWSER_DATABASES = %w[dexie indexeddb sqljs sql.js pglite].freeze
+
+        def initialize(*args)
+          super
+          @erb_block_var = nil   # Track current block variable (e.g., 'f' in form_for)
+          @erb_model_name = nil  # Track model name for form_for (e.g., 'user')
+          @erb_path_helpers = [] # Track path helper usage for imports
+          @erb_view_helpers = [] # Track view helper usage (truncate, etc.) for imports
+          @erb_partials = []     # Track partial usage for imports
+          @erb_view_modules = [] # Track view module imports (PhotoViews, etc.)
+          @rails_helpers_needed = [] # Track Rails helpers that need importing from juntos:rails
+          @erb_asset_imports = [] # Track asset imports (images, videos, etc.) for Vite
+          @erb_needs_polymorphic_path = false # Track if polymorphic_path is needed
+          @erb_app_helpers = [] # Track application helper usage for imports
+          @erb_needs_rest_forwarding = false # Track if ..._rest is needed for partial forwarding
+        end
+
+        # Mark render function as async - sets flag directly since filter chain
+        # ordering may cause this method to be called instead of Erb's version
+        def erb_mark_async!
+          @erb_needs_async = true
+        end
+
+        # Check if layout mode is enabled (options are set after initialize)
+        def erb_layout_mode?
+          @options && @options[:layout]
+        end
+
+        # Handle yield in layout context
+        # <%= yield %> -> content (the main content parameter)
+        # <%= yield :head %> -> context.contentFor.head || ''
+        def on_yield(node)
+          return super unless erb_layout_mode?()
+
+          args = node.children
+
+          if args.empty?
+            # yield -> content (the content parameter passed to layout function)
+            s(:lvar, :content)
+          else
+            # yield :head -> context.contentFor.head || ''
+            section = args.first
+            if section.type == :sym
+              section_name = section.children.first
+              s(:or,
+                s(:attr, s(:attr, s(:lvar, :context), :contentFor), section_name),
+                s(:str, ''))
+            else
+              super
+            end
+          end
+        end
+
+        # Handle for loops that iterate over association collections
+        # e.g., studio.people.sort_by(&:name).each -> needs await on the collection
+        def on_for(node)
+          if @erb_bufvar
+            collection = node.children[1]
+            if collection_involves_association?(collection)
+              self.erb_mark_async!()
+              new_collection = wrap_association_with_await(collection)
+              return s(:for, node.children[0], process(new_collection), process(node.children[2]))
+            end
+          end
+          super
+        end
+
+        def on_for_of(node)
+          if @erb_bufvar
+            collection = node.children[1]
+            if collection_involves_association?(collection)
+              self.erb_mark_async!()
+              new_collection = wrap_association_with_await(collection)
+              return s(:for_of, node.children[0], process(new_collection), process(node.children[2]))
+            end
+          end
+          super
+        end
+
+        # Handle safe navigation on belongs_to associations in ERB
+        # person.level&.name -> (await person.level)?.name
+        def on_csend(node)
+          if @erb_bufvar
+            receiver = node.children[0]
+            if receiver&.type == :send && belongs_to_access?(receiver)
+              self.erb_mark_async!()
+              awaited = s(:begin, s(:send, nil, :await, process(receiver)))
+              return node.updated(:csend, [awaited, node.children[1], *node.children[2..].map { |c| process(c) }])
+            end
+          end
+          super
+        end
+
+        # Add imports for path helpers and view helpers
+        # Called by Erb filter's on_begin via erb_prepend_imports hook
+        def erb_prepend_imports
+          # Add import for path helpers if any were used
+          # Use @config alias (resolves to .juntos/config in Vite)
+          unless @erb_path_helpers.empty?
+            helpers = @erb_path_helpers.uniq.sort.map { |name| s(:const, nil, name) }
+            self.prepend_list << s(:import, '@config/paths.js', helpers)
+          end
+
+          # Add import for polymorphic_path if needed (for lvar model references)
+          if @erb_needs_polymorphic_path
+            self.prepend_list << s(:import, 'juntos/url_helpers.mjs',
+              [s(:const, nil, :polymorphic_path)])
+          end
+
+          # Add import for view helpers (truncate, etc.) from rails.js
+          # Use lib alias (resolves to .juntos/lib in Vite)
+          unless @erb_view_helpers.empty?
+            helpers = @erb_view_helpers.uniq.sort.map { |name| s(:const, nil, name) }
+            self.prepend_list << s(:import, 'lib/rails.js', helpers)
+          end
+
+          # Add imports for partials
+          # render "form" -> import * as _form_module from './_form.js'
+          # render @article.comments -> import * as _comment_module from '../comments/_comment.js'
+          # Then call _form_module.render({article})
+          unless @erb_partials.empty?
+            @erb_partials.uniq { |p| [p[:name], p[:directory]] }.sort_by { |p| p[:name] }.each do |partial_info|
+              partial_name = partial_info[:name]
+              partial_directory = partial_info[:directory]
+              # Include directory in module name to avoid collisions (e.g., solos/form vs entries/form)
+              # Replace / with _ to create valid JS identifier
+              module_base = partial_directory ? "#{partial_directory}/#{partial_name}" : partial_name
+              module_name = "_#{module_base.gsub('/', '_')}_module".to_sym
+
+              # Generate import path based on whether partial is in a different directory
+              import_path = if partial_directory
+                # Cross-directory partial: compute relative path from current file
+                # to the target partial (partial_directory is relative to app/views/)
+                target = "#{partial_directory}/_#{partial_name}.js"
+                file = @options[:file].to_s
+                views_match = file.match(%r{app/views/(.*)})
+                if views_match
+                  current_dir = File.dirname(views_match[1])
+                  target_dir = File.dirname(target)
+                  target_file = File.basename(target)
+
+                  from_parts = current_dir.split('/')
+                  to_parts = target_dir.split('/')
+
+                  # Find common prefix
+                  common = 0
+                  common += 1 while common < from_parts.length &&
+                    common < to_parts.length &&
+                    from_parts[common] == to_parts[common]
+
+                  ups = from_parts.length - common
+                  downs = to_parts[common..]
+
+                  if ups == 0
+                    "./#{(downs + [target_file]).join('/')}"
+                  else
+                    "#{'../' * ups}#{(downs + [target_file]).join('/')}"
+                  end
+                else
+                  # Fallback when file path not available
+                  "../#{partial_directory}/_#{partial_name}.js"
+                end
+              else
+                # Same directory partial: ./_form.js
+                "./_#{partial_name}.js"
+              end
+
+              # Path array format: [as_pair, from_pair] for "import * as X from Y"
+              self.prepend_list << s(:import,
+                [s(:pair, s(:sym, :as), s(:const, nil, module_name)),
+                 s(:pair, s(:sym, :from), s(:str, import_path))],
+                s(:str, '*'))
+            end
+          end
+
+          # Add imports for view modules (PhotoViews, etc.)
+          # These are used for turbo_stream shorthand: turbo_stream.prepend "photos", @photo
+          # Import path: ../photos.js (from photos/ subdirectory)
+          unless @erb_view_modules.empty?
+            @erb_view_modules.uniq.each do |view_info|
+              module_name = view_info[:module]
+              resource = view_info[:resource]
+              # Import from parent directory: ../photos.js
+              self.prepend_list << s(:import, "../#{resource}.js",
+                [s(:const, nil, module_name.to_sym)])
+            end
+          end
+
+          # Add imports for Rails helpers from juntos:rails
+          # e.g., stylesheetLinkTag for fingerprinted CSS paths
+          unless @rails_helpers_needed.empty?
+            helpers = @rails_helpers_needed.uniq.sort.map { |name| s(:const, nil, name) }
+            self.prepend_list << s(:import, 'juntos:rails', helpers)
+          end
+
+          # Add imports for assets (images, videos, etc.)
+          # Vite will process these and provide fingerprinted URLs
+          # import _asset_logo_png from '../../../assets/images/logo.png';
+          unless @erb_asset_imports.empty?
+            @erb_asset_imports.uniq { |a| a[:var_name] }.each do |asset_info|
+              var_name = asset_info[:var_name]
+              import_path = asset_info[:import_path]
+
+              # Path is relative from the view file to app/assets/
+              # Compute depth from file path (app/views/books/ = 3, app/views/layouts/ = 3)
+              file = @options[:file].to_s
+              view_rel = file.sub(%r{.*app/views/}, '')
+              depth = view_rel.count('/') + 1  # +1 for the filename itself
+              prefix = '../' * depth
+              full_import_path = "#{prefix}assets/#{import_path}"
+
+              # Default import: import _asset_logo_png from '...';
+              # Format: s(:import, path, default_name)
+              self.prepend_list << s(:import, full_import_path,
+                s(:const, nil, var_name.to_sym))
+            end
+          end
+
+          # Add imports for application helper methods
+          # e.g., import { localized_date } from '@helpers/application_helper.js'
+          unless @erb_app_helpers.empty?
+            # Group by helper file, then generate one import per file
+            files = @erb_app_helpers.map { |info| info[:file] }.uniq
+            files.each do |file|
+              methods = @erb_app_helpers.select { |info| info[:file] == file }
+                .map { |info| info[:method] }.uniq.sort
+              helpers = methods.map { |name| s(:const, nil, name) }
+              self.prepend_list << s(:import, "@helpers/#{file}.js", helpers)
+            end
+          end
+        end
+
+        # Override Erb filter's hook to add $context as keyword arg
+        # Views need $context for flash, contentFor, params, etc.
+        # Using $ prefix to avoid conflicts with @context instance variables
+        # Now returns kwarg for unified signature: render({ $context, articles })
+        # In layout mode, context comes as positional arg so no extra kwargs needed
+        def erb_render_extra_args
+          return [] if erb_layout_mode?()
+          [s(:kwarg, :"$context")]
+        end
+
+        # Override hook: add ..._rest when this view renders partials
+        def erb_needs_rest_forwarding?
+          @erb_needs_rest_forwarding || false
+        end
+
+        # Helper to get the context reference for layout vs view mode
+        # Layout mode: context (positional arg)
+        # View mode: $context (kwarg)
+        def context_ref
+          if erb_layout_mode?()
+            s(:lvar, :context)
+          else
+            s(:lvar, :"$context")
+          end
+        end
+
+        # Helper to get global context reference (used in form helpers)
+        # Layout mode: context (from scope)
+        # View mode: $context (global)
+        def context_gvar
+          if erb_layout_mode?()
+            s(:lvar, :context)
+          else
+            s(:gvar, :$context)
+          end
+        end
+
+        def on_block(node)
+          call = node.children[0]
+          if !@erb_cache_processing && call&.type == :send && call.children[0].nil? && call.children[1] == :cache
+            # cache do...end → await cache(key, async () => { ... })
+            @erb_cache_processing = true
+            result = process s(:send, nil, :await, node)
+            @erb_cache_processing = false
+            return result
+          end
+          super
+        end
+
+        def on_send(node)
+          target, method, *args = node.children
+
+          # Force function call syntax for known helper methods (zero-arg)
+          # hide_from_user_style_tag → hide_from_user_style_tag()
+          if target.nil? && args.empty? && @erb_bufvar
+            meta = @options && @options[:metadata]
+            if meta && meta['helpers']
+              is_helper = false
+              meta['helpers'].each_pair do |mod, methods|
+                is_helper = true if methods.include?(method.to_s)
+              end
+              if is_helper
+                return process s(:or, s(:send!, nil, method), s(:str, ''))
+              end
+            end
+          end
+
+          # Handle form builder methods: f.text_field :name, f.submit, etc.
+          if @erb_block_var && target&.type == :lvar &&
+             target.children.first == @erb_block_var
+            # form.object returns the model variable (e.g., studio)
+            if method == :object && args.empty?
+              return s(:lvar, (@erb_model_name || 'model').to_sym)
+            end
+            return process_form_builder_method(method, args)
+          end
+
+          # Rewrite _url helpers to new URL(_path(...), $context.request.url).toString()
+          if target.nil? && method.to_s.end_with?('_url')
+            path_method = method.to_s.sub(/_url$/, '_path').to_sym
+            # Only rewrite if the corresponding _path helper exists in routes
+            routes = @options[:metadata] && @options[:metadata][:routes_mapping]
+            if routes.nil? || routes[path_method.to_s]
+              path_call = s(:send, nil, path_method, *args)
+              request_url = s(:attr, s(:attr, s(:lvar, :"$context"), :request), :url)
+              return process s(:send,
+                s(:send, s(:const, nil, :URL), :new, path_call, request_url),
+                :to_s)
+            end
+          end
+
+          # Handle link_to helper
+          if method == :link_to && target.nil? && args.length >= 2
+            return process_link_to(args)
+          end
+
+          # Handle truncate helper
+          if method == :truncate && target.nil? && args.length >= 1
+            return process_truncate(args)
+          end
+
+          # Handle pluralize helper
+          if method == :pluralize && target.nil? && args.length >= 2
+            return process_pluralize(args)
+          end
+
+          # Handle dom_id helper
+          if method == :dom_id && target.nil? && args.length >= 1
+            return process_dom_id(args)
+          end
+
+          # Handle number_to_currency helper
+          if method == :number_to_currency && target.nil? && args.length >= 1
+            return process_number_to_currency(args)
+          end
+
+          # Handle button_to helper
+          if method == :button_to && target.nil? && args.length >= 2
+            return process_button_to(args)
+          end
+
+          # Handle notice helper (flash message)
+          if method == :notice && target.nil? && args.empty?
+            return process_notice
+          end
+
+          # Handle content_for helper
+          if method == :content_for && target.nil?
+            return process_content_for(args)
+          end
+
+          # Handle csrf_meta_tags - returns the CSRF meta tag from server context
+          # In layout mode, context is a positional arg; in view mode, $csrfMetaTag is passed globally
+          if method == :csrf_meta_tags && target.nil?
+            if erb_layout_mode?()
+              # Layout mode: build meta tag from context.authenticityToken
+              return s(:or,
+                s(:dstr,
+                  s(:str, '<meta name="csrf-token" content="'),
+                  s(:begin, s(:or, s(:attr, s(:lvar, :context), :authenticityToken), s(:str, ''))),
+                  s(:str, '">')),
+                s(:str, ''))
+            else
+              return s(:or, s(:gvar, :$csrfMetaTag), s(:str, ''))
+            end
+          end
+
+          # Handle csp_meta_tag - stub for demo (returns empty string)
+          if method == :csp_meta_tag && target.nil?
+            return s(:str, '')
+          end
+
+          # Handle stylesheet_link_tag - call runtime helper for fingerprinted path
+          # The helper reads the Vite manifest to get the fingerprinted asset path
+          if method == :stylesheet_link_tag && target.nil?
+            # Generate: stylesheetLinkTag('tailwind.css')
+            # The function is imported from juntos:rails
+            # Note: We always use 'tailwind.css' as that's where Tailwind outputs
+            # Rails convention 'application' would map to application.css but we use Tailwind
+            @rails_helpers_needed << :stylesheetLinkTag
+            return s(:send, nil, :stylesheetLinkTag, s(:str, 'tailwind.css'))
+          end
+
+          # Handle image_tag - import asset and generate <img> tag
+          # image_tag "logo.png", alt: "Logo" -> <img src="${_asset_logo_png}" alt="Logo">
+          if method == :image_tag && target.nil? && args.first
+            return process_asset_tag(:image_tag, args)
+          end
+
+          # Handle asset_path - import asset and return URL
+          # asset_path "file.pdf" -> ${_asset_file_pdf}
+          if method == :asset_path && target.nil? && args.first
+            return process_asset_tag(:asset_path, args)
+          end
+
+          # Handle image_path - alias for asset_path for images
+          if method == :image_path && target.nil? && args.first
+            return process_asset_tag(:asset_path, args)
+          end
+
+          # Handle video_tag - import asset and generate <video> tag
+          if method == :video_tag && target.nil? && args.first
+            return process_asset_tag(:video_tag, args)
+          end
+
+          # Handle audio_tag - import asset and generate <audio> tag
+          if method == :audio_tag && target.nil? && args.first
+            return process_asset_tag(:audio_tag, args)
+          end
+
+          # Handle favicon_link_tag - import asset and generate <link> tag
+          if method == :favicon_link_tag && target.nil? && args.first
+            return process_asset_tag(:favicon_link_tag, args)
+          end
+
+          # Handle javascript_importmap_tags - generate module script tag
+          # In Vite context, no importmap JSON is needed (Vite resolves modules).
+          # We just need a <script type="module"> that loads the application entry
+          # point, which imports Turbo, Stimulus, and registers controllers.
+          if method == :javascript_importmap_tags && target.nil?
+            @rails_helpers_needed << :javascriptImportmapTags
+            return s(:send, nil, :javascriptImportmapTags)
+          end
+
+          # Handle render partial calls
+          # Skip in JSX context - React filter converts JSX to "render Component.new"
+          # which should be handled by React, not as ERB partials
+          if method == :render && target.nil? && args.any? && !@jsx_content
+            result = process_render_partial(args)
+            return result if result
+          end
+
+          # Track path helper usage for imports (e.g., article_path, new_article_path)
+          if target.nil? && method.to_s.end_with?('_path') && @erb_bufvar
+            @erb_path_helpers << method unless @erb_path_helpers.include?(method)
+
+            # Handle extra hash args as query parameters
+            # e.g., new_person_path(studio: @studio) -> `${new_person_path()}?studio=${extract_id(studio)}`
+            if args.length == 1 && args[0].type == :hash
+              hash_node = args[0]
+              pairs = hash_node.children
+              # Check if all keys are symbols (query param keys)
+              if pairs.all? { |p| p.type == :pair && p.children[0].type == :sym }
+                # Import extract_id along with the path helper
+                @erb_path_helpers << :extract_id unless @erb_path_helpers.include?(:extract_id)
+                # Build query string as template literal
+                base_call = process(s(:send, nil, method))
+                query_parts = []
+                pairs.each_with_index do |pair, i|
+                  key = pair.children[0].children[0].to_s
+                  value_expr = s(:send, nil, :extract_id, pair.children[1])
+                  query_parts << s(:str, "#{i == 0 ? '?' : '&'}#{key}=")
+                  query_parts << s(:begin, process(value_expr))
+                end
+                return s(:dstr, s(:begin, base_call), *query_parts)
+              end
+            end
+          end
+
+          # Handle turbo_stream_from helper - subscribes to broadcast channel
+          # turbo_stream_from "chat_room" -> TurboBroadcast.subscribe("chat_room")
+          if target.nil? && method == :turbo_stream_from && args.length >= 1
+            return process_turbo_stream_from(args)
+          end
+
+          # Handle association.size/count/length patterns in ERB
+          # Maps to Rails semantics:
+          #   .size   -> await proxy.size()    (smart: cached or COUNT query)
+          #   .count  -> await proxy.count()   (always COUNT query)
+          #   .length -> (await proxy).length  (load all, array length)
+          if @erb_bufvar && [:size, :count, :length].include?(method) && association_access?(target)
+            self.erb_mark_async!()
+            if method == :length
+              # Load records first, then access array's .length property
+              return s(:attr,
+                s(:begin, s(:send, nil, :await, process(target))),
+                :length)
+            else
+              # size/count are method calls on the proxy
+              return s(:send, nil, :await,
+                s(:send, process(target), method))
+            end
+          end
+
+          # Handle Active Storage attachment async methods in ERB
+          # clip.audio.url -> await clip.audio.url
+          # clip.audio.attached? -> await clip.audio.attached()
+          # clip.audio.content_type -> await clip.audio.content_type
+          if @erb_bufvar && attachment_method?(method) && attachment_access?(target)
+            self.erb_mark_async!()
+            return s(:send, nil, :await,
+              s(:send, process(target), method))
+          end
+
+          # Transform path_helper.get(...) to path_helper().get(...)
+          # Path helpers are functions that return objects with HTTP methods,
+          # so they must be called before accessing .get(), .post(), etc.
+          if target&.type == :send && path_helper_http_method?(method)
+            recv_receiver, recv_method, *recv_args = target.children
+            # Only transform zero-arg path helpers (path helpers with args already have parens)
+            if recv_receiver.nil? && recv_method.to_s.end_with?('_path') && recv_args.empty?
+              # Use :send! to force parentheses on zero-arg method call
+              forced_call = target.updated(:send!)
+              return process(s(:send, forced_call, method, *args))
+            end
+          end
+
+          # Track application helper calls for import generation
+          # e.g., localized_date(event.date, locale) -> import { localizedDate } from '@helpers/application_helper.js'
+          if target.nil? && @erb_bufvar && @options&.dig(:metadata, 'helpers')
+            helpers = @options[:metadata]['helpers']
+            method_str = method.to_s
+            helper_keys = helpers.keys
+            helper_keys.each do |helper_file|
+              helper_methods = helpers[helper_file]
+              if helper_methods.include?(method_str)
+                @erb_app_helpers << { method: method, file: helper_file } unless @erb_app_helpers.any? { |h| h[:method] == method }
+              end
+            end
+          end
+
+          super
+        end
+
+        # HTTP methods that path helpers support
+        PATH_HELPER_HTTP_METHODS = %i[get post put patch delete].freeze
+
+        def path_helper_http_method?(method)
+          PATH_HELPER_HTTP_METHODS.include?(method)
+        end
+
+        # Override Erb's hook to handle send expressions that produce buffer operations
+        # Handles turbo_stream.prepend/append/replace shortcuts without blocks
+        def process_erb_send_append(send_node)
+          target, method, *args = send_node.children
+
+          # Handle turbo_stream.prepend/append/replace/etc shorthand form (without block)
+          # turbo_stream.prepend "photos", @photo -> turbo-stream HTML with rendered partial
+          # Note: Use element-by-element comparison for JS compatibility (array == doesn't work in JS)
+          if target&.type == :send && target.children[0].nil? && target.children[1] == :turbo_stream
+            turbo_actions = [:prepend, :append, :replace, :update, :remove, :before, :after]
+            if turbo_actions.include?(method) && args.length >= 1
+              return process_turbo_stream_shorthand(method, args)
+            end
+          end
+
+          nil  # Not handled
+        end
+
+        # Override Erb's hook to handle Rails block helpers (form_for, form_tag, etc.)
+        def process_erb_block_append(block_node)
+          block_send = block_node.children[0]
+          block_args = block_node.children[1]
+          block_body = block_node.children[2]
+
+          if block_send&.type == :send
+            receiver = block_send.children[0]
+            helper_name = block_send.children[1]
+
+            # Handle turbo_stream.replace, turbo_stream.append, etc.
+            # turbo_stream can be either a local variable (lvar) or a method call (send nil :turbo_stream)
+            is_turbo_stream = (receiver&.type == :lvar && receiver.children[0] == :turbo_stream) ||
+                              (receiver&.type == :send && receiver.children[0].nil? && receiver.children[1] == :turbo_stream)
+            if is_turbo_stream
+              action = helper_name.to_s  # :replace, :append, :prepend, :remove, :update
+              target_arg = block_send.children[2]
+              return process_turbo_stream_action(action, target_arg, block_body)
+            end
+
+            # Handle form.fields_for (nested form builder)
+            if helper_name == :fields_for && @erb_block_var &&
+               receiver&.type == :lvar && receiver.children.first == @erb_block_var
+              association_name = block_send.children[2]
+              return process_fields_for(association_name, block_args, block_body)
+            end
+
+            if helper_name == :button_to
+              return process_button_to_block(block_send, block_args, block_body)
+            elsif helper_name == :form_for
+              return process_form_for(block_send, block_args, block_body)
+            elsif helper_name == :form_with
+              return process_form_with(block_send, block_args, block_body)
+            elsif helper_name == :form_tag
+              return process_form_tag(block_send, block_args, block_body)
+            else
+              return process_block_helper(helper_name, block_send, block_args, block_body)
+            end
+          end
+
+          nil  # Not handled, let Erb filter handle it
+        end
+
+        # Handle block helpers via on_block
+        def process_erb_block_helper(helper_call, block_args, block_body)
+          helper_name = helper_call.children[1]
+
+          if helper_name == :button_to
+            return process_button_to_block(helper_call, block_args, block_body)
+          elsif helper_name == :form_for
+            return process_form_for(helper_call, block_args, block_body)
+          elsif helper_name == :form_with
+            return process_form_with(helper_call, block_args, block_body)
+          elsif helper_name == :form_tag
+            return process_form_tag(helper_call, block_args, block_body)
+          end
+
+          # Generic block helper
+          process_block_helper(helper_name, helper_call, block_args, block_body)
+        end
+
+        # Process link_to helper into anchor tag (Turbo handles navigation)
+        def process_link_to(args)
+          text_node = args[0]
+          path_node = args[1]
+          options = args[2] if args.length > 2
+
+          # Extract options from hash
+          is_delete = false
+          confirm_msg = nil
+          css_class = nil
+          class_node = nil
+
+          if options&.type == :hash
+            options.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym
+                case key.children[0]
+                when :method
+                  is_delete = (value.type == :sym && value.children[0] == :delete)
+                when :class
+                  css_class = extract_class_value(value)
+                  class_node = value
+                when :data
+                  # Look for confirm/turbo_confirm in data hash
+                  if value.type == :hash
+                    value.children.each do |data_pair|
+                      data_key = data_pair.children[0]
+                      data_value = data_pair.children[1]
+                      if data_key.type == :sym &&
+                         [:confirm, :turbo_confirm].include?(data_key.children[0])
+                        confirm_msg = data_value if data_value.type == :str
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+
+          # Build the HTML
+          if is_delete
+            build_delete_link(text_node, path_node, confirm_msg, css_class)
+          else
+            build_nav_link(text_node, path_node, css_class, class_node)
+          end
+        end
+
+        # Extract class value from various formats:
+        # - String: "foo bar"
+        # - Array: ["foo", "bar", {"baz": condition}]
+        # Returns a string for static classes (for backward compatibility)
+        def extract_class_value(node)
+          result = extract_class_with_conditions(node)
+          return nil unless result
+
+          # If no conditionals, return simple string
+          if result[:conditionals].empty?
+            result[:static].join(' ')
+          else
+            # Has conditionals - still return static string for simple uses
+            # (callers that need dynamic should use extract_class_with_conditions)
+            result[:static].join(' ')
+          end
+        end
+
+        # Extract class value with full conditional support
+        # Returns { static: ["class1", "class2"], conditionals: [{class: "name", condition: ast_node}] }
+        def extract_class_with_conditions(node)
+          return nil unless node
+
+          case node.type
+          when :str
+            { static: [node.children[0]], conditionals: [] }
+          when :array
+            static_classes = []
+            conditionals = []
+
+            node.children.each do |child|
+              if child.type == :str
+                static_classes << child.children[0]
+              elsif child.type == :hash
+                # Conditional classes like {"border-red": errors.any?}
+                child.children.each do |pair|
+                  key = pair.children[0]
+                  condition = pair.children[1]
+
+                  class_name = if key.type == :str
+                                 key.children[0]
+                               elsif key.type == :sym
+                                 key.children[0].to_s
+                               end
+
+                  if class_name
+                    conditionals << { class: class_name, condition: condition }
+                  end
+                end
+              end
+            end
+
+            { static: static_classes, conditionals: conditionals }
+          else
+            nil
+          end
+        end
+
+        # Build class attribute - static string or dynamic template literal
+        # For use in contexts that support dynamic output (template literals)
+        def build_dynamic_class_attr(node)
+          return ["", nil] unless node
+
+          result = extract_class_with_conditions(node)
+          return ["", nil] unless result
+
+          if result[:conditionals].empty?
+            # Static only - return simple class attribute
+            class_str = result[:static].join(' ')
+            return [" class=\"#{class_str}\"", nil] if class_str.length > 0
+            return ["", nil]
+          end
+
+          # Has conditionals - need to generate dynamic class
+          static_part = result[:static].join(' ')
+
+          # Build AST for conditional class expression
+          # Result: `${static} ${cond1 ? 'class1' : ''} ${cond2 ? 'class2' : ''}`
+          # Merge opposite conditionals into a single ternary where possible
+          conditional_exprs = []
+          conditionals = result[:conditionals]
+          skip_next = false
+          conditionals.each_with_index do |cond, i|
+            if skip_next
+              skip_next = false
+              next
+            end
+
+            next_cond = conditionals[i + 1]
+            if next_cond && conditions_are_negated?(cond[:condition], next_cond[:condition])
+              # Merge: (!cond ? "classA" : "") + (cond ? "classB" : "") → (cond ? "classB" : "classA")
+              conditional_exprs << s(:if, next_cond[:condition],
+                s(:str, " #{next_cond[:class]}"),
+                s(:str, " #{cond[:class]}"))
+              skip_next = true
+            elsif next_cond && conditions_are_negated?(next_cond[:condition], cond[:condition])
+              # Same but reversed: (cond ? "classA" : "") + (!cond ? "classB" : "")
+              conditional_exprs << s(:if, cond[:condition],
+                s(:str, " #{cond[:class]}"),
+                s(:str, " #{next_cond[:class]}"))
+              skip_next = true
+            else
+              conditional_exprs << s(:if, cond[:condition],
+                s(:str, " #{cond[:class]}"),
+                s(:str, ''))
+            end
+          end
+
+          # Combine into a single expression
+          if conditional_exprs.length == 1
+            combined = conditional_exprs.first
+          else
+            # Join multiple conditionals with +
+            combined = conditional_exprs.reduce do |acc, expr|
+              s(:send, acc, :+, expr)
+            end
+          end
+
+          # Build: "static" + conditionals
+          if static_part.length > 0
+            full_expr = s(:send, s(:str, static_part), :+, combined)
+          else
+            full_expr = combined
+          end
+
+          # Return template for embedding: class="${...}"
+          [nil, full_expr]
+        end
+
+        # Check if two conditions are negations of each other
+        # a is (send b :!) or b is (send a :!)
+        def conditions_are_negated?(a, b)
+          return false unless a.respond_to?(:type) && b.respond_to?(:type)
+          (a.type == :send && a.children[1] == :! && a.children[0] == b) ||
+          (b.type == :send && b.children[1] == :! && b.children[0] == a)
+        end
+
+        # Build a navigation link
+        def build_nav_link(text_node, path_node, css_class = nil, class_node = nil)
+          # Handle model object as path: link_to "Show", @article or link_to "Show", article
+          if path_node.type == :ivar
+            # Instance variable: @article -> article_path(article)
+            model_name = path_node.children.first.to_s.sub(/^@/, '')
+            path_helper = "#{model_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            path_expr = s(:send, nil, path_helper, s(:lvar, model_name.to_sym))
+          elsif path_node.type == :lvar
+            # Local variable: use polymorphic_path for runtime route resolution
+            @erb_needs_polymorphic_path = true
+            path_expr = s(:send, nil, :polymorphic_path, path_node)
+          elsif path_node.type == :send && path_node.children[0].nil? && path_node.children.length == 2
+            # Bare method call (parser treats partial locals as method calls)
+            method_name = path_node.children[1].to_s
+            if method_name.end_with?('_path', '_url')
+              # Already a path/url helper (e.g., articles_path) - use as-is
+              path_helper = method_name.to_sym
+              @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+              path_expr = s(:send, nil, path_helper)
+            else
+              # Model name: use polymorphic_path for runtime route resolution
+              @erb_needs_polymorphic_path = true
+              path_expr = s(:send, nil, :polymorphic_path, s(:lvar, method_name.to_sym))
+            end
+          elsif path_node.type == :array && path_node.children.length == 2
+            # Nested resource: [@article, comment] -> article_comment_path(article, comment)
+            parent, child = path_node.children
+            # Extract parent name from different node types
+            parent_name = case parent.type
+              when :ivar then parent.children.first.to_s.sub(/^@/, '')
+              when :lvar then parent.children.first.to_s
+              when :send then parent.children[1].to_s  # e.g., comment.article -> "article"
+              else parent.children.first.to_s
+            end
+            child_name = child.type == :ivar ? child.children.first.to_s.sub(/^@/, '') : child.children.first.to_s
+            # Generate nested path helper: article_comment_path (Rails convention)
+            path_helper = "#{parent_name}_#{child_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            parent_arg = parent.type == :ivar ? s(:lvar, parent.children.first.to_s.sub(/^@/, '').to_sym) : parent
+            child_arg = child.type == :ivar ? s(:lvar, child.children.first.to_s.sub(/^@/, '').to_sym) : child
+            path_expr = s(:send, nil, path_helper, parent_arg, child_arg)
+          elsif path_node.type == :send && path_node.children[0] && path_node.children.length == 2
+            # Attribute access on object: person.studio -> polymorphic_path(person.studio)
+            @erb_needs_polymorphic_path = true
+            path_expr = s(:send, nil, :polymorphic_path, process(path_node))
+          else
+            path_expr = process(path_node)
+
+            # Ensure path helpers without arguments are called as functions
+            if path_node.type == :send && path_node.children[0].nil? && path_node.children.length == 2
+              path_expr = s(:send, nil, path_node.children[1])
+            end
+          end
+
+          # Check for conditional classes
+          has_conditionals = false
+          if class_node
+            result = extract_class_with_conditions(class_node)
+            has_conditionals = result && result[:conditionals].any?
+          end
+
+          if has_conditionals
+            # Dynamic class with conditionals - generate runtime expression
+            return build_nav_link_with_dynamic_class(text_node, path_node, path_expr, class_node)
+          end
+
+          # Build static class attribute string - Rails puts class before href
+          class_attr = css_class ? "class=\"#{css_class}\" " : ""
+
+          # Generate standard href links - Turbo Drive intercepts clicks automatically
+          # Match Rails attribute order: class before href
+          if text_node.type == :str && path_node.type == :str
+            text_str = text_node.children[0]
+            path_str = path_node.children[0]
+            s(:str, "<a #{class_attr}href=\"#{path_str}\">#{text_str}</a>")
+          elsif text_node.type == :str
+            text_str = text_node.children[0]
+            s(:dstr,
+              s(:str, "<a #{class_attr}href=\""),
+              s(:begin, path_expr),
+              s(:str, "\">#{text_str}</a>"))
+          else
+            text_expr = s(:send, nil, :escapeHTML, process(text_node))
+            s(:dstr,
+              s(:str, "<a #{class_attr}href=\""),
+              s(:begin, path_expr),
+              s(:str, "\">"),
+              s(:begin, text_expr),
+              s(:str, '</a>'))
+          end
+        end
+
+        # Build a navigation link with dynamic/conditional class attribute
+        def build_nav_link_with_dynamic_class(text_node, path_node, path_expr, class_node)
+          result = extract_class_with_conditions(class_node)
+          static_part = result[:static].join(' ')
+
+          # Build conditional expressions: condition ? ' class-name' : ''
+          conditional_exprs = result[:conditionals].map do |cond|
+            s(:if, cond[:condition],
+              s(:str, " #{cond[:class]}"),
+              s(:str, ''))
+          end
+
+          # Combine conditionals
+          if conditional_exprs.length == 1
+            combined = conditional_exprs.first
+          else
+            combined = conditional_exprs.reduce do |acc, expr|
+              s(:send, acc, :+, expr)
+            end
+          end
+
+          # Build full class expression: "static" + conditionals
+          if static_part.length > 0
+            class_expr = s(:send, s(:str, static_part), :+, combined)
+          else
+            class_expr = combined
+          end
+
+          text_str = text_node.type == :str ? text_node.children[0] : nil
+          text_expr = text_str ? nil : process(text_node)
+
+          # Generate standard href links - Turbo Drive intercepts clicks automatically
+          # Match Rails attribute order: class before href
+          if text_str && path_node.type == :str
+            path_str = path_node.children[0]
+            s(:dstr,
+              s(:str, '<a class="'),
+              s(:begin, class_expr),
+              s(:str, "\" href=\"#{path_str}\">#{text_str}</a>"))
+          elsif text_str
+            s(:dstr,
+              s(:str, '<a class="'),
+              s(:begin, class_expr),
+              s(:str, '" href="'),
+              s(:begin, path_expr),
+              s(:str, "\">#{text_str}</a>"))
+          else
+            s(:dstr,
+              s(:str, '<a class="'),
+              s(:begin, class_expr),
+              s(:str, '" href="'),
+              s(:begin, path_expr),
+              s(:str, '">'),
+              s(:begin, text_expr),
+              s(:str, '</a>'))
+          end
+        end
+
+        # Build a delete link with confirmation using Turbo data attributes
+        # Turbo intercepts the link click and sends DELETE request automatically
+        def build_delete_link(text_node, path_node, confirm_msg, css_class = nil)
+          # Handle model object as path: link_to "Delete", @article, method: :delete
+          if path_node.type == :ivar
+            # Instance variable: @article -> article_path(article)
+            model_name = path_node.children.first.to_s.sub(/^@/, '')
+            path_helper = "#{model_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            path_expr = s(:send, nil, path_helper, s(:lvar, model_name.to_sym))
+          elsif path_node.type == :lvar
+            # Local variable: use polymorphic_path for runtime route resolution
+            @erb_needs_polymorphic_path = true
+            path_expr = s(:send, nil, :polymorphic_path, path_node)
+          elsif path_node.type == :array && path_node.children.length == 2
+            # Nested resource: [@article, comment] -> article_comment_path(article, comment)
+            parent, child = path_node.children
+            # Extract parent name from different node types
+            parent_name = case parent.type
+              when :ivar then parent.children.first.to_s.sub(/^@/, '')
+              when :lvar then parent.children.first.to_s
+              when :send then parent.children[1].to_s  # e.g., comment.article -> "article"
+              else parent.children.first.to_s
+            end
+            child_name = child.type == :ivar ? child.children.first.to_s.sub(/^@/, '') : child.children.first.to_s
+            # Generate nested path helper: article_comment_path (Rails convention)
+            path_helper = "#{parent_name}_#{child_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            parent_arg = parent.type == :ivar ? s(:lvar, parent.children.first.to_s.sub(/^@/, '').to_sym) : parent
+            child_arg = child.type == :ivar ? s(:lvar, child.children.first.to_s.sub(/^@/, '').to_sym) : child
+            path_expr = s(:send, nil, path_helper, parent_arg, child_arg)
+          else
+            path_expr = process(path_node)
+          end
+          confirm_str = confirm_msg ? confirm_msg.children[0] : 'Are you sure?'
+
+          # Build class attribute - Rails puts class before href
+          class_attr = css_class ? "class=\"#{css_class}\" " : ""
+
+          # Build Turbo data attributes for delete method and confirmation
+          turbo_attrs = " data-turbo-method=\"delete\" data-turbo-confirm=\"#{confirm_str}\""
+
+          text_str = text_node.type == :str ? text_node.children[0] : nil
+
+          # Generate link with Turbo data attributes - Turbo handles the DELETE request
+          # Match Rails attribute order: class before href
+          if text_str && path_node.type == :str
+            path_str = path_node.children[0]
+            s(:str, "<a #{class_attr}href=\"#{path_str}\"#{turbo_attrs}>#{text_str}</a>")
+          elsif text_str
+            s(:dstr,
+              s(:str, "<a #{class_attr}href=\""),
+              s(:begin, path_expr),
+              s(:str, "\"#{turbo_attrs}>#{text_str}</a>"))
+          else
+            text_expr = process(text_node)
+            s(:dstr,
+              s(:str, "<a #{class_attr}href=\""),
+              s(:begin, path_expr),
+              s(:str, "\"#{turbo_attrs}>"),
+              s(:begin, text_expr),
+              s(:str, '</a>'))
+          end
+        end
+
+        # Process button_to helper
+        # button_to "Destroy", @article, method: :delete, class: "btn", form_class: "inline"
+        def process_button_to(args)
+          text_node = args[0]
+          path_node = args[1]
+          options = args[2] if args.length > 2
+
+          # Extract options
+          http_method = :post
+          confirm_msg = nil
+          confirm_on_form = false  # true when confirm comes from form: { data: turbo_confirm }
+          css_class = nil
+          form_class = nil
+          form_params = []
+          disabled_node = nil
+
+          if options&.type == :hash
+            options.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym
+                case key.children[0]
+                when :method
+                  http_method = value.children[0] if value.type == :sym
+                when :class
+                  css_class = extract_class_value(value)
+                when :form_class
+                  form_class = extract_class_value(value)
+                when :form
+                  # form: { class: "inline", data: { turbo_confirm: "..." } }
+                  if value.type == :hash
+                    value.children.each do |form_pair|
+                      form_key = form_pair.children[0]
+                      form_value = form_pair.children[1]
+                      if form_key.type == :sym && form_key.children[0] == :class
+                        form_class = extract_class_value(form_value)
+                      elsif form_key.type == :sym && form_key.children[0] == :data
+                        if form_value.type == :hash
+                          form_value.children.each do |data_pair|
+                            data_key = data_pair.children[0]
+                            data_value = data_pair.children[1]
+                            if data_key.type == :sym &&
+                               [:confirm, :turbo_confirm].include?(data_key.children[0])
+                              confirm_msg = data_value if data_value.type == :str
+                              confirm_on_form = true
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                when :params
+                  # params: { key: value, ... } → hidden inputs
+                  if value.type == :hash
+                    value.children.each do |param_pair|
+                      param_key = param_pair.children[0]
+                      param_value = param_pair.children[1]
+                      if param_key.type == :sym
+                        form_params << { name: param_key.children[0].to_s, value: param_value }
+                      end
+                    end
+                  end
+                when :disabled
+                  disabled_node = value
+                when :data
+                  if value.type == :hash
+                    value.children.each do |data_pair|
+                      data_key = data_pair.children[0]
+                      data_value = data_pair.children[1]
+                      if data_key.type == :sym &&
+                         [:confirm, :turbo_confirm].include?(data_key.children[0])
+                        confirm_msg = data_value if data_value.type == :str
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+
+          text_str = text_node.type == :str ? text_node.children[0] : 'Submit'
+          confirm_str = confirm_msg ? confirm_msg.children[0] : 'Are you sure?'
+
+          if http_method == :delete
+            build_delete_button(text_str, path_node, confirm_str, css_class, form_class, form_params, confirm_on_form, disabled_node)
+          else
+            build_form_button(text_str, path_node, http_method, css_class, form_class, form_params)
+          end
+        end
+
+        # Build a delete button using Turbo-compatible form
+        # Turbo intercepts the form submission and handles the DELETE request
+        def build_delete_button(text_str, path_node, confirm_str, css_class = nil, form_class = nil, form_params = [], confirm_on_form = false, disabled_node = nil)
+          # Build class attributes - Rails uses "button_to" as default form class
+          # When disabled, Rails adds disabled:opacity-50 disabled:cursor-not-allowed classes
+          if disabled_node && css_class
+            css_class = "#{css_class} disabled:opacity-50 disabled:cursor-not-allowed"
+          end
+          btn_class_attr = css_class ? " class=\"#{css_class}\"" : ""
+          form_class_attr = " class=\"#{form_class || 'button_to'}\""
+
+          # Convert model object to path helper call
+          if path_node&.type == :lvar
+            # Local variable: use polymorphic_path for runtime route resolution
+            @erb_needs_polymorphic_path = true
+            path_expr = s(:send, nil, :polymorphic_path, path_node)
+          elsif path_node&.type == :ivar
+            model_name = path_node.children.first.to_s.sub(/^@/, '')
+            path_helper = "#{model_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            # In ERB context, ivars are passed as locals
+            path_expr = s(:send, nil, path_helper, s(:lvar, model_name.to_sym))
+          elsif path_node&.type == :send && path_node.children[0].nil? && path_node.children.length == 2
+            # Bare method call (parser treats partial locals as method calls)
+            method_name = path_node.children[1].to_s
+            if method_name.end_with?('_path', '_url')
+              # Already a path/url helper (e.g., articles_path) - use as-is
+              path_helper = method_name.to_sym
+              @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+              path_expr = s(:send, nil, path_helper)
+            else
+              # Model name: use polymorphic_path for runtime route resolution
+              @erb_needs_polymorphic_path = true
+              path_expr = s(:send, nil, :polymorphic_path, s(:lvar, method_name.to_sym))
+            end
+          elsif path_node&.type == :array && path_node.children.length == 2
+            # Nested resource: [@article, comment] -> article_comment_path(article, comment)
+            # or [comment.article, comment] -> article_comment_path(comment.article_id, comment)
+            parent, child = path_node.children
+            # Extract parent name from different node types
+            parent_name = case parent.type
+              when :ivar then parent.children.first.to_s.sub(/^@/, '')
+              when :lvar then parent.children.first.to_s
+              when :send then parent.children[1].to_s  # e.g., comment.article -> "article"
+              else parent.children.first.to_s
+            end
+            # Extract child name from different node types
+            child_name = case child.type
+              when :ivar then child.children.first.to_s.sub(/^@/, '')
+              when :lvar then child.children.first.to_s
+              when :send then child.children[1].to_s  # send node: [receiver, method_name, ...]
+              else child.children.first.to_s
+            end
+            # Generate nested path helper: article_comment_path (Rails convention)
+            path_helper = "#{parent_name}_#{child_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            # Convert ivars to lvars for ERB context
+            # For association access like comment.article, use comment.article_id instead
+            # (associations return Promises, but _id is a sync attribute)
+            if parent.type == :send && parent.children[0] && parent.children[1]
+              # Pattern: receiver.association -> receiver.association_id
+              receiver = parent.children[0]
+              assoc_name = parent.children[1]
+              parent_arg = s(:attr, process(receiver), "#{assoc_name}_id".to_sym)
+            elsif parent.type == :ivar
+              parent_arg = s(:lvar, parent.children.first.to_s.sub(/^@/, '').to_sym)
+            else
+              parent_arg = process(parent)
+            end
+            child_arg = child.type == :ivar ? s(:lvar, child.children.first.to_s.sub(/^@/, '').to_sym) : process(child)
+            path_expr = s(:send, nil, path_helper, parent_arg, child_arg)
+          else
+            path_expr = process(path_node)
+          end
+
+          # Place data-turbo-confirm on form or button depending on source
+          form_turbo = confirm_on_form ? " data-turbo-confirm=\"#{confirm_str}\"" : ""
+          btn_turbo = confirm_on_form ? "" : " data-turbo-confirm=\"#{confirm_str}\""
+
+          # Build hidden inputs for params
+          param_inputs = []
+          form_params.each do |param|
+            if param[:value].type == :str
+              param_inputs << s(:str, "<input type=\"hidden\" name=\"#{param[:name]}\" value=\"#{param[:value].children[0]}\">")
+            else
+              param_inputs << s(:str, "<input type=\"hidden\" name=\"#{param[:name]}\" value=\"")
+              param_inputs << s(:begin, process(param[:value]))
+              param_inputs << s(:str, "\">")
+            end
+          end
+
+          # Build disabled attribute for button
+          btn_disabled = ""
+          btn_disabled_parts = nil
+          if disabled_node
+            if disabled_node.type == :true
+              btn_disabled = " disabled=\"disabled\""
+            elsif disabled_node.type != :false
+              # Dynamic disabled value — generate conditional
+              btn_disabled_parts = s(:if, process(disabled_node),
+                s(:str, ' disabled="disabled"'),
+                s(:str, ''))
+            end
+          end
+
+          # Generate form with action and method - Turbo handles the submission
+          # Include authenticity_token for CSRF protection
+          # Rails order: form, _method input, button, params inputs, authenticity_token input
+          if btn_disabled_parts
+            parts = [
+              s(:str, "<form#{form_class_attr}#{form_turbo} method=\"post\" action=\""),
+              s(:begin, path_expr),
+              s(:str, "\"><input type=\"hidden\" name=\"_method\" value=\"delete\" autocomplete=\"off\"><button#{btn_class_attr}#{btn_turbo}"),
+              s(:begin, btn_disabled_parts),
+              s(:str, " type=\"submit\">#{text_str}</button>")
+            ]
+          else
+            parts = [
+              s(:str, "<form#{form_class_attr}#{form_turbo} method=\"post\" action=\""),
+              s(:begin, path_expr),
+              s(:str, "\"><input type=\"hidden\" name=\"_method\" value=\"delete\" autocomplete=\"off\"><button#{btn_class_attr}#{btn_disabled}#{btn_turbo} type=\"submit\">#{text_str}</button>")
+            ]
+          end
+          parts.push(*param_inputs)
+          parts << s(:str, "<input type=\"hidden\" name=\"authenticity_token\" value=\"")
+          parts << s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, '')))
+          parts << s(:str, "\"></form>")
+
+          s(:dstr, *parts)
+        end
+
+        # Build a regular form button
+        def build_form_button(text_str, path_node, http_method, css_class = nil, form_class = nil, form_params = [])
+          path_expr = process(path_node)
+
+          # Build class attributes - Rails uses "button_to" as default form class
+          btn_class_attr = css_class ? " class=\"#{css_class}\"" : ""
+          form_class_attr = " class=\"#{form_class || 'button_to'}\""
+
+          # Build hidden inputs for params
+          param_inputs = []
+          form_params.each do |param|
+            if param[:value].type == :str
+              # Static value
+              param_inputs << s(:str, "<input type=\"hidden\" name=\"#{param[:name]}\" value=\"#{param[:value].children[0]}\">")
+            else
+              # Dynamic value
+              param_inputs << s(:str, "<input type=\"hidden\" name=\"#{param[:name]}\" value=\"")
+              param_inputs << s(:begin, process(param[:value]))
+              param_inputs << s(:str, "\">")
+            end
+          end
+
+          # Include authenticity_token for CSRF protection
+          # Rails order: form, button, params inputs, authenticity_token input
+          parts = [
+            s(:str, "<form#{form_class_attr} method=\""),
+            s(:str, http_method.to_s),
+            s(:str, "\" action=\""),
+            s(:begin, path_expr),
+            s(:str, "\"><button#{btn_class_attr} type=\"submit\">#{text_str}</button>")
+          ]
+          parts.push(*param_inputs)
+          parts << s(:str, "<input type=\"hidden\" name=\"authenticity_token\" value=\"")
+          parts << s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, '')))
+          parts << s(:str, "\"></form>")
+
+          s(:dstr, *parts)
+        end
+
+        # Process button_to block form
+        # button_to path, options do ... end
+        # Block provides the button content (e.g., SVG icon) instead of text
+        def process_button_to_block(block_send, block_args, block_body)
+          # block_send is: send(nil, :button_to, path, options_hash)
+          args = block_send.children[2..-1] || []
+          return nil if args.empty?
+
+          path_node = args[0]
+          options = args[1]
+
+          # Extract options (same as non-block form)
+          http_method = :post
+          confirm_msg = nil
+          css_class = nil
+          form_class = nil
+
+          if options&.type == :hash
+            options.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym
+                case key.children[0]
+                when :method
+                  http_method = value.children[0] if value.type == :sym
+                when :class
+                  css_class = extract_class_value(value)
+                when :form_class
+                  form_class = extract_class_value(value)
+                when :data
+                  if value.type == :hash
+                    value.children.each do |data_pair|
+                      data_key = data_pair.children[0]
+                      data_value = data_pair.children[1]
+                      if data_key.type == :sym &&
+                         [:confirm, :turbo_confirm].include?(data_key.children[0])
+                        confirm_msg = data_value if data_value.type == :str
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+
+          confirm_str = confirm_msg ? confirm_msg.children[0] : nil
+
+          # Extract block body content (static HTML strings appended to _buf)
+          # Block body nodes are: (send (lvar :_buf) :<< (send (dstr ...) :freeze))
+          block_content = ""
+          if block_body
+            children = block_body.type == :begin ? block_body.children : [block_body]
+            children.each do |child|
+              next unless child.type == :send
+              ct, cm, carg = child.children
+              next unless ct&.type == :lvar && cm == :<<
+              # Strip .freeze wrapper
+              str_node = (carg&.type == :send && carg.children[1] == :freeze) ? carg.children[0] : carg
+              if str_node&.type == :str
+                block_content += str_node.children[0]
+              elsif str_node&.type == :dstr
+                str_node.children.each do |part|
+                  block_content += part.children[0] if part.type == :str
+                end
+              end
+            end
+          end
+          block_content = block_content.strip
+
+          # Build the button_to form using the same path resolution as non-block form
+          btn_class_attr = css_class ? " class=\"#{css_class}\"" : ""
+          form_class_attr = " class=\"#{form_class || 'button_to'}\""
+          turbo_confirm = confirm_str ? " data-turbo-confirm=\"#{confirm_str}\"" : ""
+
+          # Resolve path expression (reuse logic from build_delete_button)
+          path_expr = resolve_button_path(path_node)
+
+          if http_method == :delete
+            # Form with hidden _method field for DELETE
+            form_html = s(:dstr,
+              s(:str, "<form#{form_class_attr}#{turbo_confirm} method=\"post\" action=\""),
+              s(:begin, path_expr),
+              s(:str, "\"><input type=\"hidden\" name=\"_method\" value=\"delete\" autocomplete=\"off\"><button#{btn_class_attr} type=\"submit\">#{block_content}</button><input type=\"hidden\" name=\"authenticity_token\" value=\""),
+              s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, ''))),
+              s(:str, "\"></form>"))
+          else
+            actual_method = (http_method == :get || http_method == :post) ? http_method : :post
+            needs_method_field = ![:get, :post].include?(http_method)
+            method_field = needs_method_field ? "<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">" : ""
+
+            form_html = s(:dstr,
+              s(:str, "<form#{form_class_attr}#{turbo_confirm} method=\"#{actual_method}\" action=\""),
+              s(:begin, path_expr),
+              s(:str, "\">#{method_field}<button#{btn_class_attr} type=\"submit\">#{block_content}</button><input type=\"hidden\" name=\"authenticity_token\" value=\""),
+              s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, ''))),
+              s(:str, "\"></form>"))
+          end
+
+          # Append form HTML to outer buffer
+          s(:op_asgn, s(:lvasgn, @erb_bufvar), :+, form_html)
+        end
+
+        # Resolve path expression for button_to (shared logic)
+        def resolve_button_path(path_node)
+          if path_node&.type == :lvar
+            # Local variable: use polymorphic_path for runtime route resolution
+            @erb_needs_polymorphic_path = true
+            s(:send, nil, :polymorphic_path, path_node)
+          elsif path_node&.type == :ivar
+            model_name = path_node.children.first.to_s.sub(/^@/, '')
+            path_helper = "#{model_name}_path".to_sym
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+            s(:lvar, model_name.to_sym)
+          elsif path_node&.type == :send && path_node.children[0].nil?
+            method_name = path_node.children[1].to_s
+            if method_name.end_with?('_path', '_url')
+              # Convert _url helpers to _path (browser only has _path helpers)
+              path_helper = method_name.sub(/_url$/, '_path').to_sym
+              @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+              if path_node.children.length > 2
+                # Path helper with args: clip_path(clip)
+                processed_args = path_node.children[2..-1].map { |a| process(a) }
+                s(:send!, nil, path_helper, *processed_args)
+              else
+                # Path helper with no args: clips_path() — force parens
+                s(:send!, nil, path_helper)
+              end
+            else
+              process(path_node)
+            end
+          else
+            process(path_node)
+          end
+        end
+
+        # Process truncate helper
+        # Process number_to_currency helper
+        # number_to_currency(value, delimiter: '', unit: '') -> value.toFixed(2)
+        # number_to_currency(value) -> `$${value.toFixed(2)}`
+        def process_number_to_currency(args)
+          value_node = process(args[0])
+          options_node = args[1]
+
+          unit = '$'
+          precision = 2
+          delimiter = ','
+
+          if options_node&.type == :hash
+            options_node.children.each do |pair|
+              key = pair.children[0]
+              val = pair.children[1]
+              next unless key.type == :sym
+              case key.children[0]
+              when :unit
+                unit = val.children[0].to_s if val.type == :str
+              when :precision
+                precision = val.children[0] if val.type == :int
+              when :delimiter
+                delimiter = val.children[0].to_s if val.type == :str
+              end
+            end
+          end
+
+          # Simple case: no unit, no delimiter — just toFixed
+          if unit == '' && delimiter == ''
+            return s(:send, value_node, :toFixed, s(:int, precision))
+          end
+
+          # General case: format with unit and delimiter
+          s(:send, value_node, :toFixed, s(:int, precision))
+        end
+
+        def process_truncate(args)
+          @erb_view_helpers << :truncate unless @erb_view_helpers.include?(:truncate)
+
+          text_node = args[0]
+          options_node = args[1]
+          text_expr = process(text_node)
+
+          length = 30  # default
+          if options_node&.type == :hash
+            options_node.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym && key.children[0] == :length && value.type == :int
+                length = value.children[0]
+              end
+            end
+          end
+
+          s(:send, nil, :truncate, text_expr, s(:hash, s(:pair, s(:sym, :length), s(:int, length))))
+        end
+
+        # Process pluralize helper
+        # pluralize(count, singular) -> pluralize(count, singular)
+        # pluralize(count, singular, plural) -> pluralize(count, singular, plural)
+        def process_pluralize(args)
+          @erb_view_helpers << :pluralize unless @erb_view_helpers.include?(:pluralize)
+
+          count_node = process(args[0])
+          singular_node = process(args[1])
+
+          if args.length >= 3
+            plural_node = process(args[2])
+            s(:send, nil, :pluralize, count_node, singular_node, plural_node)
+          else
+            s(:send, nil, :pluralize, count_node, singular_node)
+          end
+        end
+
+        # Process turbo_stream_from helper - subscribes to broadcast channel
+        # For browser targets: TurboBroadcast.subscribe("chat_room") || ""
+        # For server targets: inline <script> with WebSocket subscription
+        def process_turbo_stream_from(args)
+          channel_node = process(args[0])
+
+          if browser_target?()
+            # Browser: Use BroadcastChannel API via TurboBroadcast
+            @erb_view_helpers << :TurboBroadcast unless @erb_view_helpers.include?(:TurboBroadcast)
+
+            # subscribe returns the channel object, so use || "" to return empty string
+            s(:or,
+              s(:send, s(:const, nil, :TurboBroadcast), :subscribe, channel_node),
+              s(:str, ''))
+          else
+            # Server targets: Generate inline WebSocket subscription script
+            # This script runs in the browser after SSR, connecting to the server's WebSocket
+            build_turbo_stream_websocket_script(channel_node)
+          end
+        end
+
+        # Build <turbo-cable-stream-source> element for server-side rendering
+        # This element is picked up by @hotwired/turbo-rails JavaScript which
+        # subscribes to the channel via Action Cable WebSocket
+        # Format: <turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="...">
+        # The signed-stream-name is base64-encoded JSON of the stream name (no signature needed for our server)
+        def build_turbo_stream_websocket_script(channel_node)
+          @erb_view_helpers << :turbo_stream_from unless @erb_view_helpers.include?(:turbo_stream_from)
+
+          # Call the turbo_stream_from helper function which returns the HTML element
+          s(:send, nil, :turbo_stream_from, channel_node)
+        end
+
+        # Process turbo_stream.replace, turbo_stream.append, etc.
+        # turbo_stream.replace "target" do ... end
+        # -> <turbo-stream action="replace" target="..."><template>...</template></turbo-stream>
+        def process_turbo_stream_action(action, target_arg, block_body)
+          # Get target as string
+          target_str = if target_arg&.type == :str
+            target_arg.children[0]
+          else
+            nil
+          end
+
+          statements = []
+
+          # Add opening turbo-stream tag to buffer
+          if target_str
+            statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+              s(:str, "<turbo-stream action=\"#{action}\" target=\"#{target_str}\"><template>"))
+          else
+            # Dynamic target
+            target_expr = process(target_arg)
+            statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+              s(:dstr,
+                s(:str, "<turbo-stream action=\"#{action}\" target=\""),
+                s(:begin, target_expr),
+                s(:str, "\"><template>")))
+          end
+
+          # Process block body (adds to buffer via form_with etc.)
+          if block_body
+            if block_body.type == :begin
+              block_body.children.each do |child|
+                processed = process(child)
+                statements << processed if processed
+              end
+            else
+              processed = process(block_body)
+              statements << processed if processed
+            end
+          end
+
+          # Add closing turbo-stream tag to buffer
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+            s(:str, "</template></turbo-stream>"))
+
+          # Return a begin node containing all statements
+          if statements.length == 1
+            statements.first
+          else
+            s(:begin, *statements)
+          end
+        end
+
+        # Process turbo_stream shorthand form (without block)
+        # turbo_stream.prepend "photos", @photo
+        # -> <turbo-stream action="prepend" target="photos"><template>..._photo partial...</template></turbo-stream>
+        def process_turbo_stream_shorthand(action, args)
+          target_arg = args[0]
+          model_arg = args[1]  # Optional - if present, render the model's partial
+
+          # Get target as string
+          target_str = if target_arg&.type == :str
+            target_arg.children[0]
+          elsif target_arg&.type == :sym
+            target_arg.children[0].to_s
+          else
+            nil
+          end
+
+          statements = []
+
+          # Add opening turbo-stream tag to buffer
+          if target_str
+            statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+              s(:str, "<turbo-stream action=\"#{action}\" target=\"#{target_str}\"><template>"))
+          else
+            # Dynamic target
+            target_expr = process(target_arg)
+            statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+              s(:dstr,
+                s(:str, "<turbo-stream action=\"#{action}\" target=\""),
+                s(:begin, target_expr),
+                s(:str, "\"><template>")))
+          end
+
+          # If model is provided, render its partial
+          if model_arg
+            # For @photo, infer partial as "photos/_photo" and local as "photo"
+            # The model_arg is typically an ivar like s(:ivar, :@photo)
+            if model_arg.type == :ivar
+              ivar_name = model_arg.children[0].to_s.sub('@', '')  # "photo"
+
+              # Track that we need the views module import
+              # The view module name follows the pattern: PhotoViews for photos
+              plural_name = "#{ivar_name}s"
+              view_module = "#{plural_name.split('_').map(&:capitalize).join.chomp('s')}Views"
+              partial_method = "_#{ivar_name}"
+              local_var = ivar_name
+
+              # Add view module to imports
+              view_info = { module: view_module, resource: plural_name }
+              @erb_view_modules << view_info unless @erb_view_modules.any? { |v| v[:module] == view_module }
+
+              # Generate: _buf += PhotoViews._photo({$context, photo})
+              statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                s(:send,
+                  s(:const, nil, view_module.to_sym),
+                  partial_method.to_sym,
+                  s(:hash,
+                    s(:pair, s(:sym, :"$context"), context_gvar),
+                    s(:pair, s(:sym, local_var.to_sym), s(:lvar, local_var.to_sym)))))
+            else
+              # For other expressions, just process and add to buffer
+              statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                s(:send, process(model_arg), :toString))
+            end
+          end
+
+          # Add closing turbo-stream tag to buffer
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+            s(:str, "</template></turbo-stream>"))
+
+          # Return a begin node containing all statements
+          if statements.length == 1
+            statements.first
+          else
+            s(:begin, *statements)
+          end
+        end
+
+        # Process ERB block content into a string expression
+        def process_erb_content(node)
+          return s(:str, '') unless node
+
+          case node.type
+          when :str
+            node
+          when :begin
+            # Multiple statements - process each and concatenate
+            parts = node.children.map { |child| process_erb_content(child) }
+            combine_string_parts(parts)
+          when :send
+            # Check for buffer operations
+            target, method, *args = node.children
+            if target&.type == :lvar && method == :append=
+              # _buf.append= expr -> process expr
+              process(args.first)
+            else
+              process(node)
+            end
+          else
+            process(node)
+          end
+        end
+
+        # Combine multiple string parts into a single string or dstr
+        def combine_string_parts(parts)
+          return s(:str, '') if parts.empty?
+          return parts.first if parts.length == 1
+
+          # Check if all parts are static strings
+          if parts.all? { |p| p.type == :str }
+            combined = parts.map { |p| p.children[0] }.join
+            return s(:str, combined)
+          end
+
+          # Build dstr with all parts
+          dstr_children = []
+          parts.each do |part|
+            if part.type == :str
+              dstr_children << part
+            elsif part.type == :dstr
+              dstr_children.concat(part.children)
+            else
+              dstr_children << s(:begin, part)
+            end
+          end
+          s(:dstr, *dstr_children)
+        end
+
+        # Process dom_id helper
+        # dom_id(article) -> dom_id(article)
+        # dom_id(article, :edit) -> dom_id(article, "edit")
+        def process_dom_id(args)
+          @erb_view_helpers << :dom_id unless @erb_view_helpers.include?(:dom_id)
+
+          record_node = process(args[0])
+
+          if args.length >= 2
+            prefix_node = process(args[1])
+            s(:send, nil, :dom_id, record_node, prefix_node)
+          else
+            s(:send, nil, :dom_id, record_node)
+          end
+        end
+
+        # Process notice helper - reads from flash and returns message
+        # <%= notice %> -> context.flash.consumeNotice()
+        def process_notice
+          # Access flash through context parameter (no import needed)
+          s(:send, s(:attr, context_ref, :flash), :consumeNotice)
+        end
+
+        # Process content_for helper
+        # <% content_for :title, "Articles" %> -> context.contentFor.title = "Articles"
+        # <%= content_for(:title) %> -> context.contentFor.title
+        def process_content_for(args)
+          return s(:str, '') if args.empty?
+
+          key = args[0]
+          value = args[1]
+
+          # Only handle symbol keys for now
+          return s(:str, '') unless key.type == :sym
+          key_name = key.children[0]
+
+          if value
+            # Setting content: content_for :title, "Articles"
+            # context.contentFor.title = "Articles"
+            s(:send,
+              s(:attr, context_ref, :contentFor),
+              "#{key_name}=".to_sym,
+              process(value))
+          else
+            # Getting content: content_for(:title)
+            # context.contentFor.title ?? ""
+            s(:or,
+              s(:attr, s(:attr, context_ref, :contentFor), key_name),
+              s(:str, ''))
+          end
+        end
+
+        # Process asset tags (image_tag, video_tag, audio_tag, asset_path, etc.)
+        # These generate Vite imports for fingerprinted asset URLs
+        #
+        # image_tag "logo.png", alt: "Logo"
+        #   -> import _asset_logo_png from '../../assets/images/logo.png';
+        #   -> `<img src="${_asset_logo_png}" alt="Logo">`
+        #
+        # Extract HTML attributes from remaining args (hash argument)
+        # Returns a formatted attribute string like ' class="foo" id="bar"'
+        def extract_tag_attrs(args)
+          attrs = []
+          if args[1]&.type == :hash
+            args[1].children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym && value.type == :str
+                attrs << [key.children[0], value.children[0]]
+              elsif key.type == :sym && value.type == :true
+                attrs << [key.children[0], true]
+              elsif key.type == :sym && value.type == :false
+                attrs << [key.children[0], false]
+              end
+            end
+          end
+
+          attr_str = attrs.map { |k, v|
+            v == true ? k.to_s : "#{k}=\"#{v}\""
+          }.join(' ')
+          attr_str.empty? ? '' : " #{attr_str}"
+        end
+
+        # asset_path "file.pdf"
+        #   -> import _asset_file_pdf from '../../assets/file.pdf';
+        #   -> _asset_file_pdf
+        def process_asset_tag(tag_type, args)
+          first_arg = args[0]
+
+          unless first_arg&.type == :str
+            # Non-string argument: generate HTML tag with dynamic src expression
+            processed_src = process(first_arg)
+            attr_part = extract_tag_attrs(args)
+
+            return case tag_type
+            when :image_tag
+              s(:dstr, s(:str, '<img src="'), s(:begin, processed_src), s(:str, "\"#{attr_part}>"))
+            when :asset_path, :image_path
+              processed_src
+            when :video_tag
+              s(:dstr, s(:str, '<video src="'), s(:begin, processed_src), s(:str, "\"#{attr_part}></video>"))
+            when :audio_tag
+              s(:dstr, s(:str, '<audio src="'), s(:begin, processed_src), s(:str, "\"#{attr_part}></audio>"))
+            when :favicon_link_tag
+              s(:dstr, s(:str, '<link rel="icon" href="'), s(:begin, processed_src), s(:str, "\"#{attr_part}>"))
+            end
+          end
+
+          asset_path = first_arg.children[0]
+
+          # Generate a valid JS variable name from the asset path
+          # "photos/hero.jpg" -> "_asset_photos_hero_jpg"
+          var_name = "_asset_#{asset_path.gsub(/[^a-zA-Z0-9]/, '_')}"
+
+          # Determine the asset directory based on tag type
+          asset_dir = case tag_type
+          when :image_tag, :image_path
+            'images'
+          when :video_tag
+            'videos'
+          when :audio_tag
+            'audio'
+          when :favicon_link_tag
+            'images'
+          else
+            nil # asset_path uses no subdirectory
+          end
+
+          # Build the import path relative to app/assets/
+          import_path = asset_dir ? "#{asset_dir}/#{asset_path}" : asset_path
+
+          # For non-browser targets (node, bun, etc.), use static URL paths
+          # instead of Vite imports.
+          # For browser targets, track asset for Vite import generation.
+          target = @options[:target].to_s
+          server_targets = %w[node bun deno fly electron]
+          if server_targets.include?(target)
+            static_path = "/#{import_path}"
+            attr_part = extract_tag_attrs(args)
+
+            return case tag_type
+            when :image_tag
+              s(:str, "<img src=\"#{static_path}\"#{attr_part}>")
+            when :asset_path, :image_path
+              s(:str, static_path)
+            when :video_tag
+              s(:str, "<video src=\"#{static_path}\"#{attr_part}></video>")
+            when :audio_tag
+              s(:str, "<audio src=\"#{static_path}\"#{attr_part}></audio>")
+            when :favicon_link_tag
+              s(:str, "<link rel=\"icon\" href=\"#{static_path}\"#{attr_part}>")
+            end
+          end
+
+          # Track this asset for import generation (browser/Vite only)
+          @erb_asset_imports << { var_name: var_name, import_path: import_path }
+
+          attr_part = extract_tag_attrs(args)
+
+          # Generate the appropriate output based on tag type
+          case tag_type
+          when :asset_path
+            # Just return the variable reference
+            s(:lvar, var_name.to_sym)
+
+          when :image_tag
+            # Generate: `<img src="${var_name}" alt="..." ...>`
+            s(:dstr,
+              s(:str, '<img src="'),
+              s(:begin, s(:lvar, var_name.to_sym)),
+              s(:str, "\"#{attr_part}>"))
+
+          when :video_tag
+            # Generate: `<video src="${var_name}" ...></video>`
+            s(:dstr,
+              s(:str, '<video src="'),
+              s(:begin, s(:lvar, var_name.to_sym)),
+              s(:str, "\"#{attr_part}></video>"))
+
+          when :audio_tag
+            # Generate: `<audio src="${var_name}" ...></audio>`
+            s(:dstr,
+              s(:str, '<audio src="'),
+              s(:begin, s(:lvar, var_name.to_sym)),
+              s(:str, "\"#{attr_part}></audio>"))
+
+          when :favicon_link_tag
+            # Generate: `<link rel="icon" href="${var_name}">`
+            s(:dstr,
+              s(:str, '<link rel="icon" href="'),
+              s(:begin, s(:lvar, var_name.to_sym)),
+              s(:str, '">'))
+
+          else
+            nil
+          end
+        end
+
+        # Process render partial calls
+        # render "form" -> _form_partial({})
+        # render "form", article: @article -> _form_partial({article})
+        # render partial: "form", locals: { article: @article } -> _form_partial({article})
+        # render @article -> _article_partial({article: @article})
+        def process_render_partial(args)
+          return nil if args.empty?
+
+          first_arg = args[0]
+          locals = {}
+
+          # Determine partial name and locals based on argument patterns
+          partial_name = nil
+
+          if first_arg.type == :str
+            # render "form" or render "form", locals: { ... }
+            # render "solos/form" -> partial in subdirectory
+            full_path = first_arg.children[0]
+            if full_path.include?('/')
+              # Split "solos/form" into directory "solos" and name "form"
+              parts = full_path.split('/')
+              partial_name = parts.pop
+              partial_directory = parts.join('/')
+            else
+              partial_name = full_path
+            end
+
+            # Check for additional hash argument with locals
+            if args[1]&.type == :hash
+              args[1].children.each do |pair|
+                key = pair.children[0]
+                value = pair.children[1]
+                if key.type == :sym
+                  locals[key.children[0]] = value
+                end
+              end
+            end
+
+          elsif first_arg.type == :hash
+            # render partial: "form", locals: { ... }
+            first_arg.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              next unless key.type == :sym
+
+              case key.children[0]
+              when :partial
+                if value.type == :str
+                  full_path = value.children[0]
+                  if full_path.include?('/')
+                    # Split "solos/form" into directory "solos" and name "form"
+                    parts = full_path.split('/')
+                    partial_name = parts.pop
+                    partial_directory = parts.join('/')
+                  else
+                    partial_name = full_path
+                  end
+                end
+              when :locals
+                if value.type == :hash
+                  value.children.each do |local_pair|
+                    local_key = local_pair.children[0]
+                    local_value = local_pair.children[1]
+                    if local_key.type == :sym
+                      locals[local_key.children[0]] = local_value
+                    end
+                  end
+                end
+              end
+            end
+
+          elsif first_arg.type == :ivar
+            # render @article -> renders _article partial with article: @article
+            # render @messages -> renders _message partial for each item (collection)
+            ivar_name = first_arg.children[0].to_s.sub(/^@/, '')
+            partial_name = singularize_partial_name(ivar_name)
+            is_collection = (partial_name != ivar_name)
+            collection_var = first_arg
+            singular_name = partial_name.to_sym
+            locals[singular_name] = s(:lvar, singular_name) if is_collection
+            locals[ivar_name.to_sym] = first_arg unless is_collection
+
+          elsif first_arg.type == :lvar
+            # render article -> renders _article partial with article: article
+            # render messages -> renders _message partial for each item (collection)
+            var_name = first_arg.children[0].to_s
+            partial_name = singularize_partial_name(var_name)
+            is_collection = (partial_name != var_name)
+            collection_var = first_arg
+            singular_name = partial_name.to_sym
+            locals[singular_name] = s(:lvar, singular_name) if is_collection
+            locals[var_name.to_sym] = first_arg unless is_collection
+
+          elsif first_arg.type == :send && first_arg.children[0]
+            # render @article.comments -> renders _comment partial for each item (collection)
+            # render article.comments -> same, method call returning a collection
+            method_name = first_arg.children[1].to_s
+            partial_name = singularize_partial_name(method_name)
+            is_collection = (partial_name != method_name)
+            collection_var = first_arg
+            singular_name = partial_name.to_sym
+            locals[singular_name] = s(:lvar, singular_name) if is_collection
+            # For method calls like @article.comments, the directory is the method name (comments/)
+            partial_directory = method_name if is_collection
+          end
+
+          return nil unless partial_name
+
+          # Track this partial for import generation
+          # Store as hash with name and optional directory for cross-directory partials
+          partial_info = { name: partial_name, directory: partial_directory }
+          unless @erb_partials.any? { |p| p[:name] == partial_name && p[:directory] == partial_directory }
+            @erb_partials << partial_info
+          end
+
+          # Build the partial function call: _form_module.render({$context, article})
+          # Include directory in module name to avoid collisions, replace / with _
+          module_base = partial_directory ? "#{partial_directory}/#{partial_name}" : partial_name
+          module_name = "_#{module_base.gsub('/', '_')}_module".to_sym
+
+          # Build unified props hash with $context, action_name, and locals
+          # Use the appropriate context reference (context in layout mode, $context otherwise)
+          pairs = [s(:pair, s(:sym, :"$context"), context_ref)]
+          # In layouts, action_name comes from context; in views, it's a local
+          is_layout = @options && @options[:layout]
+          if is_layout
+            pairs << s(:pair, s(:sym, :action_name), s(:attr, s(:lvar, :context), :action_name))
+          else
+            pairs << s(:pair, s(:sym, :action_name), s(:lvar, :action_name))
+          end
+          locals.keys.each do |key|
+            pairs << s(:pair, s(:sym, key), process(locals[key]))
+          end
+
+          # Auto-forward caller's remaining props to partials (Rails idiom:
+          # instance variables are automatically available in partials).
+          # Uses ...rest spread so controller props flow through to partials
+          # without the caller needing to know what the partial needs.
+          # Skip in layouts — layouts don't have rest params from controller.
+          is_layout = @options && @options[:layout]
+          if @erb_ivars && !is_layout
+            @erb_needs_rest_forwarding = true
+            pairs << s(:kwsplat, s(:lvar, :_rest))
+          end
+
+          render_call = s(:send, s(:lvar, module_name), :render,
+            s(:hash, *pairs))
+
+          # For collections, wrap in Promise.all().join('')
+          # (await Promise.all(messages.map(message => _message_module.render({...})))).join('')
+          if is_collection
+            # Check if the collection is an association access (returns Promise)
+            # If so, wrap with await first
+            collection_expr = process(collection_var)
+            if association_access?(collection_var)
+              self.erb_mark_async!()
+              # Wrap in begin to get parentheses: (await article.comments).map(...)
+              collection_expr = s(:begin, s(:send, nil, :await, collection_expr))
+            end
+
+            # Each partial render might be async, use Promise.all to await all
+            self.erb_mark_async!()
+            map_expr = s(:send, collection_expr, :map,
+              s(:block,
+                s(:send, nil, :proc),
+                s(:args, s(:arg, singular_name)),
+                render_call))
+
+            # (await Promise.all(map_expr)).join('')
+            s(:send,
+              s(:begin,
+                s(:send, nil, :await,
+                  s(:send, s(:const, nil, :Promise), :all, map_expr))),
+              :join,
+              s(:str, ''))
+          else
+            # Single object render - await in case partial is async
+            self.erb_mark_async!()
+            s(:send, nil, :await, render_call)
+          end
+        end
+
+        # Singularize a variable name for partial lookup (Rails collection rendering convention)
+        # render @messages -> _message partial, render @articles -> _article partial
+        # But render @article stays as _article, render @status stays as _status
+        def singularize_partial_name(name)
+          Ruby2JS::Inflector.singularize(name)
+        end
+
+        # Extract options hash from form field args
+        # Returns options hash with :class_node for dynamic class support
+        def extract_field_options(args)
+          options = {}
+          # Options hash is typically the last argument
+          if args.last&.type == :hash
+            args.last.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym
+                key_name = key.children[0]
+                case key_name
+                when :class
+                  # Store both static value and node for dynamic support
+                  options[:class] = extract_class_value(value)
+                  options[:class_node] = value
+                when :id
+                  options[:id] = value.children[0] if value.type == :str
+                when :style
+                  options[:style] = value.children[0] if value.type == :str
+                when :rows
+                  options[:rows] = value.children[0] if value.type == :int
+                when :cols
+                  options[:cols] = value.children[0] if value.type == :int
+                when :placeholder
+                  options[:placeholder] = value.children[0] if value.type == :str
+                when :disabled
+                  options[:disabled] = true if value.type == :true
+                when :readonly
+                  options[:readonly] = true if value.type == :true
+                when :required
+                  options[:required] = true if value.type == :true
+                when :autofocus
+                  options[:autofocus] = true if value.type == :true
+                when :multiple
+                  options[:multiple] = true if value.type == :true
+                when :min
+                  options[:min] = value.children[0] if [:int, :str].include?(value.type)
+                when :max
+                  options[:max] = value.children[0] if [:int, :str].include?(value.type)
+                when :step
+                  options[:step] = value.children[0] if [:int, :str, :sym].include?(value.type)
+                when :value
+                  options[:value_node] = value
+                when :data
+                  # Handle data: { key: value } -> data-key="value"
+                  if value.type == :hash
+                    options[:data] ||= {}
+                    value.children.each do |data_pair|
+                      data_key = data_pair.children[0]
+                      data_value = data_pair.children[1]
+                      if data_key.type == :sym
+                        # Convert underscores to dashes: chat_target -> chat-target
+                        attr_name = data_key.children[0].to_s.gsub('_', '-')
+                        if data_value.type == :str
+                          options[:data][attr_name] = data_value.children[0]
+                        elsif data_value.type == :true
+                          options[:data][attr_name] = "true"
+                        elsif data_value.type == :false
+                          options[:data][attr_name] = "false"
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+          options
+        end
+
+        # Build HTML attributes string from options hash (static classes only)
+        def build_field_attrs(options)
+          attrs = []
+          attrs << "rows=\"#{options[:rows]}\"" if options[:rows]
+          attrs << "cols=\"#{options[:cols]}\"" if options[:cols]
+          attrs << "class=\"#{options[:class]}\"" if options[:class]
+          attrs << "id=\"#{options[:id]}\"" if options[:id]
+          attrs << "style=\"#{options[:style]}\"" if options[:style]
+          attrs << "placeholder=\"#{options[:placeholder]}\"" if options[:placeholder]
+          attrs << "disabled" if options[:disabled]
+          attrs << "readonly" if options[:readonly]
+          attrs << "required" if options[:required]
+          attrs << "autofocus" if options[:autofocus]
+          attrs << "multiple" if options[:multiple]
+          attrs << "min=\"#{options[:min]}\"" if options[:min]
+          attrs << "max=\"#{options[:max]}\"" if options[:max]
+          attrs << "step=\"#{options[:step]}\"" if options[:step]
+          # Add data-* attributes
+          # Note: use .keys.each for JS compatibility (for...of doesn't work on plain objects)
+          if options[:data]
+            options[:data].keys.each do |key|
+              value = options[:data][key]
+              attrs << "data-#{key}=\"#{value}\""
+            end
+          end
+          attrs.empty? ? "" : " " + attrs.join(" ")
+        end
+
+        # Check if options contain conditional classes
+        def has_conditional_classes?(options)
+          return false unless options[:class_node]
+          result = extract_class_with_conditions(options[:class_node])
+          result && result[:conditionals].any?
+        end
+
+        # Build HTML attributes for dynamic output (supports conditional classes)
+        # Returns [static_attrs_string, dynamic_class_expr_or_nil]
+        def build_field_attrs_dynamic(options)
+          # Build non-class attributes
+          attrs = []
+          attrs << "rows=\"#{options[:rows]}\"" if options[:rows]
+          attrs << "cols=\"#{options[:cols]}\"" if options[:cols]
+          attrs << "id=\"#{options[:id]}\"" if options[:id]
+          attrs << "style=\"#{options[:style]}\"" if options[:style]
+          attrs << "placeholder=\"#{options[:placeholder]}\"" if options[:placeholder]
+          attrs << "disabled" if options[:disabled]
+          attrs << "readonly" if options[:readonly]
+          attrs << "required" if options[:required]
+          attrs << "autofocus" if options[:autofocus]
+          attrs << "multiple" if options[:multiple]
+          attrs << "min=\"#{options[:min]}\"" if options[:min]
+          attrs << "max=\"#{options[:max]}\"" if options[:max]
+          attrs << "step=\"#{options[:step]}\"" if options[:step]
+          # Add data-* attributes
+          # Note: use .keys.each for JS compatibility (for...of doesn't work on plain objects)
+          if options[:data]
+            options[:data].keys.each do |key|
+              value = options[:data][key]
+              attrs << "data-#{key}=\"#{value}\""
+            end
+          end
+
+          static_attrs = attrs.empty? ? "" : " " + attrs.join(" ")
+
+          # Handle class attribute
+          if options[:class_node]
+            static_class_attr, dynamic_class_expr = build_dynamic_class_attr(options[:class_node])
+            if dynamic_class_expr
+              # Has conditional classes - return dynamic expression
+              return [static_attrs, dynamic_class_expr]
+            elsif static_class_attr && static_class_attr.length > 0
+              # Static class only — rows/cols before class to match Rails attribute order
+              return [static_attrs + static_class_attr, nil]
+            end
+          end
+
+          [static_attrs, nil]
+        end
+
+        # Convert form builder method calls to HTML input elements
+        def process_form_builder_method(method, args)
+          model = @erb_model_name || 'model'
+          model_is_new = @erb_model_is_new  # For Model.new, don't pre-fill values
+          options = extract_field_options(args)
+
+          case method
+          when :text_field, :email_field, :password_field, :hidden_field,
+               :number_field, :tel_field, :url_field, :search_field,
+               :date_field, :time_field, :datetime_field, :datetime_local_field,
+               :month_field, :week_field, :color_field, :range_field
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+              input_type = method.to_s.sub(/_field$/, '')
+              input_type = 'text' if input_type == 'text'
+              input_type = 'datetime-local' if input_type == 'datetime_local'
+
+              # Check for conditional classes
+              static_attrs, dynamic_class_expr = build_field_attrs_dynamic(options)
+
+              if options[:value_node]
+                # Explicit value: option provided — use it instead of model attribute
+                raw_value = process(options[:value_node])
+                if @erb_model_name
+                  # Model-backed form: guard with null check on model field
+                  model_attr = s(:attr, s(:lvar, model.to_sym), name.to_sym)
+                  value_conditional = s(:if,
+                    s(:send, model_attr, :!=, s(:nil)),
+                    s(:dstr,
+                      s(:str, ' value="'),
+                      s(:begin, s(:send, nil, :escapeHTML, raw_value)),
+                      s(:str, '"')),
+                    s(:str, ''))
+                else
+                  # URL-based form (no model): always emit the value
+                  value_conditional = s(:dstr,
+                    s(:str, ' value="'),
+                    s(:begin, s(:send, nil, :escapeHTML, raw_value)),
+                    s(:str, '"'))
+                end
+              elsif model_is_new
+                # New models: omit value attribute (Rails convention)
+                if dynamic_class_expr
+                  return s(:dstr,
+                    s(:str, %(<input class=")),
+                    s(:begin, process(dynamic_class_expr)),
+                    s(:str, %(" type="#{input_type}"#{static_attrs} name="#{model}[#{name}]" id="#{model}_#{name}">)))
+                else
+                  return s(:str, %(<input#{static_attrs} type="#{input_type}" name="#{model}[#{name}]" id="#{model}_#{name}">))
+                end
+              else
+                # Existing models: pre-fill value from model
+                # Omit value attribute if model attribute is null/undefined (new record via ivar)
+                # HTML-escape the value for safety (e.g., "< 17" -> "&lt; 17")
+                raw_value = s(:attr, s(:lvar, model.to_sym), name.to_sym)
+                value_conditional = s(:if,
+                  s(:send, raw_value, :!=, s(:nil)),
+                  s(:dstr,
+                    s(:str, ' value="'),
+                    s(:begin, s(:send, nil, :escapeHTML, raw_value)),
+                    s(:str, '"')),
+                  s(:str, ''))
+              end
+
+              # URL-based forms use bare field names; model-backed use model[field]
+              field_name_attr = @erb_model_name ? "#{model}[#{name}]" : name
+              field_id_attr = @erb_model_name ? "#{model}_#{name}" : name
+
+              if dynamic_class_expr
+                s(:dstr,
+                  s(:str, %(<input class=")),
+                  s(:begin, process(dynamic_class_expr)),
+                  s(:str, %(" type="#{input_type}"#{static_attrs})),
+                  s(:begin, value_conditional),
+                  s(:str, %( name="#{field_name_attr}" id="#{field_id_attr}">)))
+              else
+                # Rails attribute order: class, type, value, name, id
+                s(:dstr,
+                  s(:str, %(<input#{static_attrs} type="#{input_type}")),
+                  s(:begin, value_conditional),
+                  s(:str, %( name="#{field_name_attr}" id="#{field_id_attr}">)))
+              end
+            else
+              nil
+            end
+
+          when :text_area, :textarea
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+
+              # Check for conditional classes
+              static_attrs, dynamic_class_expr = build_field_attrs_dynamic(options)
+
+              # For new models, use empty value; for existing, pre-fill from model
+              value_expr = if model_is_new
+                s(:str, '')
+              else
+                s(:or, s(:attr, s(:lvar, model.to_sym), name.to_sym), s(:str, ''))
+              end
+
+              if dynamic_class_expr
+                # Has conditional classes - generate dynamic class attribute
+                # rows/cols before class to match Rails attribute order
+                s(:dstr,
+                  s(:str, %(<textarea#{static_attrs} class=")),
+                  s(:begin, process(dynamic_class_expr)),
+                  s(:str, %(" name="#{model}[#{name}]" id="#{model}_#{name}">\n)),
+                  s(:begin, value_expr),
+                  s(:str, '</textarea>'))
+              else
+                # Static classes only
+                s(:dstr,
+                  s(:str, %(<textarea#{static_attrs} name="#{model}[#{name}]" id="#{model}_#{name}">\n)),
+                  s(:begin, value_expr),
+                  s(:str, '</textarea>'))
+              end
+            else
+              nil
+            end
+
+          when :check_box, :checkbox
+            field_name = args.first
+            extra_attrs = build_field_attrs(options)
+
+            if field_name&.type == :sym
+              name = field_name.children.first.to_s
+              hidden = %(<input name="#{model}[#{name}]" type="hidden" value="0" autocomplete="off">)
+              html = %(<input#{extra_attrs} type="checkbox" value="1" name="#{model}[#{name}]" id="#{model}_#{name}">)
+              s(:str, hidden + html)
+            elsif field_name&.type == :str
+              # Static string field name: form.check_box "custom_field"
+              name = field_name.children.first.to_s
+              # Generate id by replacing brackets with underscores
+              id_name = name.gsub(/[\[\]]/, '_').gsub(/_+/, '_').gsub(/^_|_$/, '')
+              hidden = %(<input name="#{model}[#{name}]" type="hidden" value="0" autocomplete="off">)
+              html = %(<input#{extra_attrs} type="checkbox" value="1" name="#{model}[#{name}]" id="#{model}_#{id_name}">)
+              s(:str, hidden + html)
+            elsif field_name&.type == :dstr
+              # Dynamic/interpolated string field name: form.check_box "options][#{option.id}"
+              # Build name parts - wrap expressions in begin nodes
+              name_parts = field_name.children.map { |child|
+                child.type == :str ? child : s(:begin, process(child))
+              }
+              # Build id parts - replace brackets with underscores in strings,
+              # and wrap expressions to convert to string (they're typically numeric IDs)
+              id_parts = field_name.children.map { |child|
+                if child.type == :str
+                  s(:str, child.children.first.to_s.gsub(/[\[\]]/, '_').gsub(/_+/, '_'))
+                else
+                  # For dynamic parts, just include them directly (typically IDs)
+                  s(:begin, process(child))
+                end
+              }
+              s(:dstr,
+                s(:str, %(<input type="checkbox" name="#{model}[)),
+                *name_parts,
+                s(:str, %(]" id="#{model}_)),
+                *id_parts,
+                s(:str, %("#{extra_attrs} value="1">)))
+            else
+              # Unknown type - return nil to skip transformation
+              nil
+            end
+
+          when :radio_button
+            field_name = args[0]
+            value = args[1]
+            if field_name&.type == :sym
+              name = field_name.children.first.to_s
+              val = value&.type == :sym ? value.children.first.to_s : value&.children&.first.to_s
+              extra_attrs = build_field_attrs(options)
+              html = %(<input type="radio" name="#{model}[#{name}]" id="#{model}_#{name}_#{val}"#{extra_attrs} value="#{val}">)
+              s(:str, html)
+            else
+              nil
+            end
+
+          when :label
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+              # Use custom label text if provided (2nd arg), otherwise humanize field name
+              custom_text = args[1] if args[1] && (args[1].type == :str || args[1].type == :sym)
+              if custom_text
+                label_text = custom_text.children.first.to_s
+              else
+                humanized = name.sub(/_id$/, '')
+                label_text = humanized.gsub('_', ' ')
+                # Rails humanize: capitalize first letter, downcase rest
+                label_text = label_text[0].upcase + label_text[1..-1].to_s.downcase
+              end
+              extra_attrs = build_field_attrs(options)
+              label_for = @erb_model_name ? "#{model}_#{name}" : name
+              html = %(<label#{extra_attrs} for="#{label_for}">#{label_text}</label>)
+              s(:str, html)
+            elsif field_name
+              # Dynamic label - generate <label> with expression as text
+              extra_attrs = build_field_attrs(options)
+              s(:dstr,
+                s(:str, "<label#{extra_attrs}>"),
+                s(:begin, process(field_name)),
+                s(:str, '</label>'))
+            end
+
+          when :select
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+              extra_attrs = build_field_attrs(options)
+              open_tag = %(<select#{extra_attrs} name="#{model}[#{name}]" id="#{model}_#{name}">)
+
+              # Extract choices collection (2nd arg, if not a hash)
+              choices = args[1] if args[1] && args[1].type != :hash
+
+              # Check for include_blank in Rails options hash
+              # Rails options is a hash that's NOT the last arg (HTML options),
+              # or the only hash when there's no HTML options hash
+              include_blank = false
+              args.each_with_index do |arg, i|
+                next if i == 0 # skip field name
+                next unless arg.type == :hash
+                arg.children.each do |pair|
+                  key = pair.children[0]
+                  if key.type == :sym && key.children[0] == :include_blank
+                    include_blank = true
+                  end
+                end
+              end
+
+              blank_option = include_blank ? '<option value="" label=" "></option>' : ''
+
+              if choices
+                # Dynamic choices — generate option elements by mapping over the collection.
+                # Supports both simple arrays ["a","b"] and [label, value] pairs.
+                # Also handles hashes by converting to entries:
+                #   Array.isArray(x) ? x : Object.entries(x)
+                # Uses a ternary to detect pairs: Array.isArray(c) ? [c[1], c[0]] : [c, c]
+                choices_expr = process(choices)
+                normalized_choices = s(:if,
+                  s(:send, s(:const, nil, :Array), :isArray, choices_expr),
+                  choices_expr,
+                  s(:send, s(:const, nil, :Object), :entries, choices_expr))
+                map_expr = s(:send,
+                  s(:send,
+                    s(:begin, normalized_choices), :map,
+                    s(:block, s(:send, nil, :proc),
+                      s(:args, s(:arg, :_c)),
+                      s(:dstr,
+                        s(:str, "\n<option value=\""),
+                        s(:begin,
+                          s(:if,
+                            s(:send, s(:const, nil, :Array), :isArray, s(:lvar, :_c)),
+                            s(:send, s(:lvar, :_c), :[], s(:int, 1)),
+                            s(:lvar, :_c))),
+                        s(:str, '">'),
+                        s(:begin,
+                          s(:if,
+                            s(:send, s(:const, nil, :Array), :isArray, s(:lvar, :_c)),
+                            s(:send, s(:lvar, :_c), :[], s(:int, 0)),
+                            s(:lvar, :_c))),
+                        s(:str, '</option>')))),
+                  :join, s(:str, ''))
+
+                s(:dstr,
+                  s(:str, "#{open_tag}#{blank_option}"),
+                  s(:begin, map_expr),
+                  s(:str, '</select>'))
+              else
+                # No choices provided — empty select
+                s(:str, "#{open_tag}#{blank_option}</select>")
+              end
+            else
+              nil
+            end
+
+          when :submit
+            # submit can have: submit("Save") or submit(class: "btn")
+            value = args.first
+            label = nil
+            if value&.type == :str
+              label = value.children.first
+            elsif value&.type == :hash
+              # No label, just options - already extracted
+              label = nil
+            end
+            extra_attrs = build_field_attrs(options)
+            if label
+              html = %(<input type="submit" name="commit" value="#{label}"#{extra_attrs} data-disable-with="#{label}">)
+              s(:str, html)
+            elsif @erb_model_name
+              # Generate dynamic label like Rails: "Create Model" / "Update Model"
+              humanized = @erb_model_name.gsub('_', ' ')
+              humanized = humanized[0].upcase + humanized[1..]
+              model_sym = @erb_model_name.to_sym
+              s(:dstr,
+                s(:str, %(<input type="submit" name="commit" value=")),
+                s(:begin,
+                  s(:if, s(:attr, s(:lvar, model_sym), :id),
+                    s(:str, "Update"), s(:str, "Create"))),
+                s(:str, %( #{humanized}"#{extra_attrs} data-disable-with=")),
+                s(:begin,
+                  s(:if, s(:attr, s(:lvar, model_sym), :id),
+                    s(:str, "Update"), s(:str, "Create"))),
+                s(:str, %( #{humanized}">)))
+            else
+              html = %(<input type="submit" name="commit"#{extra_attrs}>)
+              s(:str, html)
+            end
+
+          when :button
+            value = args.first
+            label = nil
+            if value&.type == :str
+              label = value.children.first
+            elsif value&.type == :hash
+              label = nil
+            end
+            extra_attrs = build_field_attrs(options)
+            if label
+              html = %(<button type="submit"#{extra_attrs}>#{label}</button>)
+            else
+              html = %(<button type="submit"#{extra_attrs}>Submit</button>)
+            end
+            s(:str, html)
+
+          when :file_field
+            # File inputs cannot have value pre-filled (browser security)
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+              extra_attrs = build_field_attrs(options)
+              html = %(<input type="file" name="#{model}[#{name}]" id="#{model}_#{name}"#{extra_attrs}>)
+              s(:str, html)
+            else
+              nil
+            end
+
+          when :rich_text_area
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+              extra_attrs = build_field_attrs(options)
+              value_expr = model_is_new ? s(:str, '') : s(:or, s(:attr, s(:lvar, model.to_sym), name.to_sym), s(:str, ''))
+              s(:dstr,
+                s(:str, %(<textarea name="#{model}[#{name}]" id="#{model}_#{name}"#{extra_attrs}>)),
+                s(:begin, value_expr),
+                s(:str, '</textarea>'))
+            else
+              nil
+            end
+
+          when :collection_select
+            field_name = args.first
+            if field_name&.type == :sym || field_name&.type == :str
+              name = field_name.children.first.to_s
+              extra_attrs = build_field_attrs(options)
+              html = %(<select name="#{model}[#{name}]" id="#{model}_#{name}"#{extra_attrs}></select>)
+              s(:str, html)
+            else
+              nil
+            end
+
+          else
+            # Unknown form builder method - return nil to skip transformation
+            # This prevents "super" calls to non-existent parent methods
+            nil
+          end
+        end
+
+        # Process fields_for (nested form builder) into JavaScript
+        # form.fields_for :questions do |question_form| ... end
+        # Generates iteration over the association with nested field names
+        def process_fields_for(association_node, block_args, block_body)
+          return nil unless association_node&.type == :sym
+
+          association_name = association_node.children.first.to_s
+          block_param = block_args.children.first&.children&.first
+
+          # Save current form context
+          old_block_var = @erb_block_var
+          old_model_name = @erb_model_name
+
+          # Set up nested form context
+          # Field names become: parent_model[association_attributes][index][field]
+          parent_model = @erb_model_name || 'model'
+          nested_model_name = "#{parent_model}_#{association_name}"
+          @erb_block_var = block_param
+          @erb_model_name = nested_model_name
+
+          statements = []
+
+          # Generate iteration over the association
+          # for (let [_idx, item] of (model.association || []).entries()) { ... }
+          association_access = s(:or,
+            s(:attr, s(:lvar, parent_model.to_sym), association_name.to_sym),
+            s(:array))
+
+          # Use entries() to get index for field naming
+          entries_call = s(:send, association_access, :entries)
+
+          # Process block body
+          body_statements = if block_body&.type == :begin
+            block_body.children.map { |stmt| process(stmt) }.compact
+          elsif block_body
+            [process(block_body)].compact
+          else
+            []
+          end
+
+          # Build the for loop
+          # for (let [_fieldsIdx, nested_model_name] of entries) { ... }
+          idx_var = "_#{association_name}Idx".to_sym
+          item_var = association_name.singularize.to_sym rescue association_name.to_sym
+
+          # Generate field name prefix substitution in the body
+          # Replace nested_model_name[field] with parent_model[association_attributes][idx][field]
+          for_body = body_statements.empty? ? s(:nil) : s(:begin, *body_statements)
+
+          for_loop = s(:for,
+            s(:mlhs, s(:lvasgn, idx_var), s(:lvasgn, item_var)),
+            entries_call,
+            for_body)
+
+          statements << for_loop
+
+          # Restore form context
+          @erb_block_var = old_block_var
+          @erb_model_name = old_model_name
+
+          return nil if statements.empty?
+          statements.length == 1 ? statements.first : s(:begin, *statements)
+        end
+
+        # Process form_for block into JavaScript
+        def process_form_for(helper_call, block_args, block_body)
+          model_node = helper_call.children[2]
+          model_name = model_node.children.first.to_s.sub(/^@/, '') if model_node&.type == :ivar
+          block_param = block_args.children.first&.children&.first
+
+          old_block_var = @erb_block_var
+          old_model_name = @erb_model_name
+          @erb_block_var = block_param
+          @erb_model_name = model_name
+
+          statements = []
+          form_attrs = model_name ? " data-model=\"#{model_name}\"" : ""
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, "<form#{form_attrs}>"))
+
+          # Add authenticity_token hidden field for CSRF protection
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+            s(:dstr,
+              s(:str, '<input type="hidden" name="authenticity_token" value="'),
+              s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, ''))),
+              s(:str, "\">\n")))
+
+          if block_body
+            if block_body.type == :begin
+              block_body.children.each do |child|
+                processed = process(child)
+                statements << processed if processed
+              end
+            else
+              processed = process(block_body)
+              statements << processed if processed
+            end
+          end
+
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, "</form>"))
+
+          @erb_block_var = old_block_var
+          @erb_model_name = old_model_name
+
+          s(:begin, *statements.compact)
+        end
+
+        # Process form_with block into JavaScript (Rails 5.1+ preferred form helper)
+        # form_with(model: @article) do |form| ... end
+        # form_with(url: articles_path, class: "contents") do |form| ... end
+        # form_with(url: "/photos", method: :post) do |form| ... end
+        def process_form_with(helper_call, block_args, block_body)
+          # Extract model, url, method, class, id, and data from keyword arguments
+          model_name = nil
+          parent_model_name = nil  # Track parent for nested resources
+          model_is_new = false  # Track if model is Model.new (no pre-fill values)
+          url_node = nil  # Track url: option for form action
+          http_method = :post  # Default HTTP method
+          css_class = nil
+          form_id = nil
+          data_attrs = {}  # Track data-* attributes for form tag
+          options_node = helper_call.children[2]
+
+          if options_node&.type == :hash
+            options_node.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym
+                case key.children[0]
+                when :model
+                  # model: @article or model: article or model: [@article, Comment.new]
+                  if value.type == :ivar
+                    model_name = value.children.first.to_s.sub(/^@/, '')
+                  elsif value.type == :lvar
+                    model_name = value.children.first.to_s
+                  elsif value.type == :send && value.children.first.nil?
+                    # s(:send, nil, :article) - method call as local
+                    model_name = value.children[1].to_s
+                  elsif value.type == :send && value.children[1] == :new
+                    # model: Comment.new -> comment, and mark as new (empty values)
+                    const_node = value.children[0]
+                    if const_node&.type == :const
+                      model_name = const_node.children[1].to_s.downcase
+                      model_is_new = true
+                    end
+                  elsif value.type == :array && value.children.length >= 2
+                    # Nested resource: model: [@article, Comment.new]
+                    # Extract parent model (first element) for path generation
+                    parent = value.children.first
+                    if parent.type == :ivar
+                      parent_model_name = parent.children.first.to_s.sub(/^@/, '')
+                    elsif parent.type == :lvar
+                      parent_model_name = parent.children.first.to_s
+                    end
+                    # Use the child model (second element) for form field naming
+                    child = value.children.last
+                    if child.type == :send && child.children[1] == :new
+                      # Comment.new -> comment, and mark as new (empty values)
+                      const_node = child.children[0]
+                      if const_node&.type == :const
+                        model_name = const_node.children[1].to_s.downcase
+                        model_is_new = true
+                      end
+                    end
+                  end
+                when :url
+                  # url: "/photos" or url: photos_path
+                  url_node = value
+                  # Track path helper for import if it's a path helper call
+                  if value.type == :send && value.children[0].nil?
+                    path_helper = value.children[1]
+                    # Convert _url helpers to _path (browser only has _path helpers)
+                    if path_helper.to_s.end_with?('_url')
+                      path_helper = path_helper.to_s.sub(/_url$/, '_path').to_sym
+                    end
+                    @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+                  end
+                when :method
+                  # method: :post, method: :patch, method: :delete
+                  http_method = value.children[0] if value.type == :sym
+                when :class
+                  css_class = extract_class_value(value)
+                when :id
+                  form_id = value.children[0] if value.type == :str
+                when :data
+                  # Handle data: { key: value } -> data-key="value"
+                  if value.type == :hash
+                    value.children.each do |data_pair|
+                      data_key = data_pair.children[0]
+                      data_value = data_pair.children[1]
+                      if data_key.type == :sym
+                        # Convert underscores to dashes: turbo_confirm -> turbo-confirm
+                        attr_name = data_key.children[0].to_s.gsub('_', '-')
+                        if data_value.type == :str
+                          data_attrs[attr_name] = data_value.children[0]
+                        elsif data_value.type == :true
+                          data_attrs[attr_name] = "true"
+                        elsif data_value.type == :false
+                          data_attrs[attr_name] = "false"
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+
+          block_param = block_args.children.first&.children&.first
+
+          old_block_var = @erb_block_var
+          old_model_name = @erb_model_name
+          old_model_is_new = @erb_model_is_new
+          @erb_block_var = block_param
+          @erb_model_name = model_name
+          @erb_model_is_new = model_is_new
+
+          statements = []
+
+          # Build id and class attribute strings
+          id_attr = form_id ? " id=\"#{form_id}\"" : ""
+          class_attr = css_class ? " class=\"#{css_class}\"" : ""
+
+          # Build data attributes string
+          # Use each_pair for selfhost compatibility (transpiles to Object.entries().forEach)
+          data_attr = ""
+          data_attrs.each_pair { |k, v| data_attr += " data-#{k}=\"#{v}\"" }
+
+          # Build form tag with action and method - Turbo intercepts form submissions automatically
+          if model_name && url_node
+            # Form with both model: and url: — use url for action, model for field names
+            # form_with(model: @event, url: settings_events_path)
+            actual_method = (http_method == :get || http_method == :post) ? http_method : :post
+            needs_method_field = ![:get, :post].include?(http_method)
+
+            if url_node.type == :str
+              url_str = url_node.children[0]
+              form_tag = "<form#{id_attr}#{class_attr}#{data_attr} action=\"#{url_str}\" accept-charset=\"UTF-8\" method=\"#{actual_method}\">"
+              if needs_method_field
+                form_tag += "\n<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">"
+              end
+              statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, form_tag))
+            else
+              # Ensure path helpers are called as functions, convert _url to _path
+              if url_node.type == :send && url_node.children[0].nil? &&
+                 url_node.children[1].to_s =~ /_path$|_url$/ &&
+                 url_node.children.length == 2
+                helper_name = url_node.children[1].to_s.sub(/_url$/, '_path').to_sym
+                url_node = s(:send!, nil, helper_name)
+              end
+              url_expr = process(url_node)
+              method_suffix = needs_method_field ?
+                "\" accept-charset=\"UTF-8\" method=\"#{actual_method}\">\n<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">" :
+                "\" accept-charset=\"UTF-8\" method=\"#{actual_method}\">"
+              statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                s(:dstr,
+                  s(:str, "<form#{id_attr}#{class_attr}#{data_attr} action=\""),
+                  s(:begin, url_expr),
+                  s(:str, method_suffix)))
+            end
+
+            # For existing models, add PATCH method override
+            unless model_is_new
+              model_var = s(:lvar, model_name.to_sym)
+              statements << s(:if, s(:attr, model_var, :id),
+                s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:str, "<input type=\"hidden\" name=\"_method\" value=\"patch\" autocomplete=\"off\">\n")),
+                s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:str, "\n")))
+            end
+          elsif model_name
+            # Form with action and method using path helpers
+            plural_name = Ruby2JS::Inflector.pluralize(model_name)
+            singular_path = :"#{model_name}_path"   # :article_path
+            plural_path = :"#{plural_name}_path"    # :articles_path
+            model_var = s(:lvar, model_name.to_sym)
+
+            # Track path helpers for import (skip for nested resources —
+            # they use the parent-prefixed paths like article_comments_path)
+            unless parent_model_name
+              @erb_path_helpers << singular_path unless @erb_path_helpers.include?(singular_path)
+              @erb_path_helpers << plural_path unless @erb_path_helpers.include?(plural_path)
+            end
+
+            if model_is_new
+              # New model - POST to collection path
+              # <form action="<%= articles_path() %>" method="post">
+              # For nested resources: <form action="<%= article_comments_path(article) %>" method="post">
+              if parent_model_name
+                # Nested resource - pass parent model to path helper
+                # Use Rails convention: parent_children_path (e.g., article_comments_path)
+                nested_plural_path = :"#{parent_model_name}_#{plural_name}_path"
+                @erb_path_helpers << nested_plural_path unless @erb_path_helpers.include?(nested_plural_path)
+                parent_var = s(:lvar, parent_model_name.to_sym)
+                statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:dstr,
+                    s(:str, "<form#{id_attr}#{class_attr}#{data_attr} action=\""),
+                    s(:begin, s(:send, nil, nested_plural_path, parent_var)),
+                    s(:str, "\" accept-charset=\"UTF-8\" method=\"post\">\n")))
+              else
+                statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:dstr,
+                    s(:str, "<form#{id_attr}#{class_attr}#{data_attr} action=\""),
+                    s(:begin, s(:send, nil, plural_path)),
+                    s(:str, "\" accept-charset=\"UTF-8\" method=\"post\">\n")))
+              end
+            else
+              # Existing model - check ID to determine POST vs PATCH
+              # <form action="<%= article.id ? article_path(article) : articles_path() %>" method="post">
+              statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                s(:dstr,
+                  s(:str, "<form#{id_attr}#{class_attr}#{data_attr} action=\""),
+                  s(:begin,
+                    s(:if, s(:attr, model_var, :id),
+                      s(:send, nil, singular_path, model_var),
+                      s(:send, nil, plural_path))),
+                  s(:str, "\" accept-charset=\"UTF-8\" method=\"post\">")))
+
+              # Add hidden _method field for existing records (PATCH), or newline for new
+              # Rails: <form ...><input type="hidden" name="_method" value="patch">\n  (same line)
+              # Rails: <form ...>\n  (new record, just newline)
+              statements << s(:if, s(:attr, model_var, :id),
+                s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:str, "<input type=\"hidden\" name=\"_method\" value=\"patch\" autocomplete=\"off\">\n")),
+                s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:str, "\n")))
+            end
+          elsif url_node
+            # Form with explicit url: option
+            # form_with(url: "/photos", method: :post) or form_with(url: photos_path)
+            actual_method = (http_method == :get || http_method == :post) ? http_method : :post
+            needs_method_field = ![:get, :post].include?(http_method)
+
+            if url_node.type == :str
+              # Static URL string: url: "/photos"
+              url_str = url_node.children[0]
+              form_tag = "<form#{id_attr}#{class_attr}#{data_attr} action=\"#{url_str}\" method=\"#{actual_method}\">"
+              if needs_method_field
+                form_tag += "\n<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">"
+              end
+              statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, form_tag))
+            else
+              # Dynamic URL (path helper): url: photos_path
+              # Ensure path helpers are called as functions, convert _url to _path
+              if url_node.type == :send && url_node.children[0].nil? &&
+                 url_node.children[1].to_s =~ /_path$|_url$/ &&
+                 url_node.children.length == 2
+                helper_name = url_node.children[1].to_s.sub(/_url$/, '_path').to_sym
+                url_node = s(:send!, nil, helper_name)
+              end
+              url_expr = process(url_node)
+              if needs_method_field
+                statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:dstr,
+                    s(:str, "<form#{id_attr}#{class_attr}#{data_attr} action=\""),
+                    s(:begin, url_expr),
+                    s(:str, "\" method=\"#{actual_method}\">\n<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">")))
+              else
+                statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+                  s(:dstr,
+                    s(:str, "<form#{id_attr}#{class_attr}#{data_attr} action=\""),
+                    s(:begin, url_expr),
+                    s(:str, "\" method=\"#{actual_method}\">")))
+              end
+            end
+          else
+            # No model or url - just output a basic form tag
+            statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, "<form#{class_attr}#{data_attr}>"))
+          end
+
+          # Add authenticity_token hidden field for CSRF protection
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+            s(:dstr,
+              s(:str, '<input type="hidden" name="authenticity_token" value="'),
+              s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, ''))),
+              s(:str, "\">\n")))
+
+          if block_body
+            if block_body.type == :begin
+              block_body.children.each do |child|
+                processed = process(child)
+                statements << processed if processed
+              end
+            else
+              processed = process(block_body)
+              statements << processed if processed
+            end
+          end
+
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, "</form>"))
+
+          @erb_block_var = old_block_var
+          @erb_model_name = old_model_name
+          @erb_model_is_new = old_model_is_new
+
+          s(:begin, *statements.compact)
+        end
+
+        # Process form_tag block into JavaScript
+        def process_form_tag(helper_call, block_args, block_body)
+          path_node = helper_call.children[2]
+          options_node = helper_call.children[3]
+
+          http_method = :post
+          if options_node&.type == :hash
+            options_node.children.each do |pair|
+              key = pair.children[0]
+              value = pair.children[1]
+              if key.type == :sym && key.children[0] == :method
+                http_method = value.children[0] if value.type == :sym
+              end
+            end
+          end
+
+          if path_node&.type == :send && path_node.children[0].nil?
+            path_helper = path_node.children[1]
+            @erb_path_helpers << path_helper unless @erb_path_helpers.include?(path_helper)
+          end
+
+          statements = []
+
+          # Generate standard form with action/method - Turbo intercepts submissions automatically
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, build_server_form_tag(path_node, http_method))
+
+          # Add authenticity_token hidden field for CSRF protection
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+,
+            s(:dstr,
+              s(:str, '<input type="hidden" name="authenticity_token" value="'),
+              s(:begin, s(:or, s(:attr, context_gvar, :authenticityToken), s(:str, ''))),
+              s(:str, "\">\n")))
+
+          if block_body
+            if block_body.type == :begin
+              block_body.children.each do |child|
+                processed = process(child)
+                statements << processed if processed
+              end
+            else
+              processed = process(block_body)
+              statements << processed if processed
+            end
+          end
+
+          statements << s(:op_asgn, s(:lvasgn, self.erb_bufvar), :+, s(:str, "</form>\n"))
+
+          s(:begin, *statements.compact)
+        end
+
+        # Build form tag with action attribute - Turbo intercepts submissions automatically
+        def build_server_form_tag(path_node, http_method)
+          path_expr = process(path_node)
+          actual_method = (http_method == :get || http_method == :post) ? http_method : :post
+          needs_method_field = ![:get, :post].include?(http_method)
+
+          if path_node&.type == :send && path_node.children[0].nil? && path_node.children.length == 2
+            path_expr = s(:send, nil, path_node.children[1])
+          end
+
+          if path_node.type == :str
+            path_str = path_node.children[0]
+            if needs_method_field
+              s(:str, "<form action=\"#{path_str}\" method=\"#{actual_method}\">\n<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">\n")
+            else
+              s(:str, "<form action=\"#{path_str}\" method=\"#{actual_method}\">\n")
+            end
+          else
+            if needs_method_field
+              s(:dstr,
+                s(:str, '<form action="'),
+                s(:begin, path_expr),
+                s(:str, "\" method=\"#{actual_method}\">\n<input type=\"hidden\" name=\"_method\" value=\"#{http_method}\" autocomplete=\"off\">\n"))
+            else
+              s(:dstr,
+                s(:str, '<form action="'),
+                s(:begin, path_expr),
+                s(:str, "\" method=\"#{actual_method}\">\n"))
+            end
+          end
+        end
+
+        # Process generic block helpers
+        def process_block_helper(helper_name, helper_call, block_args, block_body)
+          block_param = block_args.children.first&.children&.first
+
+          old_block_var = @erb_block_var
+          @erb_block_var = block_param
+
+          statements = []
+
+          if block_body
+            if block_body.type == :begin
+              block_body.children.each do |child|
+                processed = process(child)
+                statements << processed if processed
+              end
+            else
+              processed = process(block_body)
+              statements << processed if processed
+            end
+          end
+
+          @erb_block_var = old_block_var
+
+          return nil if statements.empty?
+          statements.length == 1 ? statements.first : s(:begin, *statements.compact)
+        end
+
+        private
+
+        # Check if a method chain involves an association access at its root
+        # e.g., studio.people.sort_by(&:name) -> true (studio.people is association)
+        def collection_involves_association?(node)
+          return false unless node
+          return association_access?(node) if node.type == :send && node.children[2..]&.empty?
+          # Walk the chain: node is send(receiver, method, args...)
+          # The receiver might be the association or another chained call
+          if node.type == :send
+            receiver = node.children[0]
+            return true if association_access?(node)
+            return collection_involves_association?(receiver) if receiver
+          end
+          false
+        end
+
+        # Wrap the association part of a method chain with await
+        # studio.people.sort_by(...) -> (await studio.people).sort_by(...)
+        def wrap_association_with_await(node)
+          return node unless node&.type == :send
+          if association_access?(node)
+            return s(:begin, s(:send, nil, :await, node))
+          end
+          receiver = node.children[0]
+          if receiver && collection_involves_association?(receiver)
+            new_receiver = wrap_association_with_await(receiver)
+            return s(:send, new_receiver, node.children[1], *node.children[2..])
+          end
+          node
+        end
+
+        # Check if a node looks like a belongs_to access (e.g., person.level)
+        # Heuristic: singular method name on a model instance, not a known builtin
+        KNOWN_BUILTINS = %i[
+          name type id class to_s to_i to_f inspect freeze dup clone
+          nil? blank? present? empty? any? none? size length count
+          first last new save create update destroy delete valid?
+          errors persisted? new_record? changed? frozen?
+          strip chomp chop upcase downcase capitalize
+          abs round floor ceil truncate
+          keys values merge select reject map flat_map reduce
+          split join gsub sub match scan replace
+          push pop shift unshift sort reverse uniq compact flatten
+          include? start_with? end_with? respond_to? is_a? kind_of?
+        ]
+
+        def belongs_to_access?(node)
+          return false unless node&.type == :send
+          receiver = node.children[0]
+          method = node.children[1]
+          args = node.children[2..]
+
+          # Must have a receiver (not a bare function call)
+          return false unless receiver
+          return false unless [:lvar, :ivar, :send].include?(receiver.type)
+
+          # Must be a zero-arg method call
+          return false unless args.empty?
+
+          # Must be singular (not a has_many)
+          method_str = method.to_s
+          return false if method_str != Ruby2JS::Inflector.singularize(method_str)
+
+          # Must not be a known builtin
+          return false if KNOWN_BUILTINS.include?(method)
+
+          # Must not end with common non-association suffixes
+          return false if method_str.end_with?('_id', '_at', '_on', '_count', '_type')
+
+          true
+        end
+
+        # Check if a node represents an association access (e.g., article.comments)
+        # Association access returns a Promise that needs to be awaited
+        def association_access?(node)
+          return false unless node&.type == :send
+          receiver = node.children[0]
+          method = node.children[1]
+
+          # Receiver must be a model instance (lvar or ivar that's been converted to lvar)
+          return false unless receiver
+          return false unless [:lvar, :ivar, :send].include?(receiver.type)
+
+          # Method name should be plural (convention for has_many associations)
+          # This is a heuristic - plural method names on model instances are likely associations
+          method_str = method.to_s
+          singular = Ruby2JS::Inflector.singularize(method_str)
+          method_str != singular
+        end
+
+        # Check if method is an async Active Storage attachment method
+        # These methods on Attachment objects return Promises
+        def attachment_method?(method)
+          [:url, :attached, :attached?, :content_type, :download,
+           :filename, :byte_size, :blob].include?(method)
+        end
+
+        # Check if a node represents an attachment access (e.g., clip.audio)
+        # Attachment access is a singular method on a model instance (has_one_attached)
+        def attachment_access?(node)
+          return false unless node&.type == :send
+          receiver = node.children[0]
+          method = node.children[1]
+
+          # Receiver must be a model instance (lvar or ivar that's been converted to lvar)
+          return false unless receiver
+          return false unless [:lvar, :ivar, :send].include?(receiver.type)
+
+          # Method name should be singular (convention for has_one_attached)
+          # This is a heuristic - singular method names on model instances may be attachments
+          method_str = method.to_s
+          singular = Ruby2JS::Inflector.singularize(method_str)
+          method_str == singular
+        end
+
+        # Check if targeting browser (vs server-side rendering)
+        # Explicit :target option takes precedence over database inference
+        def browser_target?
+          # Check for explicit target option first
+          target = @options[:target]
+          if target
+            return target.to_s.downcase == 'browser'
+          end
+
+          # Fall back to inferring from database
+          database = @options[:database]
+          return true unless database
+          database = database.to_s.downcase
+          BROWSER_DATABASES.include?(database)
+        end
+      end
+    end
+
+    DEFAULTS.push Rails::Helpers
+  end
+end

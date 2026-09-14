@@ -1,0 +1,72 @@
+# Git
+.git
+.gitignore
+
+# Bridgetown dev/cache
+docs/tmp
+docs/output
+docs/.bridgetown-cache
+docs/.bridgetown-metadata
+
+# Dependencies (reinstalled in container)
+node_modules
+docs/vendor
+
+# Environment/secrets
+.env
+.env.*
+
+# Editor/OS files
+.DS_Store
+*.swp
+*.swo
+.idea
+.vscode
+mise.toml
+
+# Logs
+*.log
+yarn-error.log
+yarn-debug.log*
+
+# Test artifacts - exclude spec but keep test scripts
+spec/
+
+# Plans/docs not needed for build
+plans/
+
+# Selfhost generated outputs (regenerated via npm run build:*)
+demo/selfhost/dist/
+demo/selfhost/ruby2js.js
+demo/selfhost/ruby2js.mjs
+demo/selfhost/prism_browser.js
+demo/selfhost/filters/
+demo/selfhost/lib/
+packages/juntos-dev/build.mjs
+packages/juntos-dev/lib/
+packages/juntos-dev/ruby2js.js
+
+# Build artifacts
+pkg
+*.tgz
+
+# Local test demos and generated files
+demo/assets
+demo/filters.opal
+demo/blog/
+demo/chat/
+demo/dictaphone/
+demo/notes/
+demo/photo_gallery/
+demo/ssg-blog/
+demo/workflow_builder/
+testrails
+
+# Artifacts - exclude intermediate files but keep tarballs for Docker builds
+artifacts/blog/
+artifacts/chat/
+artifacts/notes/
+artifacts/photo_gallery/
+artifacts/workflow/
+artifacts/astro-blog/
+artifacts/ssg-blog/

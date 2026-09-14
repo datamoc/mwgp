@@ -1,0 +1,196 @@
+---
+order: 325
+title: ERB
+top_section: Filters
+category: erb
+---
+
+The **ERB** filter transforms compiled ERB or HERB template output into JavaScript render functions. It converts instance variable references to destructured parameters, making templates usable as standalone JavaScript functions.
+
+
+## How It Works
+
+When you compile an ERB or HERB template, Ruby generates code that builds a string buffer:
+
+```ruby
+# ERB compiled output
+_erbout = +''; _erbout.<< "<h1>".freeze; _erbout.<<(( @title ).to_s); _erbout.<< "</h1>".freeze; _erbout
+
+# HERB compiled output
+_buf = ::String.new; _buf << '<h1>'.freeze; _buf << (@title).to_s; _buf << '</h1>'.freeze; _buf.to_s
+```
+
+The ERB filter detects this pattern and transforms it into a JavaScript render function using template literals:
+
+```javascript
+function render({ title }) {
+  return `<h1>${escapeHTML(title)}</h1>`
+}
+```
+
+## Examples
+
+### Simple Template
+
+```ruby
+require "erb"
+require "ruby2js/filter/erb"
+
+template = "<h1><%= @title %></h1><p><%= @content %></p>"
+erb_src = ERB.new(template).src
+
+puts Ruby2JS.convert(erb_src, filters: [:erb], eslevel: 2020)
+```
+
+```javascript
+// Output:
+function render({ content, title }) {
+  return `<h1>${escapeHTML(title)}</h1><p>${escapeHTML(content)}</p>`
+}
+```
+
+### Template with Loops
+
+```ruby
+require "erb"
+require "ruby2js/filter/erb"
+require "ruby2js/filter/functions"
+
+template = <<~ERB
+<ul>
+<% @items.each do |item| %>
+  <li><%= item.name %></li>
+<% end %>
+</ul>
+ERB
+
+erb_src = ERB.new(template).src
+puts Ruby2JS.convert(erb_src, filters: [:erb, :functions], eslevel: 2020)
+```
+
+```javascript
+// Output:
+function render({ items }) {
+  return `<ul>
+${items.map(item => (`
+  <li>${escapeHTML(item.name)}</li>
+`)).join("")}
+</ul>
+`
+}
+```
+
+### Using with HERB
+
+The filter also works with [HERB](https://github.com/marcoroth/herb) (HTML + Embedded Ruby), which uses a similar buffer pattern:
+
+```ruby
+require "herb"
+require "ruby2js/filter/erb"
+
+template = "<h1><%= @title %></h1>"
+herb_src = Herb::Engine.new(template).src
+
+puts Ruby2JS.convert(herb_src, filters: [:erb], eslevel: 2020)
+```
+
+```javascript
+// Output:
+function render({ title }) {
+  return `<h1>${escapeHTML(title)}</h1>`
+}
+```
+
+## Transformations
+
+The filter performs these transformations:
+
+| Ruby Pattern              | JavaScript Output                                           |
+| ------------------------- | ----------------------------------------------------------- |
+| `_erbout = +''`           | `let _erbout = ""` (eliminated when all appends collapse)   |
+| `_buf = ::String.new`     | `let _buf = ""` (eliminated when all appends collapse)      |
+| `_erbout.<< "str".freeze` | Inlined into template literal, or `_erbout += "str"`        |
+| `_erbout.<<((@var).to_s)` | `${escapeHTML(var)}` in template literal, or `escapeHTML(var)` |
+| `@title`                  | `title` (from destructured parameter)                       |
+| `raw(html)`               | `html` (pass-through, no escaping)                          |
+| `str.html_safe`           | `str` (pass-through, no escaping)                           |
+
+## Using with Rails Helpers
+
+For Rails-style helpers like `form_for`, `form_tag`, `link_to`, and form builder methods, use the **Rails::Helpers** filter together with ERB:
+
+```ruby
+require "ruby2js"
+require "ruby2js/erubi"
+require "ruby2js/filter/erb"
+require "ruby2js/filter/rails/helpers"
+
+template = <<~ERB
+<%= form_for @user do |f| %>
+  <%= f.label :name %>
+  <%= f.text_field :name %>
+  <%= f.submit "Save" %>
+<% end %>
+ERB
+
+src = Ruby2JS::Erubi.new(template).src
+# Note: Rails::Helpers must come BEFORE Erb for method overrides to work
+puts Ruby2JS.convert(src, filters: [:"rails/helpers", :erb], eslevel: 2020)
+```
+
+```javascript
+// Output:
+function render({ user }) {
+  return `<form data-model="user"><label for="user_name">Name</label><input type="text" name="user[name]" id="user_name"><input type="submit" value="Save"></form>`
+}
+```
+
+See the [Rails filter documentation](/docs/filters/rails#helpers) for the full list of supported helpers.
+
+## Limitations
+
+{% rendercontent "docs/note", type: "warning", title: "Instance Variables Only" %}
+This filter can only handle templates that depend solely on instance variables (`@var`). Templates that call Rails methods or helper functions directly will not work correctly in JavaScript without corresponding JavaScript implementations.
+{% endrendercontent %}
+
+Common scenarios that require attention:
+
+- **Helper methods** like `link_to`, `image_tag`, etc. won't be available in JavaScript. Either:
+  - Move the URL/path computation to the controller and pass it as an instance variable
+  - Implement the helper function in JavaScript
+  - Transpile the helper using Ruby2JS
+
+- **Block helpers** like `form_for` require:
+  - Using `Ruby2JS::Erubi` instead of standard ERB
+  - Providing JavaScript implementations of the helper functions
+
+- **Rails methods** called directly in templates (though rare) won't work. Move the logic to the controller and pass results as instance variables.
+
+For example, instead of:
+
+```erb
+<%= link_to @article.title, article_path(@article) %>
+```
+
+Pass the URL from the controller:
+
+```ruby
+# Controller
+@article_url = article_path(@article)
+```
+
+```erb
+<a href="<%= @article_url %>"><%= @article.title %></a>
+```
+
+## Usage Notes
+
+- The filter automatically detects instance variables used in the template and creates a destructuring parameter pattern
+- Instance variables are converted to local variables with the `@` prefix removed
+- The function is always named `render` and returns the buffer string
+- Combine with the **Functions** filter to convert Ruby iterators like `.each` to JavaScript `for...of` loops
+- The `#coding:UTF-8` comment from ERB output becomes a harmless JavaScript comment (`//coding:UTF-8`)
+
+{% rendercontent "docs/note", extra_margin: true %}
+More examples of how this filter works are in the [specs file](https://github.com/ruby2js/ruby2js/blob/master/spec/erb_spec.rb).
+{% endrendercontent %}

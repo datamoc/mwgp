@@ -1,0 +1,536 @@
+#!/usr/bin/env bash
+# Create a Ruby2JS notes demo with path helper RPC
+# Usage: create-notes [app-name]
+#
+# Creates a Rails app with Note model featuring:
+# - Path helper RPC for CRUD operations (get, post, patch, delete)
+# - RBX views with React components
+# - Same source runs on browser (Dexie) and server (SQLite) targets
+# - Search with query parameters
+# - Real-time updates via JsonStreamProvider (multi-window sync)
+
+set -e
+
+APP_NAME="${1:-notes}"
+
+echo "Creating Ruby2JS notes demo: $APP_NAME"
+echo ""
+
+# Create Rails app (minimal, with Tailwind for styling)
+rails new "$APP_NAME" --skip-git --skip-docker --css tailwind
+cd "$APP_NAME"
+
+# Generate Note scaffold
+rails generate scaffold Note title:string body:text
+
+# Create database
+rails db:create
+
+# Update Note model with validations and real-time broadcasting
+cat > app/models/note.rb << 'MODEL'
+class Note < ApplicationRecord
+  validates :title, presence: true
+  validates :body, presence: true
+
+  # Real-time updates via JsonStreamProvider
+  after_create_commit -> { broadcast_json_to "notes", "note_created" }
+  after_update_commit -> { broadcast_json_to "notes", "note_updated" }
+  after_destroy_commit -> { broadcast_json_to "notes", "note_destroyed" }
+
+  scope :recent, -> { order(updated_at: :desc) }
+  scope :search, ->(query) { where("title LIKE ?", "%#{query}%") if query.present? }
+end
+MODEL
+
+# Set up routes
+cat > config/routes.rb << 'ROUTES'
+Rails.application.routes.draw do
+  root "notes#index"
+  resources :notes
+end
+ROUTES
+
+# Update NotesController to support JSON and search
+cat > app/controllers/notes_controller.rb << 'CONTROLLER'
+class NotesController < ApplicationController
+  before_action :set_note, only: [:show, :edit, :update, :destroy]
+
+  def index
+    @notes = Note.recent
+    @notes = @notes.search(params[:q]) if params[:q].present?
+
+    respond_to do |format|
+      format.html
+      format.json { render json: @notes }
+    end
+  end
+
+  def show
+    respond_to do |format|
+      format.html
+      format.json { render json: @note }
+    end
+  end
+
+  def new
+    @note = Note.new
+  end
+
+  def edit
+  end
+
+  def create
+    @note = Note.new(note_params)
+
+    respond_to do |format|
+      if @note.save
+        format.html { redirect_to @note, notice: "Note was successfully created." }
+        format.json { render json: @note, status: :created }
+      else
+        format.html { render :new, status: :unprocessable_entity }
+        format.json { render json: @note.errors, status: :unprocessable_entity }
+      end
+    end
+  end
+
+  def update
+    respond_to do |format|
+      if @note.update(note_params)
+        format.html { redirect_to @note, notice: "Note was successfully updated." }
+        format.json { render json: @note }
+      else
+        format.html { render :edit, status: :unprocessable_entity }
+        format.json { render json: @note.errors, status: :unprocessable_entity }
+      end
+    end
+  end
+
+  def destroy
+    @note.destroy
+
+    respond_to do |format|
+      format.html { redirect_to notes_path, notice: "Note was successfully deleted." }
+      format.json { head :no_content }
+    end
+  end
+
+  private
+
+  def set_note
+    @note = Note.find(params[:id])
+  end
+
+  def note_params
+    params.require(:note).permit(:title, :body)
+  end
+end
+CONTROLLER
+
+# Create seeds with sample notes
+cat > db/seeds.rb << 'SEEDS'
+# Sample notes for the demo
+return if Note.count > 0
+
+Note.create!(
+  title: "Welcome to Notes",
+  body: "This is a demo of Ruby2JS path helper RPC. The same source code runs on browser (Dexie/IndexedDB) and server (SQLite/Postgres) targets."
+)
+
+Note.create!(
+  title: "Path Helper Methods",
+  body: "Path helpers now have HTTP methods: notes_path.get(), notes_path.post(note: {...}), note_path(id).patch(note: {...}), note_path(id).delete()"
+)
+
+Note.create!(
+  title: "Search Support",
+  body: "Use query parameters: notes_path.get(q: 'search term') - parameters become query string for GET requests."
+)
+
+Note.create!(
+  title: "JSON by Default",
+  body: "Path helper methods default to JSON format, which is most common for React components. Use format: :html for explicit HTML."
+)
+
+puts "Created #{Note.count} notes"
+SEEDS
+
+# Create JSX.rb-based index view that demonstrates path helper RPC
+mkdir -p app/views/notes
+
+cat > app/views/notes/Index.jsx.rb << 'RBX'
+import React, [useState, useEffect], from: 'react'
+import [notes_path, note_path], from: 'config/routes.rb'
+import JsonStreamProvider, [useJsonStream], from: 'juntos/components/JsonStreamProvider'
+
+# SearchField component
+def SearchField(value:, onChange:)
+  handleChange = ->(e) { onChange(e.target.value) }
+
+  %x{
+    <input
+      type="text"
+      value={value}
+      onChange={handleChange}
+      placeholder="Search notes..."
+      className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+    />
+  }
+end
+
+# NotePreview component for sidebar
+def NotePreview(note:, selected:, onClick:)
+  className = "p-3 border-b cursor-pointer hover:bg-gray-50"
+  className += " bg-blue-50 border-l-4 border-l-blue-500" if selected
+
+  %x{
+    <div onClick={onClick} className={className}>
+      <h3 className="font-medium truncate">{note.title}</h3>
+      <p className="text-sm text-gray-500 truncate">{note.body}</p>
+      <p className="text-xs text-gray-400 mt-1">
+        {new Date(note.updated_at).toLocaleDateString()}
+      </p>
+    </div>
+  }
+end
+
+# Editor component
+def Editor(note:, onUpdate:, onDelete:)
+  noteTitle, setNoteTitle = useState(note.title)
+  noteBody, setNoteBody = useState(note.body)
+  saving, setSaving = useState(false)
+
+  # Reset when note changes
+  useEffect(-> {
+    setNoteTitle(note.title)
+    setNoteBody(note.body)
+    return  # useEffect must return undefined, not a value
+  }, [note.id])
+
+  handleTitleChange = ->(e) { setNoteTitle(e.target.value) }
+  handleBodyChange = ->(e) { setNoteBody(e.target.value) }
+
+  handleSave = -> {
+    setSaving(true)
+    onUpdate({ title: noteTitle, body: noteBody }).then(-> { setSaving(false) })
+  }
+
+  saveLabel = saving ? "Saving..." : "Save"
+
+  %x{
+    <div className="h-full flex flex-col">
+      <input
+        type="text"
+        value={noteTitle}
+        onChange={handleTitleChange}
+        className="text-2xl font-bold border-0 border-b focus:outline-none focus:border-blue-500 pb-2 mb-4"
+        placeholder="Note title"
+      />
+      <textarea
+        value={noteBody}
+        onChange={handleBodyChange}
+        className="flex-1 resize-none border rounded p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        placeholder="Write your note..."
+      />
+      <div className="flex justify-between mt-4">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+        >
+          {saveLabel}
+        </button>
+        <button
+          onClick={onDelete}
+          className="text-red-600 px-4 py-2 rounded hover:bg-red-50"
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  }
+end
+
+# NotesApp component - handles state and real-time updates
+def NotesApp()
+  notes, setNotes = useState([])
+  selectedId, setSelectedId = useState(nil)
+  searchQuery, setSearchQuery = useState("")
+  loading, setLoading = useState(true)
+
+  # Real-time updates from other windows/clients
+  stream = useJsonStream()
+
+  useEffect(-> {
+    return unless stream.lastMessage
+    case stream.lastMessage.type
+    when "note_created"
+      setNotes([stream.lastMessage.data, *notes])
+    when "note_updated"
+      setNotes(notes.map { |n| n.id == stream.lastMessage.data.id ? stream.lastMessage.data : n })
+    when "note_destroyed"
+      setNotes(notes.filter { |n| n.id != stream.lastMessage.data.id })
+      setSelectedId(nil) if selectedId == stream.lastMessage.data.id
+    end
+    return  # useEffect must return undefined, not a value
+  }, [stream.lastMessage])
+
+  # Load notes on mount and when search changes
+  useEffect(-> {
+    setLoading(true)
+    params = {}
+    params[:q] = searchQuery if searchQuery.length > 0
+
+    notes_path.get(params).json do |data|
+      setNotes(data)
+      setLoading(false)
+    end
+    return  # useEffect must return undefined, not a value (the .json call returns a Promise)
+  }, [searchQuery])
+
+  selectedNote = notes.find { |n| n.id == selectedId }
+
+  handleCreate = -> {
+    notes_path.post(note: { title: "Untitled", body: "..." }).json do |note|
+      setNotes([note, *notes])
+      setSelectedId(note.id)
+    end
+  }
+
+  handleUpdate = ->(updates) {
+    note_path(selectedId).patch(note: updates).json do |updated|
+      setNotes(notes.map { |n| n.id == updated.id ? updated : n })
+    end
+  }
+
+  handleDelete = -> {
+    note_path(selectedId).delete.then do
+      setNotes(notes.filter { |n| n.id != selectedId })
+      setSelectedId(nil)
+    end
+  }
+
+  handleSelectNote = ->(id) { setSelectedId(id) }
+
+  renderNoteList = -> {
+    if loading
+      %x{<div className="p-4 text-gray-500 text-center">Loading...</div>}
+    elsif notes.length == 0
+      %x{<div className="p-4 text-gray-500 text-center">No notes found</div>}
+    else
+      notes.map do |note|
+        onClick = -> { handleSelectNote(note.id) }
+        %x{
+          <NotePreview
+            key={note.id}
+            note={note}
+            selected={note.id === selectedId}
+            onClick={onClick}
+          />
+        }
+      end
+    end
+  }
+
+  renderEditor = -> {
+    if selectedNote
+      %x{
+        <Editor
+          note={selectedNote}
+          onUpdate={handleUpdate}
+          onDelete={handleDelete}
+        />
+      }
+    else
+      %x{
+        <div className="h-full flex items-center justify-center text-gray-500">
+          Select a note or create a new one
+        </div>
+      }
+    end
+  }
+
+  %x{
+    <div className="flex h-screen bg-gray-100">
+      <div className="w-80 bg-white border-r flex flex-col">
+        <div className="p-4 border-b">
+          <h1 className="text-xl font-bold mb-4">Notes</h1>
+          <SearchField value={searchQuery} onChange={setSearchQuery} />
+          <button
+            onClick={handleCreate}
+            className="mt-3 w-full bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+          >
+            New Note
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {renderNoteList()}
+        </div>
+      </div>
+      <div className="flex-1 p-6">
+        {renderEditor()}
+      </div>
+    </div>
+  }
+end
+
+# Main Index component - wraps NotesApp in JsonStreamProvider for real-time updates
+export default def Index()
+  %x{
+    <JsonStreamProvider stream="notes">
+      <NotesApp />
+    </JsonStreamProvider>
+  }
+end
+RBX
+
+# Create Show view
+cat > app/views/notes/Show.jsx.rb << 'RBX'
+import React from 'react'
+import [note_path, notes_path], from: 'config/routes.rb'
+
+# Show component for a single note
+export default def Show(note:)
+  handleBack = -> { window.location.href = notes_path() }
+
+  %x{
+    <div className="max-w-2xl mx-auto p-6">
+      <h1 className="text-2xl font-bold mb-4">{note.title}</h1>
+      <div className="prose mb-6">
+        <p>{note.body}</p>
+      </div>
+      <p className="text-sm text-gray-500 mb-4">
+        Last updated: {new Date(note.updated_at).toLocaleDateString()}
+      </p>
+      <button
+        onClick={handleBack}
+        className="text-blue-600 hover:underline"
+      >
+        Back to Notes
+      </button>
+    </div>
+  }
+end
+RBX
+
+# Remove scaffold-generated ERB views (we use RBX instead)
+rm -f app/views/notes/index.html.erb
+rm -f app/views/notes/show.html.erb
+rm -f app/views/notes/new.html.erb
+rm -f app/views/notes/edit.html.erb
+rm -f app/views/notes/_form.html.erb
+rm -f app/views/notes/_note.html.erb
+
+# Update fixtures with valid data
+mkdir -p test/fixtures
+
+cat > test/fixtures/notes.yml << 'FIXTURES'
+one:
+  title: Welcome to Notes
+  body: This is a demo of Ruby2JS path helper RPC with React components.
+
+two:
+  title: Path Helper Methods
+  body: Path helpers now have HTTP methods for CRUD operations on resources.
+FIXTURES
+
+# Create integration test for notes (demo-specific)
+cat > test/notes.test.mjs << 'TEST'
+import { describe, it, expect } from 'vitest';
+
+describe('Note Model', () => {
+  it('creates a note with valid attributes', async () => {
+    const { Note } = await import('juntos:models');
+
+    const note = await Note.create({
+      title: 'Test Note',
+      body: 'This is the body of the test note with enough content.'
+    });
+
+    expect(note.id).toBeDefined();
+    expect(note.title).toBe('Test Note');
+  });
+
+  it('validates title presence', async () => {
+    const { Note } = await import('juntos:models');
+
+    const note = new Note({ title: '', body: 'Valid body content here.' });
+    const saved = await note.save();
+
+    expect(saved).toBe(false);
+    expect(note.errors.title).toBeDefined();
+  });
+
+  it('validates body presence', async () => {
+    const { Note } = await import('juntos:models');
+
+    const note = new Note({ title: 'Valid Title', body: '' });
+    const saved = await note.save();
+
+    expect(saved).toBe(false);
+    expect(note.errors.body).toBeDefined();
+  });
+
+  it('lists all notes', async () => {
+    const { Note } = await import('juntos:models');
+
+    await Note.create({ title: 'Note A', body: 'Body of note A for listing test.' });
+    await Note.create({ title: 'Note B', body: 'Body of note B for listing test.' });
+
+    const notes = await Note.all();
+    expect(notes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('updates a note', async () => {
+    const { Note } = await import('juntos:models');
+
+    const note = await Note.create({
+      title: 'Original Title',
+      body: 'Original body content here.'
+    });
+
+    note.title = 'Updated Title';
+    await note.save();
+
+    const found = await Note.find(note.id);
+    expect(found.title).toBe('Updated Title');
+  });
+
+  it('deletes a note', async () => {
+    const { Note } = await import('juntos:models');
+
+    const note = await Note.create({
+      title: 'To Delete',
+      body: 'This note will be deleted.'
+    });
+
+    const id = note.id;
+    await note.destroy();
+
+    try {
+      await Note.find(id);
+      expect(true).toBe(false); // should not reach here
+    } catch (e) {
+      expect(e).toBeDefined();
+    }
+  });
+});
+TEST
+
+echo ""
+echo "Notes demo created: $APP_NAME/"
+echo ""
+echo "Features:"
+echo "  - Path helper RPC for CRUD (get, post, patch, delete)"
+echo "  - Same source runs on browser and server targets"
+echo "  - Search with query parameters"
+echo "  - Real-time updates (open two windows, changes sync automatically)"
+echo "  - React components with RBX syntax"
+echo ""
+echo "To run with browser target (Dexie/IndexedDB):"
+echo "  cd $APP_NAME"
+echo "  bin/juntos dev -d dexie"
+echo ""
+echo "To run with server target (SQLite):"
+echo "  cd $APP_NAME"
+echo "  bin/juntos dev -d sqlite -t node"
+echo ""

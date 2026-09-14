@@ -1,0 +1,2956 @@
+/**
+ * Shared transformation logic for Ruby2JS Rails applications.
+ *
+ * Used by both vite.mjs (on-the-fly transformation) and cli.mjs (eject command).
+ * This ensures ejected output matches what Vite produces.
+ */
+
+import path from 'node:path';
+import fs from 'node:fs';
+import url from 'node:url';
+
+// Import ERB compiler for .erb files
+import { ErbCompiler } from './lib/erb_compiler.js';
+
+// Import inflector for singularization/pluralization
+import { singularize, pluralize, underscore } from 'juntos/adapters/inflector.mjs';
+
+// ============================================================
+// Constants
+// ============================================================
+
+/**
+ * Default target for each database adapter (used when target not specified).
+ */
+export const DEFAULT_TARGETS = Object.freeze({
+  // Browser-only databases (no OPFS)
+  dexie: 'browser',
+  indexeddb: 'browser',
+  sqljs: 'browser',
+  'sql.js': 'browser',
+
+  // Browser databases with OPFS support (benefit from Worker for persistence)
+  pglite: 'worker',
+  sqlite_wasm: 'worker',
+  'sqlite-wasm': 'worker',
+  wa_sqlite: 'worker',
+  'wa-sqlite': 'worker',
+
+  // TCP-based server databases
+  better_sqlite3: 'node',
+  sqlite3: 'node',
+  sqlite: 'node',
+  pg: 'node',
+  postgres: 'node',
+  postgresql: 'node',
+  mysql2: 'node',
+  mysql: 'node',
+
+  // Platform-specific databases
+  d1: 'cloudflare',
+  mpg: 'fly',
+  sqlite_napi: 'beam',
+  'sqlite-napi': 'beam',
+  postgrex: 'beam',
+
+  // HTTP-based edge databases
+  neon: 'vercel',
+  turso: 'vercel',
+  libsql: 'vercel',
+  planetscale: 'vercel',
+  supabase: 'vercel'
+});
+
+/**
+ * Reserved words that need escaping in exports.
+ */
+export const RESERVED = new Set([
+  'break', 'case', 'catch', 'continue', 'debugger', 'default', 'delete',
+  'do', 'else', 'finally', 'for', 'function', 'if', 'in', 'instanceof',
+  'new', 'return', 'switch', 'this', 'throw', 'try', 'typeof', 'var',
+  'void', 'while', 'with', 'class', 'const', 'enum', 'export', 'extends',
+  'import', 'super', 'implements', 'interface', 'let', 'package', 'private',
+  'protected', 'public', 'static', 'yield'
+]);
+
+// ============================================================
+// Glob matching helpers (for include/exclude filtering)
+// ============================================================
+
+/**
+ * Convert a glob pattern to a regex.
+ * Supports: * (any non-slash), ** (any including slash), ? (single char)
+ */
+export function globToRegex(pattern) {
+  let regex = pattern
+    // Escape special regex chars (except * and ?)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    // ** matches anything including /
+    .replace(/\*\*/g, '<<<GLOBSTAR>>>')
+    // * matches anything except /
+    .replace(/\*/g, '[^/]*')
+    // ? matches single char except /
+    .replace(/\?/g, '[^/]')
+    // Restore globstar
+    .replace(/<<<GLOBSTAR>>>/g, '.*');
+
+  return new RegExp(`^${regex}$`);
+}
+
+/**
+ * Check if a path matches any of the given glob patterns.
+ */
+export function matchesAny(filePath, patterns) {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some(pattern => {
+    // Normalize path separators
+    const normalizedPath = filePath.replace(/\\/g, '/');
+    const normalizedPattern = pattern.replace(/\\/g, '/');
+    return globToRegex(normalizedPattern).test(normalizedPath);
+  });
+}
+
+/**
+ * Determine if a file should be included based on include/exclude patterns.
+ *
+ * @param {string} relativePath - Path relative to app root (e.g., 'app/models/article.rb')
+ * @param {string[]} includePatterns - Patterns to include (if empty, include all)
+ * @param {string[]} excludePatterns - Patterns to exclude
+ * @returns {boolean} True if file should be included
+ */
+export function shouldIncludeFile(relativePath, includePatterns, excludePatterns) {
+  // Normalize path
+  const normalizedPath = relativePath.replace(/\\/g, '/');
+
+  // If include patterns specified, file must match at least one
+  if (includePatterns && includePatterns.length > 0) {
+    if (!matchesAny(normalizedPath, includePatterns)) {
+      return false;
+    }
+  }
+
+  // If exclude patterns specified, file must not match any
+  if (excludePatterns && excludePatterns.length > 0) {
+    if (matchesAny(normalizedPath, excludePatterns)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// ============================================================
+// Helper functions
+// ============================================================
+
+/**
+ * Capitalize first letter of a string.
+ */
+export function capitalize(str) {
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+/**
+ * Convert an underscored string to PascalCase (like Rails classify without singularization).
+ * "age_cost" -> "AgeCost", "cat_extensions" -> "CatExtensions"
+ */
+export function classify(str) {
+  return str.split('_').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join('');
+}
+
+// Re-export inflector functions for convenience
+export { singularize, pluralize, underscore };
+
+// ============================================================
+// Build options
+// ============================================================
+
+/**
+ * Get Ruby2JS transpilation options for a given section.
+ * Uses filter names as strings (resolved by ruby2js).
+ *
+ * @param {string} section - The section type ('stimulus', 'controllers', 'jsx', or null for default)
+ * @param {string} target - The build target ('browser', 'node', etc.)
+ * @param {Object} sectionConfig - Optional section config from ruby2js.yml (e.g., { filters: [...], eslevel: 2022 })
+ * @returns {Object} Ruby2JS options
+ */
+export function getBuildOptions(section, target, sectionConfig = null) {
+  const baseOptions = {
+    eslevel: sectionConfig?.eslevel || 2022,
+    include: sectionConfig?.include || ['class', 'call', 'keys', 'values']
+  };
+
+  // Default filter sets for each section
+  // Node filter is included for targets with Node.js-compatible APIs (fs, child_process, process.env).
+  // See docs/src/_docs/juntos/deploying/index.md for full target list.
+  const nodeTargets = ['node', 'bun', 'deno', 'fly', 'electron'];
+  const nodeFilter = target && nodeTargets.includes(target) ? ['Node'] : [];
+  const defaultFilters = {
+    stimulus: ['Pragma', 'Stimulus', 'Functions', 'ESM', 'Return'],
+    controllers: ['Pragma', 'Rails_Controller', ...nodeFilter, 'ActiveSupport', 'Functions', 'ESM', 'Return'],
+    jsx: ['Pragma', 'Rails_Helpers', 'React', 'Functions', 'ESM', 'Return'],
+    erb: ['Pragma', 'Rails_Helpers', 'Erb', ...nodeFilter, 'ActiveSupport', 'Functions', 'Return'],
+    default: ['Pragma', 'Rails_Concern', 'Rails_Model', 'Rails_Controller', 'Rails_Routes', 'Rails_Seeds', 'Rails_Migration', ...nodeFilter, 'ActiveSupport', 'SecureRandom', 'Functions', 'ESM', 'Return']
+  };
+
+  // Use filters from sectionConfig if provided, otherwise use defaults
+  // Filter names from config are normalized to match Ruby2JS conventions
+  let filters = sectionConfig?.filters
+    ? normalizeFilterNames(sectionConfig.filters)
+    : defaultFilters[section] || defaultFilters.default;
+
+  // Prepend app-specific filters (loaded from config/ruby2js_filter.js)
+  if (appFilterNames.length > 0) {
+    filters = [...appFilterNames, ...filters];
+  }
+
+  switch (section) {
+    case 'stimulus':
+      return {
+        ...baseOptions,
+        autoexports: sectionConfig?.autoexports ?? 'default',
+        filters,
+        target
+      };
+
+    case 'controllers':
+      return {
+        ...baseOptions,
+        autoexports: sectionConfig?.autoexports ?? true,
+        filters,
+        target
+      };
+
+    case 'jsx':
+      return {
+        ...baseOptions,
+        autoexports: sectionConfig?.autoexports ?? 'default',
+        filters,
+        target
+      };
+
+    case 'erb':
+      return {
+        ...baseOptions,
+        filters,
+        target
+      };
+
+    case 'test':
+      return {
+        ...baseOptions,
+        filters: sectionConfig?.filters
+          ? normalizeFilterNames(sectionConfig.filters)
+          : ['Pragma', 'Rails_Concern', 'Rails_Test', 'Rails_Model', ...nodeFilter, 'ActiveSupport', 'Functions', 'ESM', 'Return'],
+        target
+      };
+
+    default:
+      // Models, routes, seeds, migrations
+      return {
+        ...baseOptions,
+        autoexports: sectionConfig?.autoexports ?? true,
+        filters,
+        target
+      };
+  }
+}
+
+/**
+ * Normalize filter names from ruby2js.yml to Ruby2JS conventions.
+ * Converts lowercase names to proper case (e.g., 'stimulus' -> 'Stimulus')
+ */
+function normalizeFilterNames(filters) {
+  const filterMap = {
+    // Lowercase to proper case mapping
+    'pragma': 'Pragma',
+    'stimulus': 'Stimulus',
+    'functions': 'Functions',
+    'esm': 'ESM',
+    'return': 'Return',
+    'react': 'React',
+    'camelcase': 'CamelCase',
+    'rails_controller': 'Rails_Controller',
+    'rails_model': 'Rails_Model',
+    'rails_routes': 'Rails_Routes',
+    'rails_seeds': 'Rails_Seeds',
+    'rails_migration': 'Rails_Migration',
+    'rails_helpers': 'Rails_Helpers',
+    'phlex': 'Phlex',
+    'node': 'Node',
+    // Also handle slash notation from config
+    'rails/controller': 'Rails_Controller',
+    'rails/model': 'Rails_Model',
+    'rails/routes': 'Rails_Routes',
+    'rails/seeds': 'Rails_Seeds',
+    'rails/migration': 'Rails_Migration',
+    'rails/helpers': 'Rails_Helpers',
+    'rails_test': 'Rails_Test',
+    'rails/test': 'Rails_Test',
+    'activesupport': 'ActiveSupport',
+    'active_support': 'ActiveSupport'
+  };
+
+  return filters.map(f => filterMap[f.toLowerCase()] || f);
+}
+
+// ============================================================
+// File discovery
+// ============================================================
+
+/**
+ * Find all model files in app/models/ (recursive).
+ * Returns array of model paths (without .rb extension), e.g. ['account', 'identity/access_token'].
+ * Includes concerns/ subdirectory — dependency ordering is handled by
+ * the retry loop in buildAppManifest.
+ */
+export function findModels(appRoot) {
+  const modelsDir = path.join(appRoot, 'app/models');
+  if (!fs.existsSync(modelsDir)) return [];
+
+  function walk(dir, prefix) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const results = [];
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        results.push(...walk(path.join(dir, entry.name), prefix ? `${prefix}/${entry.name}` : entry.name));
+      } else if (entry.name.endsWith('.rb') && !entry.name.startsWith('._')) {
+        const name = entry.name.replace('.rb', '');
+        results.push(prefix ? `${prefix}/${name}` : name);
+      }
+    }
+    return results;
+  }
+
+  return walk(modelsDir, '');
+}
+
+/**
+ * Derive a JavaScript class name from a model path.
+ * 'account' → 'Account', 'identity/access_token' → 'AccessToken'
+ * If leafCollisions is provided (Set of leaf names appearing more than once),
+ * nested models with colliding leaves get prefixed: 'identity/access_token' → 'IdentityAccessToken'
+ */
+export function modelClassName(modelPath, leafCollisions) {
+  const parts = modelPath.split('/');
+  const leaf = parts[parts.length - 1];
+  const leafClass = classify(leaf);
+
+  if (parts.length === 1 || !leafCollisions || !leafCollisions.has(leafClass)) {
+    return leafClass;
+  }
+
+  // Collision: prefix with namespace segments
+  return parts.map(p => classify(p)).join('');
+}
+
+/**
+ * Find leaf class name collisions among a list of model paths.
+ * Returns a Set of leaf class names that appear more than once.
+ */
+export function findLeafCollisions(models) {
+  const counts = {};
+  for (const m of models) {
+    const parts = m.split('/');
+    const leaf = parts[parts.length - 1];
+    const leafClass = classify(leaf);
+    counts[leafClass] = (counts[leafClass] || 0) + 1;
+  }
+  return new Set(Object.keys(counts).filter(k => counts[k] > 1));
+}
+
+/**
+ * Find all migration files in db/migrate/.
+ * Returns array of { file, name } objects.
+ */
+export function findMigrations(appRoot) {
+  const migrateDir = path.join(appRoot, 'db/migrate');
+  if (!fs.existsSync(migrateDir)) return [];
+  return fs.readdirSync(migrateDir)
+    .filter(f => f.endsWith('.rb') && !f.startsWith('._'))
+    .sort()
+    .map(f => ({ file: f, name: f.replace('.rb', '') }));
+}
+
+/**
+ * Find all view resource directories in app/views/.
+ * Returns array of directory names (e.g., ['articles', 'comments']).
+ */
+export function findViewResources(appRoot) {
+  const viewsDir = path.join(appRoot, 'app/views');
+  if (!fs.existsSync(viewsDir)) return [];
+
+  function hasViewTemplates(dir) {
+    return fs.readdirSync(dir).some(f =>
+      f.endsWith('.html.erb') || f.endsWith('.jsx.rb') || f.endsWith('.turbo_stream.erb'));
+  }
+
+  function walk(dir, prefix) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const results = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === 'layouts' || entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+      const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (hasViewTemplates(fullPath)) {
+        results.push(name);
+      }
+      // Recurse into subdirectories for nested resources (e.g., pages/edits)
+      results.push(...walk(fullPath, name));
+    }
+    return results;
+  }
+
+  return walk(viewsDir, '');
+}
+
+/**
+ * Find all Stimulus controllers in app/javascript/controllers/.
+ * Returns array of { file, name } objects.
+ */
+export function findControllers(appRoot) {
+  const controllersDir = path.join(appRoot, 'app/javascript/controllers');
+  if (!fs.existsSync(controllersDir)) return [];
+  return fs.readdirSync(controllersDir)
+    .filter(f => (f.endsWith('_controller.rb') || f.endsWith('_controller.js')) && !f.startsWith('._'))
+    .map(f => ({
+      file: f,
+      name: f.replace(/_controller\.(rb|js)$/, '').replace(/_/g, '-')
+    }));
+}
+
+// ============================================================
+// Concern merging and metadata
+// ============================================================
+
+// mergeConcernDeclarations has been removed — the concern filter now uses a
+// subclass factory pattern that composes via JS class inheritance, so concerns
+// no longer need pre-transpilation declaration merging.
+
+/**
+ * Parse test_helper.rb for global Current attribute assignments.
+ *
+ * Looks for patterns like: Current.account = accounts("37s")
+ * Returns an array of { attr, table, fixture } objects stored in metadata
+ * for the test filter to generate Current setup beforeEach blocks at AST level.
+ */
+export function parseCurrentAttributes(appRoot) {
+  const helperPath = path.join(appRoot, 'test/test_helper.rb');
+  const attrs = [];
+  if (fs.existsSync(helperPath)) {
+    const helper = fs.readFileSync(helperPath, 'utf-8');
+    const regex = /Current\.(\w+)\s*=\s*(\w+)\(["'](\w+)["']\)/g;
+    let match;
+    while ((match = regex.exec(helper)) !== null) {
+      attrs.push({ attr: match[1], table: match[2], fixture: match[3] });
+    }
+  }
+  return attrs;
+}
+
+/**
+ * Parse config/initializers/inflections.rb for custom irregular inflections.
+ * Returns array of { singular, plural } pairs.
+ */
+export function parseInflections(appRoot) {
+  const filePath = path.join(appRoot, 'config/initializers/inflections.rb');
+  if (!fs.existsSync(filePath)) return [];
+
+  const source = fs.readFileSync(filePath, 'utf-8');
+  const irregulars = [];
+  // Match: inflect.irregular "singular", "plural" (with single or double quotes)
+  const pattern = /inflect\.irregular\s+['"](\w+)['"]\s*,\s*['"](\w+)['"]/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    irregulars.push({ singular: match[1], plural: match[2] });
+  }
+  return irregulars;
+}
+
+/**
+ * Create a shared metadata object for threading through Ruby2JS filters.
+ * Both eject and virtual test modes use this to ensure the same fields exist.
+ * Model, concern, and controller filters write to this during transformation;
+ * the test filter reads it to generate correct imports.
+ */
+export function createMetadata(mode, appRoot) {
+  return {
+    models: {},
+    concerns: {},
+    helpers: {},
+    controller_files: {},
+    import_mode: mode,
+    current_attributes: parseCurrentAttributes(appRoot)
+  };
+}
+
+/**
+ * Pre-analyze the application by transforming all model files.
+ * Populates metadata.models as a side effect of the Rails model filter.
+ * Returns both the metadata object and a cache of transform results.
+ *
+ * @param {string} appRoot - Application root directory
+ * @param {Object} config - Configuration (database, target, sections, etc.)
+ * @param {Object} [options]
+ * @param {string} [options.mode='vite'] - 'vite' | 'eject' | 'virtual'
+ * @returns {Promise<{metadata: Object, modelCache: Map<string, {code: string, map: Object}>}>}
+ */
+export async function buildAppManifest(appRoot, config, { mode = 'vite' } = {}) {
+  await ensureRuby2jsReady(appRoot);
+
+  // Load custom inflections from config/initializers/inflections.rb
+  const customInflections = parseInflections(appRoot);
+  if (customInflections.length > 0) {
+    // Register with JS runtime inflector (used by transform pipeline)
+    const { addIrregular } = await import('juntos/adapters/inflector.mjs');
+    for (const { singular, plural } of customInflections) {
+      addIrregular(singular, plural);
+    }
+    // Register with selfhost inflector (used by filters during transpilation)
+    const { Ruby2JS } = await import('ruby2js');
+    if (Ruby2JS?.Inflector?.add_irregular) {
+      for (const { singular, plural } of customInflections) {
+        Ruby2JS.Inflector.add_irregular(singular, plural);
+      }
+    }
+  }
+
+  const metadata = createMetadata(mode, appRoot);
+  const modelCache = new Map(); // filePath → { code, map }
+
+  const modelsDir = path.join(appRoot, 'app/models');
+  const allModels = findModels(appRoot);
+  const models = (config?.include?.length || config?.exclude?.length)
+    ? allModels.filter(m => shouldIncludeFile(`app/models/${m}.rb`, config.include, config.exclude))
+    : allModels;
+
+  let pending = models.slice();
+  while (pending.length > 0) {
+    const deferred = [];
+
+    for (const modelPath of pending) {
+      const file = modelPath + '.rb';
+      const filePath = path.join(modelsDir, file);
+      if (!fs.existsSync(filePath)) continue;
+
+      try {
+        let source = fs.readFileSync(filePath, 'utf-8');
+
+        const result = await transformRuby(source, filePath, null, config, appRoot, metadata);
+        modelCache.set(filePath, { code: result.code, map: result.map });
+      } catch (err) {
+        if ((err.message || err)?.toString().includes('DependencyError')) {
+          deferred.push(modelPath);
+        } else {
+          console.warn(`[juntos] buildAppManifest: skipped ${file}: ${err.message}`);
+        }
+      }
+    }
+
+    // If nothing was resolved this pass, we're stuck
+    if (deferred.length >= pending.length) {
+      for (const modelPath of deferred) {
+        console.warn(`[juntos] buildAppManifest: unresolved dependency in ${modelPath}.rb`);
+      }
+      break;
+    }
+
+    pending = deferred;
+  }
+
+  // Scan app/helpers/ for application helper modules
+  const helpersDir = path.join(appRoot, 'app/helpers');
+  if (fs.existsSync(helpersDir)) {
+    const helperFiles = fs.readdirSync(helpersDir)
+      .filter(f => f.endsWith('_helper.rb'));
+
+    for (const file of helperFiles) {
+      const filePath = path.join(helpersDir, file);
+      try {
+        const source = fs.readFileSync(filePath, 'utf-8');
+        const result = await transformRuby(source, filePath, null, config, appRoot, metadata);
+        const methods = extractHelperMethods(result.code);
+        if (methods.length > 0) {
+          const baseName = file.replace('.rb', '');
+          metadata.helpers[baseName] = methods;
+          modelCache.set(filePath, { code: result.code, map: result.map });
+        }
+      } catch (err) {
+        console.warn(`[juntos] buildAppManifest: skipped helper ${file}: ${err.message}`);
+      }
+    }
+  }
+
+  // Pre-analyze Rails controllers to populate metadata.view_types.
+  // Controllers record ivar types per action so ERB views can infer
+  // variable types for hash iteration support, etc.
+  const controllersDir = path.join(appRoot, 'app/controllers');
+  if (fs.existsSync(controllersDir)) {
+    // Collect controller concern names for import resolution
+    const ctrlConcernsDir = path.join(controllersDir, 'concerns');
+    if (fs.existsSync(ctrlConcernsDir)) {
+      config.controllerConcerns = new Set(
+        fs.readdirSync(ctrlConcernsDir)
+          .filter(f => f.endsWith('.rb') && !f.startsWith('._'))
+          .map(f => f.replace(/\.rb$/, ''))
+      );
+    }
+
+    const controllerFiles = fs.readdirSync(controllersDir)
+      .filter(f => f.endsWith('_controller.rb') && !f.startsWith('._'));
+
+    for (const file of controllerFiles) {
+      const filePath = path.join(controllersDir, file);
+      try {
+        const source = fs.readFileSync(filePath, 'utf-8');
+        await transformRuby(source, filePath, 'controllers', config, appRoot, metadata);
+      } catch (err) {
+        // Controller pre-analysis is best-effort; skip failures
+      }
+    }
+  }
+
+  // Pre-analyze routes to populate routes_mapping metadata.
+  // This lets the test filter correctly resolve standalone route helpers
+  // (e.g., settings_event_index_path) to the right controller.
+  const routesFile = path.join(appRoot, 'config/routes.rb');
+  if (fs.existsSync(routesFile)) {
+    try {
+      const source = fs.readFileSync(routesFile, 'utf-8');
+      const { convert } = await ensureRuby2jsReady();
+      const routesSectionConfig = config.sections?.routes || null;
+      const routesOptions = {
+        ...getBuildOptions(null, config.target, routesSectionConfig),
+        file: 'config/routes.rb',
+        database: config.database,
+        target: config.target,
+        paths_only: true,
+        base: config.base || '/',
+        metadata
+      };
+      convert(source, routesOptions);
+    } catch (err) {
+      // Routes pre-analysis is best-effort; skip failures
+    }
+  }
+
+  return { metadata, modelCache };
+}
+
+/**
+ * Extract method names from a transpiled helper module.
+ * Helpers transpile as `const XHelper = { method1() {}, method2() {} }`.
+ * We parse method signatures using brace-balanced extraction.
+ *
+ * @param {string} code - Transpiled JavaScript code
+ * @returns {string[]} Array of method names
+ */
+export function extractHelperMethods(code) {
+  // Match the object literal body: const XHelper = { ... }
+  const moduleMatch = code.match(/^(?:export\s+)?const \w+ = \{([\s\S]*)\}\s*$/);
+  if (!moduleMatch) return [];
+
+  const body = moduleMatch[1];
+  const methods = [];
+  let i = 0;
+  while (i < body.length) {
+    // Skip whitespace and commas
+    while (i < body.length && /[\s,]/.test(body[i])) i++;
+    if (i >= body.length) break;
+
+    // Match method signature: name(params) {
+    const sigMatch = body.slice(i).match(/^(?:get\s+)?(\w+)\(([^)]*)\)\s*\{/);
+    if (!sigMatch) { i++; continue; }
+
+    const methodName = sigMatch[1];
+    const braceStart = i + sigMatch[0].length - 1;
+
+    // Find matching close brace
+    let depth = 0;
+    let end = -1;
+    for (let j = braceStart; j < body.length; j++) {
+      if (body[j] === '{') depth++;
+      else if (body[j] === '}') {
+        depth--;
+        if (depth === 0) { end = j; break; }
+      }
+    }
+    if (end === -1) break;
+
+    methods.push(methodName);
+    i = end + 1;
+  }
+  return methods;
+}
+
+/**
+ * Derive an association map from pre-populated metadata.models.
+ * Converts the metadata format ({ ModelName: { associations: [{name, type}, ...] } })
+ * to the { tableName: { assocName: targetTable } } format that
+ * buildFixturePlan expects.
+ *
+ * @param {Object} metadata - Metadata with populated models field
+ * @returns {Object} Association map
+ */
+export function deriveAssociationMap(metadata) {
+  const assocMap = {};
+
+  for (const [className, modelMeta] of Object.entries(metadata.models || {})) {
+    if (!modelMeta.associations || !Array.isArray(modelMeta.associations)) continue;
+    const tableName = underscore(pluralize(className));
+    const tableAssocs = {};
+
+    for (const assoc of modelMeta.associations) {
+      if (!assoc.name) continue;
+      // Derive target table: use class_name if provided (e.g., belongs_to :lead, class_name: 'Person' → people)
+      // Otherwise fall back to Rails convention (pluralize the association name)
+      let targetTable;
+      if (assoc.class_name) {
+        targetTable = underscore(pluralize(assoc.class_name));
+      } else {
+        targetTable = pluralize(assoc.name);
+      }
+      tableAssocs[assoc.name] = {
+        table: targetTable,
+        type: assoc.type || 'belongs_to'
+      };
+    }
+
+    if (Object.keys(tableAssocs).length > 0) {
+      assocMap[tableName] = tableAssocs;
+    }
+  }
+
+  return assocMap;
+}
+
+// ============================================================
+// Import path rewriting
+// ============================================================
+
+import { ImportResolver } from './import-resolver.mjs';
+
+/**
+ * Fix imports in transpiled code to use virtual modules and source files.
+ * Used by Vite plugin for on-the-fly transformation.
+ * Delegates to shared ImportResolver in 'vite' mode.
+ */
+export function fixImports(js, fromFile) {
+  const resolver = new ImportResolver({
+    mode: 'vite',
+    fromFile: fromFile || '',
+    config: {}
+  });
+  return resolver.resolve(js);
+}
+
+/**
+ * Fix imports in test files for ejected code.
+ * Rewrites virtual module imports to concrete paths.
+ */
+export function fixTestImportsForEject(js) {
+  // Virtual modules → concrete paths
+  js = js.replace(/from ['"]juntos:models['"]/g, "from '../app/models/index.js'");
+  js = js.replace(/await import\(['"]juntos:models['"]\)/g, "await import('../app/models/index.js')");
+
+  js = js.replace(/from ['"]juntos:rails['"]/g, "from 'juntos/rails_base.js'");
+  js = js.replace(/await import\(['"]juntos:rails['"]\)/g, "await import('juntos/rails_base.js')");
+
+  js = js.replace(/from ['"]juntos:migrations['"]/g, "from '../db/migrate/index.js'");
+  js = js.replace(/await import\(['"]juntos:migrations['"]\)/g, "await import('../db/migrate/index.js')");
+
+  js = js.replace(/from ['"]juntos:active-record['"]/g, "from 'juntos/adapters/active_record.mjs'");
+  js = js.replace(/await import\(['"]juntos:active-record['"]\)/g, "await import('juntos/adapters/active_record.mjs')");
+
+  // Path helpers virtual module → concrete paths.js file
+  js = js.replace(/from ['"]juntos:paths['"]/g, "from '../config/paths.js'");
+  js = js.replace(/await import\(['"]juntos:paths['"]\)/g, "await import('../config/paths.js')");
+
+  // Controller imports: .rb → .js
+  js = js.replace(/from ['"]\.\.\/app\/controllers\/(\w+)\.rb['"]/g, "from '../app/controllers/$1.js'");
+  js = js.replace(/await import\(['"]\.\.\/app\/controllers\/(\w+)\.rb['"]\)/g, "await import('../app/controllers/$1.js')");
+
+  return js;
+}
+
+/**
+ * Fix imports for ejected code - rewrites to use juntos package.
+ * Ejected code depends on the juntos runtime, not copied local files.
+ * @param {string} js - The JavaScript code to fix
+ * @param {string} fromFile - Relative output path of the file (e.g., 'app/models/article.js')
+ * @param {object} config - Configuration with target/database info
+ */
+export function fixImportsForEject(js, fromFile, config = {}) {
+  // Delegate to shared ImportResolver in 'eject' mode
+  const resolver = new ImportResolver({
+    mode: 'eject',
+    fromFile: fromFile || '',
+    config
+  });
+  js = resolver.resolve(js);
+
+  // Fix selfhost converter Struct.new pattern: [(X = function X(...) {...}).prototype] = [X.prototype]
+  // The right side references X before assignment completes. Simplify to plain let declaration.
+  // ESM strict mode requires variable declaration (no implicit globals).
+  js = js.replace(/^\[\((\w+ = function \w+\([^)]*\) \{[\s\S]*?\})\)\.prototype\] = \[\w+\.prototype\];?/m,
+    'let $1;');
+
+  // Fix alias_method pattern: X.prototype.alias = X.prototype.original
+  // This fails at load time when original is a getter accessing private fields.
+  // Use a helper that walks the prototype chain to find the descriptor.
+  js = js.replace(
+    /^(\w+)\.prototype\.(\w+) = \1\.prototype\.(\w+)$/gm,
+    '{ let _p = $1.prototype; while (_p && !Object.getOwnPropertyDescriptor(_p, "$3")) _p = Object.getPrototypeOf(_p); if (_p) Object.defineProperty($1.prototype, "$2", Object.getOwnPropertyDescriptor(_p, "$3")); }');
+
+  // Remaining import resolution (nested depth, controller concerns, superclass
+  // imports, model cross-references, _url rewriting) is handled by ImportResolver.
+  // Only JS syntax fixes remain below.
+
+  // Path helper import fix (preserves bundle path)
+  js = js.replace(/from ['"](ruby2js-rails|juntos)\/path_helper\.mjs['"]/g, "from 'juntos/path_helper.mjs'");
+
+  return js;
+}
+
+// JS syntax fixes (not import resolution — kept separate)
+export function fixJsSyntax(js) {
+  // Fix selfhost converter Struct.new pattern
+  js = js.replace(/^\[\((\w+ = function \w+\([^)]*\) \{[\s\S]*?\})\)\.prototype\] = \[\w+\.prototype\];?/m, 'let $1;');
+  // Fix alias_method pattern
+  js = js.replace(/^(\w+)\.prototype\.(\w+) = \1\.prototype\.(\w+)$/gm,
+    '{ let _p = $1.prototype; while (_p && !Object.getOwnPropertyDescriptor(_p, "$3")) _p = Object.getPrototypeOf(_p); if (_p) Object.defineProperty($1.prototype, "$2", Object.getOwnPropertyDescriptor(_p, "$3")); }');
+  return js;
+}
+
+// Removed: nested depth, controller concerns, superclass imports,
+// dotted namespace, model cross-references, path helper fixes.
+// All now handled by ImportResolver (import-resolver.mjs).
+//
+// The following was the old fixImportsForEject continuation:
+
+// ============================================================
+// Virtual module content generators
+// ============================================================
+
+/**
+ * Generate content for juntos:models virtual module.
+ */
+export function generateModelsModule(appRoot) {
+  const models = findModels(appRoot).filter(m => m !== 'application_record');
+  const collisions = findLeafCollisions(models);
+  const imports = models.map(m => {
+    const leafClass = classify(m.split('/').pop());
+    const alias = modelClassName(m, collisions);
+    if (alias !== leafClass) {
+      return `import { ${leafClass} as ${alias} } from 'app/models/${m}.rb';`;
+    }
+    return `import { ${alias} } from 'app/models/${m}.rb';`;
+  });
+  const classNames = models.map(m => modelClassName(m, collisions));
+  return `${imports.join('\n')}
+import { Application } from 'juntos:rails';
+import { modelRegistry } from 'juntos:active-record';
+const models = { ${classNames.join(', ')} };
+Application.registerModels(models);
+Object.assign(modelRegistry, models);
+export { ${classNames.join(', ')} };
+`;
+}
+
+/**
+ * Generate content for juntos:models for ejected output.
+ * Uses juntos package for runtime, local paths for app code.
+ */
+export function generateModelsModuleForEject(appRoot, config = {}) {
+  let models = findModels(appRoot).filter(m => m !== 'application_record');
+  // Exclude models that failed to transpile (e.g., unsupported syntax like class << self)
+  if (config.excludeModels) {
+    models = models.filter(m => !config.excludeModels.has(m));
+  }
+  const collisions = findLeafCollisions(models);
+  const adapterFile = getActiveRecordAdapterFile(config.database);
+
+  // Determine target for importing Application
+  let target = config.target || 'node';
+  if (!config.target && config.database === 'dexie') {
+    target = 'browser';
+  }
+  const railsModule = `juntos/targets/${target}/rails.js`;
+
+  // Read actual exported class names from transpiled files when outDir is available.
+  // This handles cases like IO (Ruby) vs Io (PascalCase from filename).
+  function getActualExportName(modelPath) {
+    if (config.outDir) {
+      try {
+        const jsPath = path.join(config.outDir, 'app/models', modelPath + '.js');
+        const content = fs.readFileSync(jsPath, 'utf-8');
+        // Look for export class X, export const X, or export { X } or export { Y as X }
+        const classMatch = content.match(/export\s+(?:class|const|function)\s+(\w+)/);
+        if (classMatch) return classMatch[1];
+        const aliasMatch = content.match(/export\s*\{\s*\w+\s+as\s+(\w+)\s*\}/);
+        if (aliasMatch) return aliasMatch[1];
+        const namedMatch = content.match(/export\s*\{\s*(\w+)\s*\}/);
+        if (namedMatch) return namedMatch[1];
+      } catch {}
+    }
+    return null;
+  }
+
+  const imports = models.map(m => {
+    const actualName = getActualExportName(m);
+    const alias = modelClassName(m, collisions);
+    const importName = actualName || classify(m.split('/').pop());
+    if (alias !== importName) {
+      return `import { ${importName} as ${alias} } from './${m}.js';`;
+    }
+    return `import { ${alias} } from './${m}.js';`;
+  });
+  const classNames = models.map(m => modelClassName(m, collisions));
+
+  // Build nesting map: models in subdirectories nest under parent model
+  // e.g., search/highlighter -> Search.Highlighter
+  const nestingPairs = [];
+  for (const m of models) {
+    const parts = m.split('/');
+    if (parts.length >= 2) {
+      const parentPath = parts.slice(0, -1).join('/');
+      const parentName = modelClassName(parentPath, collisions);
+      const childName = modelClassName(m, collisions);
+      // Only nest if parent model exists
+      if (models.includes(parentPath)) {
+        nestingPairs.push(`["${parentName}", "${childName}"]`);
+      }
+    }
+  }
+  const nestingCode = nestingPairs.length > 0
+    ? `\n// Model nesting for Ruby namespace resolution (e.g., Search::Highlighter -> Search.Highlighter)\nglobalThis._modelNesting = [${nestingPairs.join(', ')}];\n`
+    : '';
+
+  return `${imports.join('\n')}
+import { Application } from '${railsModule}';
+import { modelRegistry, attr_accessor } from 'juntos/adapters/${adapterFile}';
+import { migrations } from '../../db/migrate/index.js';
+const models = { ${classNames.join(', ')} };
+Application.registerModels(models);
+Object.assign(modelRegistry, models);
+
+// Define attribute accessors from migration schema (like Rails schema.rb)
+for (const migration of migrations) {
+  if (!migration.tableSchemas) continue;
+  for (const [table, schema] of Object.entries(migration.tableSchemas)) {
+    const model = Object.values(models).find(m => m.tableName === table);
+    if (!model) continue;
+    const columns = schema.split(', ').map(c => c.replace(/^[+&]*/g, '')).filter(c => c !== 'id');
+    attr_accessor(model, ...columns);
+  }
+}
+${nestingCode}
+export { ${classNames.join(', ')} };
+`;
+}
+
+/**
+ * Generate package.json for ejected output.
+ */
+export function generatePackageJsonForEject(appName, config = {}) {
+  const RELEASES_BASE = 'https://ruby2js.github.io/ruby2js/releases';
+
+  // Determine if this is a browser target
+  const browserTargets = ['browser', 'pwa', 'capacitor', 'electron', 'tauri', 'electrobun'];
+  const isBrowserTarget = browserTargets.includes(config.target);
+
+  const scripts = {
+    dev: 'vite',
+    build: 'vite build',
+    preview: 'vite preview',
+    test: 'vitest run'
+  };
+
+  // Only add start script for server targets
+  if (!isBrowserTarget) {
+    scripts.start = 'node main.js';
+  }
+
+  const pkg = {
+    name: appName,
+    type: 'module',
+    scripts,
+    dependencies: {
+      'ruby2js': `${RELEASES_BASE}/ruby2js-beta.tgz`,
+      'juntos': `${RELEASES_BASE}/juntos-beta.tgz`
+    },
+    devDependencies: {
+      'vite': '^7.0.0',
+      'vitest': '^4.0.0'
+    }
+  };
+
+  // Add browser dependencies
+  if (isBrowserTarget) {
+    pkg.dependencies['@hotwired/turbo'] = '^8.0.0';
+    pkg.dependencies['@hotwired/stimulus'] = '^3.2.0';
+  }
+
+  // Add React if app uses JSX views
+  if (config.viewFramework === 'react') {
+    pkg.dependencies['react'] = '^18.0.0';
+    pkg.dependencies['react-dom'] = '^18.0.0';
+  }
+
+  // Add database adapter dependency based on config
+  // sqlite/sqlite3 use built-in node:sqlite (no dependency needed)
+  if (config.database === 'better_sqlite3') {
+    pkg.dependencies['better-sqlite3'] = '^11.10.0';
+  } else if (config.database === 'dexie') {
+    pkg.dependencies['dexie'] = '^4.0.0';
+  }
+
+  return JSON.stringify(pkg, null, 2) + '\n';
+}
+
+/**
+ * Generate test/setup.mjs for both Vite dev mode and ejected output.
+ *
+ * @param {Object} config
+ * @param {string} config.mode - 'vite' | 'eject'
+ * @param {string} config.database - Database adapter name
+ * @param {string} [config.target] - Build target (node, browser, etc.)
+ * @param {boolean} [config.hasFixtures] - Whether fixture loading is needed
+ * @param {Array} [config.helpers] - [{file, exports}] test helper modules
+ * @param {Array} [config.stimulusControllers] - [{name, className, file}]
+ * @param {boolean} [config.cssImport] - Include CSS import (Vite dev only)
+ */
+export function generateTestSetup(config = {}) {
+  const mode = config.mode || 'vite';
+  const isVite = mode === 'vite';
+  const isBrowserDb = ['dexie', 'pglite', 'sqljs', 'sql.js'].includes(config.database);
+
+  // --- Import paths differ by mode ---
+  const modelsImport = isVite ? 'juntos:models' : '../app/models/index.js';
+  const migrationsImport = isVite ? 'juntos:migrations' : '../db/migrate/index.js';
+  const routesImport = isVite ? '../config/routes.rb' : '../config/routes.js';
+
+  let adapterImport;
+  if (isVite) {
+    adapterImport = 'juntos:active-record';
+  } else {
+    const adapterFile = getActiveRecordAdapterFile(config.database);
+    adapterImport = `juntos/adapters/${adapterFile}`;
+  }
+
+  let railsImport;
+  if (isVite) {
+    railsImport = 'juntos:rails';
+  } else {
+    let target = config.target || 'node';
+    if (!config.target && config.database === 'dexie') target = 'browser';
+    railsImport = `juntos/targets/${target}/rails.js`;
+  }
+
+  // --- Fixture handling ---
+  const fixtureFile = isVite ? './__fixtures.mjs' : './fixtures.mjs';
+  const fixtureImport = config.hasFixtures !== false
+    ? `\nimport { loadFixtures, _fixtures } from '${fixtureFile}';`
+    : '';
+
+  // --- Test helpers ---
+  const helpers = config.helpers || [];
+  const helperImports = helpers.map(h =>
+    `import { ${h.exports.join(', ')} } from './test_helpers/${h.file}';`
+  ).join('\n');
+  const helperGlobals = helpers.flatMap(h =>
+    h.exports.map(name => `globalThis.${name} = ${name};`)
+  ).join('\n');
+  const helperSection = helpers.length > 0
+    ? `\n${helperImports}\n\n// Make test helpers globally available (like Rails includes)\n${helperGlobals}\n`
+    : '';
+
+  // --- Stimulus controllers ---
+  const stimulusControllers = config.stimulusControllers || [];
+  const stimulusImports = stimulusControllers.map(c =>
+    `import ${c.className} from '../app/javascript/controllers/${c.file}';`
+  ).join('\n');
+  const stimulusRegistrations = stimulusControllers.map(c =>
+    `registerController('${c.name}', ${c.className});`
+  ).join('\n');
+  const stimulusSection = stimulusControllers.length > 0
+    ? `\nimport { registerController } from 'juntos/system_test.mjs';\n${stimulusImports}\n${stimulusRegistrations}\n`
+    : '';
+
+  // --- CSS import (Vite dev only, for Tailwind) ---
+  const cssImport = config.cssImport ? `\nimport '${config.cssImport}';` : '';
+
+  // --- Build the setup file ---
+  let out = `// Test setup for Vitest
+// Initializes the database, loads fixtures, isolates tests
+
+// Rails stubs MUST be imported before anything that loads models
+// (concerns use delegate, validates, etc. during class definition)
+import 'juntos/rails_stubs.mjs';
+
+import { beforeAll, beforeEach, afterEach, afterAll, expect } from 'vitest';
+import { installFetchInterceptor, resetCookies } from 'juntos/test_fetch.mjs';${fixtureImport}${stimulusSection}${helperSection}${cssImport}
+
+// Compare ActiveRecord model instances by class and id (like Rails)
+expect.addEqualityTesters([
+  function modelsEqual(a, b) {
+    const aIsModel = a && typeof a === 'object' && a.constructor?.tableName && 'id' in a;
+    const bIsModel = b && typeof b === 'object' && b.constructor?.tableName && 'id' in b;
+    if (aIsModel && bIsModel) {
+      return a.constructor === b.constructor && a.id === b.id;
+    }
+    if (aIsModel || bIsModel) return false;
+    return undefined; // fall through to default for non-models
+  }
+]);
+
+// Suppress ActiveRecord CRUD logging during tests
+const _info = console.info;
+const _debug = console.debug;
+console.info = () => {};
+console.debug = () => {};
+
+afterAll(() => {
+  console.info = _info;
+  console.debug = _debug;
+});
+`;
+
+  // --- beforeAll: init models, migrations, routes, database ---
+  out += `
+beforeAll(async () => {
+  // Import models (registers them with Application and modelRegistry)
+  await import('${modelsImport}');
+`;
+
+  if (!isVite) {
+    // Eject: make all models globally available (Vite resolves via virtual modules)
+    out += `  const models = await import('${modelsImport}');
+  for (const [name, value] of Object.entries(models)) {
+    if (typeof value === 'function' || typeof value === 'object') {
+      globalThis[name] = value;
+    }
+  }
+`;
+    // Eject: handle nested model classes and CurrentAttributes promotion
+    out += `  // Attach nested classes to parent namespaces (e.g., Card.Closeable = Closeable)
+  const _nesting = (globalThis._modelNesting || []);
+  for (const [parent, child] of _nesting) {
+    if (globalThis[parent] && globalThis[child]) {
+      globalThis[parent][child] = globalThis[child];
+    }
+  }
+  // Promote CurrentAttributes instance methods to static on Current
+  if (globalThis.Current?._promoteInstanceMethods) Current._promoteInstanceMethods();
+
+`;
+  }
+
+  out += `  // Configure and initialize database
+  const rails = await import('${railsImport}');
+  const { migrations } = await import('${migrationsImport}');
+  rails.Application.configure({ migrations });
+
+  // Import routes (registers routes with Router)
+  await import('${routesImport}');
+
+  // Install fetch interceptor so Stimulus controllers can reach controller actions
+  installFetchInterceptor();
+`;
+
+  if (isBrowserDb) {
+    // Browser databases: full init function for re-use in beforeEach
+    out += `
+  await initBrowserDb();
+});
+
+async function initBrowserDb() {
+  const activeRecord = await import('${adapterImport}');
+  await activeRecord.initDatabase({ database: ':memory:' });
+
+  // For Dexie/IndexedDB: register table schemas and open database
+  if (activeRecord.defineSchema) {
+    const { migrations } = await import('${migrationsImport}');
+    activeRecord.registerSchema('schema_migrations', '&version');
+    for (const migration of migrations) {
+      if (migration.tableSchemas) {
+        for (const [table, schema] of Object.entries(migration.tableSchemas)) {
+          activeRecord.registerSchema(table, schema);
+        }
+      }
+    }
+    activeRecord.defineSchema(1);
+    await activeRecord.openDatabase();
+  }
+
+  const rails = await import('${railsImport}');
+  await rails.Application.runMigrations(activeRecord);
+  ${config.hasFixtures !== false ? 'await loadFixtures();\n  globalThis.__fixtures = _fixtures;' : ''}
+}
+
+beforeEach(async () => {
+  resetCookies();
+  const activeRecord = await import('${adapterImport}');
+  if (activeRecord.closeDatabase) {
+    await activeRecord.closeDatabase();
+  }
+  await initBrowserDb();
+});
+
+afterEach(async () => {
+  // cleanup handled in beforeEach
+});
+`;
+  } else {
+    // SQL databases: init once, use savepoints/transactions for isolation
+    const beginIsolation = isVite ? 'activeRecord.beginSavepoint()' : 'activeRecord.beginTransaction()';
+    const endIsolation = isVite ? 'activeRecord.rollbackSavepoint()' : 'activeRecord.rollbackTransaction()';
+
+    out += `
+  const activeRecord = await import('${adapterImport}');
+  await activeRecord.initDatabase({ database: ':memory:' });
+  await rails.Application.runMigrations(activeRecord);
+  ${config.hasFixtures !== false ? 'await loadFixtures();\n  globalThis.__fixtures = _fixtures;' : ''}
+});
+
+beforeEach(async () => {
+  resetCookies();
+  const activeRecord = await import('${adapterImport}');
+  ${beginIsolation};
+});
+
+afterEach(async () => {
+  const activeRecord = await import('${adapterImport}');
+  ${endIsolation};
+});
+`;
+  }
+
+  return out;
+}
+
+/**
+ * Generate test/setup.mjs for ejected output.
+ * Thin wrapper around generateTestSetup for backward compatibility.
+ */
+export function generateTestSetupForEject(config = {}) {
+  return generateTestSetup({ ...config, mode: 'eject' });
+}
+
+/**
+ * Generate test/globals.mjs with Ruby pattern stubs.
+ * Separate from setup.mjs so it can be imported without vitest context.
+ */
+export function generateTestGlobalsForEject() {
+  return `import { beforeEach as _timeBeforeEach } from 'vitest';
+
+// Global stubs for Ruby patterns that don't have direct JS equivalents
+// These are defined here so tests can load without errors
+
+// $private() - Ruby's private method marker, no-op in JS (functions are already scoped)
+globalThis.$private = function() {};
+
+// include() - Ruby module inclusion, stubbed for now
+// TODO: Implement proper module mixin support
+globalThis.include = function(module) {
+  // No-op for now - tests that need shared setup will fail until helpers are implemented
+};
+
+// extend() - Ruby module extension (extend self makes module methods callable on the module itself)
+globalThis.extend = function(target) {
+  // No-op - in IIFE module pattern, methods are already accessible
+};
+
+// ActiveSupport stub for patterns like ActiveSupport::Concern and CurrentAttributes
+globalThis.ActiveSupport = {
+  Concern: {},
+  CurrentAttributes: class CurrentAttributes {
+    static _attributes = {};
+    static _pending = [];
+    static attribute(...names) {
+      for (const name of names) {
+        if (!(name in this)) {
+          Object.defineProperty(this, name, {
+            get() { return this._attributes[name]; },
+            set(v) {
+              // Detect async values (Promises from setter chains like find_by)
+              if (v && typeof v === 'object' && typeof v.then === 'function') {
+                this._pending.push(v.then(resolved => {
+                  this._attributes[name] = resolved;
+                }));
+              }
+              this._attributes[name] = v;
+            },
+            configurable: true
+          });
+        }
+      }
+    }
+    static reset() { this._attributes = {}; this._pending = []; }
+    // Await all async operations triggered by setter chains
+    static async settle() {
+      if (this._pending.length > 0) {
+        await Promise.all(this._pending);
+        this._pending = [];
+      }
+    }
+    static $with(attrs, fn) {
+      const prev = { ...this._attributes };
+      Object.assign(this._attributes, attrs);
+      try { return fn?.(); } finally { this._attributes = prev; }
+    }
+    // Promote instance methods/setters to static on subclasses
+    static _promoteInstanceMethods() {
+      const proto = this.prototype;
+      const parentProto = Object.getPrototypeOf(proto);
+      for (const name of Object.getOwnPropertyNames(proto)) {
+        if (name === 'constructor') continue;
+        const desc = Object.getOwnPropertyDescriptor(proto, name);
+        if (desc?.set) {
+          // Custom setter (e.g., session=) — integrate with attribute() setter
+          const customSetter = desc.set;
+          const existingDesc = Object.getOwnPropertyDescriptor(this, name);
+          if (existingDesc?.set) {
+            const origGetter = existingDesc.get;
+            const origSetter = existingDesc.set;
+            // Define stub on parent prototype so super.name(v) doesn't crash
+            if (!parentProto[name]) parentProto[name] = function(v) {};
+            Object.defineProperty(this, name, {
+              get: origGetter,
+              set(v) {
+                origSetter.call(this, v);  // Store in _attributes first
+                customSetter.call(this, v); // Then run custom chain
+              },
+              configurable: true
+            });
+          }
+        } else if (desc && typeof desc.value === 'function' && !(name in this)) {
+          this[name] = desc.value.bind(this);
+        }
+      }
+    }
+  }
+};
+
+// validates/validate - ActiveModel class-level validation DSL
+// In Rails these come from ActiveModel::Validations::ClassMethods via include
+// The transpiled code calls them as static methods (e.g., Signup.validates(...))
+Function.prototype.validates = Function.prototype.validates || function() {};
+Function.prototype.validate = Function.prototype.validate || function() {};
+
+// delegate() - Rails delegation DSL, no-op stub
+// In Rails: Model.delegate(:method, to: :association)
+// Make available on all classes
+Function.prototype.delegate = Function.prototype.delegate || function() {};
+
+// Rails namespace stub
+globalThis.Rails = { application: { config: {} } };
+
+// ActionMailer stub for ActionMailer.TestHelper
+globalThis.ActionMailer = {
+  TestHelper: { name: 'ActionMailer.TestHelper' }
+};
+
+// PlatformAgent stub (from platform_agent gem - not available in JS)
+globalThis.PlatformAgent = class PlatformAgent {
+  constructor(userAgent) { this._userAgent = userAgent || ''; }
+  get user_agent() { return { browser: this._userAgent, platform: this._userAgent }; }
+  match(pattern) { return pattern.test(this._userAgent); }
+};
+
+// URI namespace — Ruby stdlib, used for URI::MailTo::EMAIL_REGEXP etc.
+globalThis.URI = {
+  MailTo: {
+    EMAIL_REGEXP: /\\A[a-zA-Z0-9.!#$%&'*+\\/=?^_\`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\\z/
+  },
+  parse(str) { try { return new URL(str); } catch { return null; } },
+  encode_www_form_component(s) { return encodeURIComponent(String(s)); }
+};
+
+// --- Framework namespace stubs ---
+// These allow models to load without crashing. The stubs provide the right
+// shape (classes, static methods, exception types) but not real behavior.
+
+// Helper: stub class with common ActiveRecord-style static methods
+function _stubModelClass(name) {
+  return class StubModel {
+    static _name = name;
+    constructor(attrs) { Object.assign(this, attrs || {}); }
+    static where() { return []; }
+    static find_by() { return null; }
+    static exists() { return false; }
+    static create() { return new this(); }
+    static create_and_upload() { return new this(); }
+    static insert_all() {}
+    static column_names = [];
+    update(attrs) { Object.assign(this, attrs); return this; }
+  };
+}
+
+// ERB namespace — ERB.Util is mixed in via Object.getOwnPropertyDescriptors
+globalThis.ERB = {
+  Util: {
+    html_escape(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
+    url_encode(s) { return encodeURIComponent(String(s)); }
+  }
+};
+
+// ActiveStorage namespace
+globalThis.ActiveStorage = {
+  Blob: Object.assign(_stubModelClass('ActiveStorage::Blob'), {
+    service: { name: 'local' },
+    services: { fetch(name) { return { name }; } }
+  }),
+  Attachment: _stubModelClass('ActiveStorage::Attachment'),
+  FileNotFoundError: class FileNotFoundError extends Error { name = 'ActiveStorage::FileNotFoundError' },
+  PurgeJob: class PurgeJob {},
+  Service: {
+    S3Service: class S3Service {}
+  }
+};
+
+// ActionText namespace
+globalThis.ActionText = {
+  RichText: _stubModelClass('ActionText::RichText'),
+  Attachment: Object.assign(_stubModelClass('ActionText::Attachment'), {
+    from_attachable(blob) { return { to_html: '<div></div>' }; }
+  }),
+  Content: class Content {
+    constructor(html) { this._html = html || ''; }
+    append_attachables() { return this; }
+    toString() { return this._html; }
+  },
+  Attachables: {
+    RemoteImage: class RemoteImage {}
+  }
+};
+
+// ActiveRecord namespace additions (extends existing ActiveRecord from adapter)
+if (!globalThis.ActiveRecord) globalThis.ActiveRecord = {};
+Object.assign(globalThis.ActiveRecord, {
+  FixtureSet: {
+    identify(name, count) {
+      // Simple hash for deterministic fixture IDs (matches Rails behavior loosely)
+      let hash = 0;
+      for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+      return Math.abs(hash);
+    }
+  },
+  Type: {
+    Boolean: class BooleanType {
+      cast(val) {
+        if (val === 'true' || val === '1' || val === 1 || val === true) return true;
+        if (val === 'false' || val === '0' || val === 0 || val === false || val == null) return false;
+        return !!val;
+      }
+    },
+    Uuid: Object.assign(
+      class UuidType {
+        serialize(val) { return String(val); }
+      },
+      { generate: crypto.randomUUID ? crypto.randomUUID.bind(crypto) : () => Math.random().toString(36).slice(2) }
+    ),
+    lookup(name) {
+      if (name === 'boolean') return new this.Boolean();
+      if (name === 'uuid') return new this.Uuid();
+      return { cast(v) { return v; }, serialize(v) { return v; } };
+    }
+  },
+  RecordNotFound: class RecordNotFound extends Error { name = 'ActiveRecord::RecordNotFound' },
+  RecordInvalid: class RecordInvalid extends Error { name = 'ActiveRecord::RecordInvalid' },
+  RecordNotUnique: class RecordNotUnique extends Error { name = 'ActiveRecord::RecordNotUnique' },
+  RecordNotSaved: class RecordNotSaved extends Error { name = 'ActiveRecord::RecordNotSaved' },
+  ValueTooLong: class ValueTooLong extends Error { name = 'ActiveRecord::ValueTooLong' },
+  CheckViolation: class CheckViolation extends Error { name = 'ActiveRecord::CheckViolation' },
+  Base: {
+    connection_pool: {
+      with_connection(fn) { return fn(); }
+    }
+  }
+});
+
+// ActiveModel namespace — mixed in via Object.getOwnPropertyDescriptors
+globalThis.ActiveModel = {
+  Model: {},
+  Attributes: {
+    attribute() {}
+  },
+  Validations: {
+    validates() {},
+    validate() {}
+  }
+};
+
+// ZipKit namespace — RemoteIO is used as a superclass (extends ZipKit.RemoteIO)
+globalThis.ZipKit = {
+  RemoteIO: class RemoteIO {
+    constructor(uri) { this._uri = uri; }
+  },
+  FileReader: Object.assign(
+    class FileReader {},
+    {
+      read_zip_structure(opts) { return []; },
+      InvalidStructure: class InvalidStructure extends Error { name = 'ZipKit::FileReader::InvalidStructure' }
+    }
+  ),
+  Streamer: class Streamer {
+    constructor(io) { this._io = io; }
+    write_deflated_file() {}
+    write_stored_file() {}
+    close() {}
+  }
+};
+
+// Mittens stub — snowball stemmer gem (mittens-ruby), used for search
+globalThis.Mittens = {
+  Stemmer: class Stemmer {
+    stem(word) { return String(word || '').toLowerCase(); }
+  }
+};
+
+// IPAddr stub — Ruby stdlib class for IP address parsing/matching
+globalThis.IPAddr = class IPAddr {
+  constructor(str) { this._str = str; }
+  include(addr) { return false; }
+  to_s() { return this._str; }
+};
+
+// App helper stubs — Rails helpers mixed into models via include/Object.getOwnPropertyDescriptors.
+// These are app-specific but referenced at model load time, so we stub them here.
+globalThis.ExcerptHelper = {
+  format_excerpt(content, opts) { return String(content || '').slice(0, (opts?.length || 200)); }
+};
+globalThis.TimeHelper = {
+  local_datetime_tag(datetime, opts) { return ''; }
+};
+
+// ActionView namespace — helpers mixed in via Object.getOwnPropertyDescriptors
+globalThis.ActionView = {
+  Helpers: {
+    TagHelper: {
+      tag: Object.assign(function tag(name, opts) { return ''; }, {
+        div(content, opts) { return '<div>' + (content || '') + '</div>'; },
+        span(content, opts) { return '<span>' + (content || '') + '</span>'; },
+        p(content, opts) { return '<p>' + (content || '') + '</p>'; }
+      }),
+      content_tag(name, content, opts) { return '<' + name + '>' + (content || '') + '</' + name + '>'; }
+    },
+    OutputSafetyHelper: {
+      safe_join(arr, sep) { return arr.join(sep || ''); },
+      raw(s) { return String(s); }
+    }
+  },
+  RecordIdentifier: {
+    dom_id(record, prefix) {
+      const name = (record?.constructor?.name || 'record').replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
+      const id = record?.id || 'new';
+      return prefix ? prefix + '_' + name + '_' + id : name + '_' + id;
+    }
+  }
+};
+
+// --- Rails test helper stubs ---
+
+// assert_difference(expression, difference, fn) - verify a numeric change
+globalThis.assert_difference = async function(expr, diff, fn) {
+  if (typeof diff === 'function') { fn = diff; diff = 1; }
+  const evalExpr = (e) => typeof e === 'function' ? e() : eval(e.replace(/::/g, '.'));
+  const before = await evalExpr(expr);
+  await fn();
+  const after = await evalExpr(expr);
+  const { expect } = await import('vitest');
+  expect(after - before).toBe(diff);
+};
+
+// assert_no_difference(expression, fn)
+globalThis.assert_no_difference = async function(expr, fn) {
+  return assert_difference(expr, 0, fn);
+};
+
+// assert_changes(expression, opts_or_fn, fn) - verify a value change
+globalThis.assert_changes = async function(expr, ...args) {
+  let fn = args.pop();
+  const evalExpr = (e) => typeof e === 'function' ? e() : eval(e.replace(/::/g, '.'));
+  const before = await evalExpr(expr);
+  await fn();
+  const after = await evalExpr(expr);
+  const { expect } = await import('vitest');
+  expect(after).not.toEqual(before);
+};
+
+// assert_no_changes(expression, fn)
+globalThis.assert_no_changes = async function(expr, fn) {
+  const evalExpr = (e) => typeof e === 'function' ? e() : eval(e.replace(/::/g, '.'));
+  const before = await evalExpr(expr);
+  await fn();
+  const after = await evalExpr(expr);
+  const { expect } = await import('vitest');
+  expect(after).toEqual(before);
+};
+
+// mock()/stub() - Minitest/Mocha mock+stub framework
+function _createStubChain(returnVal) {
+  const chain = {
+    _returnVal: returnVal,
+    _yieldFn: null,
+    _multiYields: null,
+    returns(val) { chain._returnVal = val; return chain; },
+    yields(...args) { chain._yieldFn = args; return chain; },
+    multiple_yields(...args) { chain._multiYields = args; return chain; },
+    with(...args) { return chain; },
+    once() { return chain; },
+    twice() { return chain; },
+    at_least_once() { return chain; },
+    never() { return chain; },
+    then() { return chain; }
+  };
+  return chain;
+}
+
+globalThis.mock = function(name) {
+  const obj = {
+    _name: name || 'mock',
+    stubs(method) { return _createStubChain(undefined); },
+    expects(method) { return _createStubChain(undefined); },
+    verify() { return true; }
+  };
+  return new Proxy(obj, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      return function() { return undefined; };
+    }
+  });
+};
+
+globalThis.stub = function(attrs) {
+  if (attrs && typeof attrs === 'object') {
+    const obj = { ...attrs };
+    obj.stubs = function(method) { return _createStubChain(undefined); };
+    obj.expects = function(method) { return _createStubChain(undefined); };
+    return obj;
+  }
+  return _createStubChain(undefined);
+};
+
+// Add stubs/expects to all objects and classes for Mocha-style mocking
+if (!Object.prototype.stubs) {
+  Object.defineProperty(Object.prototype, 'stubs', {
+    value: function(method) { return _createStubChain(undefined); },
+    writable: true, configurable: true, enumerable: false
+  });
+}
+if (!Object.prototype.expects) {
+  Object.defineProperty(Object.prototype, 'expects', {
+    value: function(method) { return _createStubChain(undefined); },
+    writable: true, configurable: true, enumerable: false
+  });
+}
+
+// stub_request - WebMock-style HTTP stubbing
+globalThis.stub_request = function(method, url) {
+  return _createStubChain({ code: '200', body: '' });
+};
+globalThis.assert_requested = function(stub) { /* no-op */ };
+
+// --- Time helpers (freeze_time, travel_to, travel_back, durations) ---
+
+const _RealDate = globalThis.Date;
+let _frozenTime = null;
+
+function _currentTimeMs() {
+  return _frozenTime !== null ? _frozenTime : _RealDate.now();
+}
+
+// Override Date to respect frozen/traveled time
+const _FakeDate = function(...args) {
+  if (new.target) {
+    if (args.length === 0) return new _RealDate(_currentTimeMs());
+    return new _RealDate(...args);
+  }
+  return new _RealDate(_currentTimeMs()).toString();
+};
+_FakeDate.prototype = _RealDate.prototype;
+_FakeDate.now = function() { return _currentTimeMs(); };
+_FakeDate.parse = _RealDate.parse.bind(_RealDate);
+_FakeDate.UTC = _RealDate.UTC.bind(_RealDate);
+globalThis.Date = _FakeDate;
+
+// Time.current - Ruby's Time.current (returns ISO string)
+globalThis.Time = {
+  get current() { return new _RealDate(_currentTimeMs()).toISOString(); }
+};
+
+// freeze_time - freezes time at current moment
+globalThis.freeze_time = function() {
+  _frozenTime = _RealDate.now();
+};
+
+// travel_to - travel to a specific time, optionally with block
+globalThis.travel_to = function(time, fn) {
+  const target = new _RealDate(time).getTime();
+  const prev = _frozenTime;
+  _frozenTime = target;
+  if (fn) {
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      return result.then(
+        (v) => { _frozenTime = prev; return v; },
+        (e) => { _frozenTime = prev; throw e; }
+      );
+    }
+    _frozenTime = prev;
+    return result;
+  }
+};
+
+// travel - advance time by a duration (Duration object or milliseconds)
+globalThis.travel = function(duration) {
+  const ms = (duration && typeof duration._ms === 'number') ? duration._ms : Number(duration);
+  const base = _frozenTime !== null ? _frozenTime : _RealDate.now();
+  _frozenTime = base + ms;
+};
+
+// travel_back - reset time
+globalThis.travel_back = function() {
+  _frozenTime = null;
+};
+
+// Reset time state between tests
+_timeBeforeEach(() => { _frozenTime = null; });
+
+// Duration class for number extensions
+class _Duration {
+  constructor(ms) { this._ms = ms; }
+  get ago() { return new _RealDate(_currentTimeMs() - this._ms).toISOString(); }
+  get from_now() { return new _RealDate(_currentTimeMs() + this._ms).toISOString(); }
+}
+
+// Number extensions: (1).week, (2).days, etc.
+for (const [unit, factor] of Object.entries({
+  second: 1000, seconds: 1000,
+  minute: 60000, minutes: 60000,
+  hour: 3600000, hours: 3600000,
+  day: 86400000, days: 86400000,
+  week: 604800000, weeks: 604800000,
+  month: 2592000000, months: 2592000000,
+  year: 31536000000, years: 31536000000
+})) {
+  Object.defineProperty(Number.prototype, unit, {
+    get() { return new _Duration(this * factor); },
+    configurable: true, enumerable: false
+  });
+}
+
+// .change({usec: 0}) on ISO date strings - truncate milliseconds
+if (!String.prototype.change) {
+  Object.defineProperty(String.prototype, 'change', {
+    value: function(opts) {
+      if (opts && 'usec' in opts && opts.usec === 0) {
+        const d = new _RealDate(this);
+        if (!isNaN(d.getTime())) {
+          d.setMilliseconds(0);
+          return d.toISOString();
+        }
+      }
+      return String(this);
+    },
+    writable: true, configurable: true, enumerable: false
+  });
+}
+
+// perform_enqueued_jobs - ActiveJob test helper (runs block immediately)
+globalThis.perform_enqueued_jobs = async function(fn) { if (fn) await fn(); };
+
+// file_fixture - Rails test file fixture (stub)
+globalThis.file_fixture = function(name) {
+  return {
+    read() { return ''; },
+    path: name,
+    toString() { return name; }
+  };
+};
+
+// Tempfile stub
+globalThis.Tempfile = class Tempfile {
+  constructor(args) {
+    this._name = Array.isArray(args) ? args[0] : args;
+    this._content = '';
+  }
+  write(data) { this._content += data; }
+  rewind() {}
+  read() { return this._content; }
+  close() {}
+  unlink() {}
+  get path() { return '/tmp/' + this._name; }
+};
+
+// StringIO stub - Ruby stdlib in-memory IO
+globalThis.StringIO = class StringIO {
+  constructor(str) { this._str = str || ''; this._pos = 0; }
+  write(data) { this._str += data; return data.length; }
+  read() { return this._str; }
+  rewind() { this._pos = 0; }
+  string() { return this._str; }
+  toString() { return this._str; }
+};
+
+// Net namespace - Ruby stdlib networking
+globalThis.Net = {
+  HTTP: Object.assign(function() {}, {
+    get(url) { return ''; },
+    post(url, body) { return ''; },
+    new(...args) { return mock('http'); },
+    start(...args) { return mock('http'); }
+  })
+};
+
+// Resolv namespace - Ruby stdlib DNS resolution
+globalThis.Resolv = {
+  DNS: Object.assign(function() {}, {
+    open(...args) { return []; },
+    new() { return { getaddress() { return '127.0.0.1'; } }; }
+  })
+};
+
+// assert_turbo_stream_broadcasts - Turbo test helper (no-op)
+globalThis.assert_turbo_stream_broadcasts = function() {};
+globalThis.assert_no_turbo_stream_broadcasts = function() {};
+
+// ActiveJob test helpers
+globalThis.assert_enqueued_with = function() {};
+globalThis.assert_enqueued_jobs = function(count, fn) { if (fn) return fn(); };
+globalThis.assert_no_enqueued_jobs = function(fn) { if (fn) return fn(); };
+`;
+}
+
+/**
+ * Get the active record adapter filename for a database.
+ */
+export function getActiveRecordAdapterFile(database) {
+  const adapterMap = {
+    'sqlite': 'active_record_sqlite.mjs',
+    'sqlite3': 'active_record_sqlite.mjs',
+    'better_sqlite3': 'active_record_better_sqlite3.mjs',
+    'dexie': 'active_record_dexie.mjs',
+    'pg': 'active_record_pg.mjs',
+    'postgres': 'active_record_pg.mjs',
+    'neon': 'active_record_neon.mjs',
+    'd1': 'active_record_d1.mjs',
+    'turso': 'active_record_turso.mjs',
+    'pglite': 'active_record_pglite.mjs',
+    'sqljs': 'active_record_sqljs.mjs',
+    'sqlite_wasm': 'active_record_sqlite_wasm.mjs',
+    'sqlite-wasm': 'active_record_sqlite_wasm.mjs',
+    'wa_sqlite': 'active_record_wa_sqlite.mjs',
+    'wa-sqlite': 'active_record_wa_sqlite.mjs',
+    'mysql': 'active_record_mysql2.mjs',
+    'mysql2': 'active_record_mysql2.mjs',
+    'sqlite_napi': 'active_record_sqlite_napi.mjs',
+    'sqlite-napi': 'active_record_sqlite_napi.mjs',
+    'postgrex': 'active_record_postgrex.mjs'
+  };
+  return adapterMap[database] || 'active_record_dexie.mjs';
+}
+
+/**
+ * Generate main.js entry point for ejected Node.js server.
+ */
+export function generateMainJsForEject(config = {}, appRoot = '.') {
+  const adapterFile = getActiveRecordAdapterFile(config.database);
+  const dbConfig = config.database === 'sqlite' || config.database === 'sqlite3' || config.database === 'better_sqlite3'
+    ? `{ adapter: 'better_sqlite3', database: './db/development.sqlite3' }`
+    : `{ adapter: '${config.database || 'dexie'}', database: 'app_dev' }`;
+
+  // Determine target for importing Application
+  let target = config.target || 'node';
+  if (!config.target && config.database === 'dexie') {
+    target = 'browser';
+  }
+  const railsModule = `juntos/targets/${target}/rails.js`;
+
+  // Generate custom inflection registration code
+  const inflections = parseInflections(appRoot);
+  const inflectionCode = inflections.length > 0
+    ? `import { addIrregular } from 'juntos/adapters/inflector.mjs';\n` +
+      inflections.map(i => `addIrregular('${i.singular}', '${i.plural}');`).join('\n') + '\n\n'
+    : '';
+
+  return `// Main entry point for ejected Node.js server
+import { Application, Router } from '${railsModule}';
+import * as activeRecord from 'juntos/adapters/${adapterFile}';
+import 'juntos/rails_stubs.mjs';
+${inflectionCode}
+// Import models (registers them)
+import './app/models/index.js';
+
+// Import migrations and seeds
+import { migrations } from './db/migrate/index.js';
+import { Seeds } from './db/seeds.js';
+
+// Import routes (sets up the router)
+import './config/routes.js';
+
+async function main() {
+  // Configure application
+  Application.configure({ migrations });
+
+  // Initialize database
+  console.log('Initializing database...');
+  await activeRecord.initDatabase(${dbConfig});
+
+  // Run migrations
+  console.log('Running migrations...');
+  await Application.runMigrations(activeRecord);
+
+  // Run seeds if database is fresh
+  if (Seeds && typeof Seeds.run === 'function') {
+    console.log('Running seeds...');
+    await Seeds.run();
+  }
+
+  // Start server
+  const port = process.env.PORT || 3000;
+  console.log(\`Starting server on http://localhost:\${port}\`);
+
+  // Create HTTP server with Router dispatch
+  const { createServer } = await import('http');
+  const server = createServer(async (req, res) => {
+    await Router.dispatch(req, res);
+  });
+
+  server.listen(port);
+}
+
+main().catch(console.error);
+`;
+}
+
+/**
+ * Generate vitest.config.js for ejected output.
+ */
+export function generateVitestConfigForEject(config = {}) {
+  const externals = [];
+
+  // Native/built-in modules need to be externalized for Vite/Vitest
+  if (config.database === 'better_sqlite3') {
+    externals.push('better-sqlite3');
+  } else if (config.database === 'sqlite' || config.database === 'sqlite3') {
+    externals.push('node:sqlite');
+  }
+
+  return `import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+export default defineConfig({
+  test: {
+    root: __dirname,
+    globals: true,
+    environment: 'node',
+    server: {
+      deps: {
+        // Externalize app code and adapters — already valid JS, skip Vite transform.
+        // This dramatically reduces memory usage and startup time.
+        external: [/^\\./, /ruby2js/, ${externals.map(e => JSON.stringify(e)).join(', ')}]
+      }
+    },
+    testTimeout: 5000,
+    hookTimeout: 10000,
+    pool: 'threads',
+    poolOptions: { threads: { maxThreads: 4, minThreads: 1 } },
+    include: ['test/**/*.test.mjs', 'test/**/*.test.js'],
+    setupFiles: [resolve(__dirname, 'test/globals.mjs'), resolve(__dirname, 'test/setup.mjs')]
+  }
+});
+`;
+}
+
+/**
+ * Generate vite.config.js for ejected output.
+ * This is a plain Vite config - no ruby2js plugins needed since code is already JS.
+ */
+export function generateViteConfigForEject(config = {}) {
+  const adapterFile = getActiveRecordAdapterFile(config.database);
+
+  // Determine if this is a browser target
+  const browserTargets = ['browser', 'pwa', 'capacitor', 'electron', 'tauri', 'electrobun'];
+  const isBrowserTarget = browserTargets.includes(config.target);
+
+  // Build aliases - always include app paths
+  const aliases = [
+    `      'app/': './app/'`,
+    `      'config/': './config/'`,
+    `      'db/': './db/'`
+  ];
+
+  // Add virtual module aliases for browser targets
+  if (isBrowserTarget) {
+    aliases.push(`      'juntos:active-record': 'juntos/adapters/${adapterFile}'`);
+  }
+
+  return `import { defineConfig } from 'vite';
+
+export default defineConfig({
+  // Ejected JavaScript - no ruby2js transformation needed
+  resolve: {
+    alias: {
+${aliases.join(',\n')}
+    }
+  }
+});
+`;
+}
+
+/**
+ * Detect the CSS path for browser HTML based on available source files.
+ * Prefers Tailwind source (compiled by @tailwindcss/vite) over pre-built CSS.
+ * @param {string} appRoot - Absolute path to the app root
+ * @returns {string|null} CSS path relative to web root, or null if none found
+ */
+export function detectCssPath(appRoot) {
+  const hasTailwindPlugin = fs.existsSync(path.join(appRoot, 'node_modules/@tailwindcss/vite'));
+  // Prefer juntos.css wrapper (has @source directives for content detection)
+  if (hasTailwindPlugin &&
+      fs.existsSync(path.join(appRoot, 'app/assets/tailwind/juntos.css'))) {
+    return '/app/assets/tailwind/juntos.css';
+  }
+  // Fall back to source CSS if plugin is available
+  if (hasTailwindPlugin &&
+      fs.existsSync(path.join(appRoot, 'app/assets/tailwind/application.css'))) {
+    return '/app/assets/tailwind/application.css';
+  }
+  // Fall back to pre-built CSS
+  if (fs.existsSync(path.join(appRoot, 'app/assets/builds/tailwind.css'))) {
+    return '/app/assets/builds/tailwind.css';
+  }
+  // Propshaft/plain CSS: auto-generate entry from app/assets/stylesheets/
+  const stylesheetsDir = path.join(appRoot, 'app/assets/stylesheets');
+  if (fs.existsSync(stylesheetsDir)) {
+    const cssFiles = fs.readdirSync(stylesheetsDir)
+      .filter(f => f.endsWith('.css') && !f.startsWith('.'))
+      .sort();
+    if (cssFiles.length > 0) {
+      // Generate a temporary CSS file that imports all stylesheets
+      const imports = cssFiles.map(f => `@import './${f}';`).join('\n');
+      const entryPath = path.join(stylesheetsDir, '_juntos_all.css');
+      fs.writeFileSync(entryPath, `/* Auto-generated by Juntos */\n${imports}\n`);
+      return '/app/assets/stylesheets/_juntos_all.css';
+    }
+  }
+  return null;
+}
+
+/**
+ * Generate index.html for browser builds.
+ * Used by both Vite plugin (dev) and eject command (standalone).
+ * @param {string} appName - Application name for the title
+ * @param {string} mainJsPath - Path to main.js (e.g., '/.browser/main.js' or './main.js')
+ * @param {string|null} cssPath - Path to CSS file, or null for no CSS link
+ */
+export function generateBrowserIndexHtml(appName, mainJsPath = './main.js', cssPath = null, { target, external, dependencies } = {}) {
+  const cssLink = cssPath ? `\n  <link href="${cssPath}" rel="stylesheet">` : '';
+  // Worker target needs coi-serviceworker for COOP/COEP headers (SharedWorker + OPFS)
+  const coiScript = target === 'worker'
+    ? `\n  <script src="coi-serviceworker.js"></script>` : '';
+
+  // Generate import map for externalized packages (loaded from CDN at runtime)
+  let importMapScript = '';
+  if (external && external.length > 0 && dependencies) {
+    const imports = {};
+    for (const pkg of external) {
+      const version = dependencies[pkg];
+      if (version) {
+        // Resolve version: strip ^, ~, >= prefixes for CDN URL
+        const cleanVersion = version.replace(/^[\^~>=]+/, '');
+        imports[pkg] = `https://esm.sh/${pkg}@${cleanVersion}`;
+      }
+    }
+    if (Object.keys(imports).length > 0) {
+      importMapScript = `\n  <script type="importmap">\n  ${JSON.stringify({ imports }, null, 2).replace(/\n/g, '\n  ')}\n  </script>`;
+    }
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="turbo-refresh-method" content="morph">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${appName}</title>
+  <link rel="icon" href="data:,">${cssLink}${coiScript}${importMapScript}
+</head>
+<body>
+  <div id="loading">Loading...</div>
+  <div id="app" style="display:none">
+    <main class="container mx-auto mt-28 px-5 flex" id="content"></main>
+  </div>
+  <script type="module" src="${mainJsPath}"></script>
+</body>
+</html>
+`;
+}
+
+/**
+ * Generate main.js entry point for browser builds.
+ * Used by both Vite plugin (dev) and eject command (standalone).
+ * @param {string} routesPath - Import path for routes (e.g., '../config/routes.rb' or './config/routes.js')
+ * @param {string} controllersPath - Import path for controllers (e.g., '../app/javascript/controllers/index.js')
+ * @param {string|null} layoutPath - Import path for layout (e.g., './app/views/layouts/application.html.erb')
+ */
+export function generateBrowserMainJs(routesPath = './config/routes.js', controllersPath = './app/javascript/controllers/index.js', layoutPath = null) {
+  const layoutImport = layoutPath ? `\nimport { layout } from '${layoutPath}';` : '';
+  const layoutConfig = layoutPath ? '\nApplication.configure({ layout: layout });' : '';
+  return `// Main entry point for browser
+import * as Turbo from '@hotwired/turbo';
+import { Application } from '${routesPath}';
+import '${controllersPath}';${layoutImport}
+window.Turbo = Turbo;${layoutConfig}
+Application.start();
+
+// Dev-mode HMR handlers
+if (import.meta.hot) {
+  // Model hot-swap: re-import model, patch old class, Turbo morph
+  import.meta.hot.on('juntos:model-update', async (data) => {
+    try {
+      const mod = await import(/* @vite-ignore */ data.file + '?t=' + Date.now());
+      // Patch the OLD class with methods/properties from the NEW class.
+      // This updates existing references (controllers still hold the old class).
+      for (const [key, NewClass] of Object.entries(mod)) {
+        const OldClass = Application.models[key];
+        if (typeof NewClass !== 'function' || !OldClass) continue;
+        // Copy prototype methods (validate, custom methods, getters/setters)
+        for (const name of Object.getOwnPropertyNames(NewClass.prototype)) {
+          if (name === 'constructor') continue;
+          Object.defineProperty(OldClass.prototype, name,
+            Object.getOwnPropertyDescriptor(NewClass.prototype, name));
+        }
+        // Copy static properties (associations, callbacks, etc.)
+        for (const name of Object.getOwnPropertyNames(NewClass)) {
+          if (['prototype', 'length', 'name'].includes(name)) continue;
+          try {
+            Object.defineProperty(OldClass, name,
+              Object.getOwnPropertyDescriptor(NewClass, name));
+          } catch {}
+        }
+        console.log('[juntos] Hot-patched model:', key);
+      }
+    } catch (e) {
+      console.warn('[juntos] Model hot-swap failed, doing full reload:', e);
+      location.reload();
+      return;
+    }
+    // No page refresh needed — the patched model is immediately active.
+    // Next form submission will use the new validation rules.
+  });
+
+  // Route/controller reload (smooth Turbo navigation)
+  import.meta.hot.on('juntos:reload', () => {
+    if (window.Turbo) {
+      window.Turbo.visit(location.href, { action: 'replace' });
+    } else {
+      location.reload();
+    }
+  });
+}
+`;
+}
+
+/**
+ * Generate content for juntos:migrations virtual module.
+ */
+export function generateMigrationsModule(appRoot) {
+  const migrations = findMigrations(appRoot);
+  const imports = migrations.map((m, i) =>
+    `import { migration as migration${i} } from 'db/migrate/${m.file}';`
+  );
+  const exports = migrations.map((m, i) =>
+    `{ version: '${m.name.split('_')[0]}', name: '${m.name}', ...migration${i} }`
+  );
+  return `${imports.join('\n')}
+export const migrations = [${exports.join(', ')}];
+`;
+}
+
+/**
+ * Generate content for juntos:migrations for ejected output.
+ */
+export function generateMigrationsModuleForEject(appRoot) {
+  const migrations = findMigrations(appRoot);
+  const imports = migrations.map((m, i) =>
+    `import { migration as migration${i} } from './${m.name}.js';`
+  );
+  const exports = migrations.map((m, i) =>
+    `{ version: '${m.name.split('_')[0]}', name: '${m.name}', ...migration${i} }`
+  );
+  return `${imports.join('\n')}
+export const migrations = [${exports.join(', ')}];
+`;
+}
+
+/**
+ * Deduplicate view exports when a partial and non-partial share the same name.
+ * E.g., _index.html.erb and index.html.erb both produce exportName "index".
+ * Non-partials win; partials keep their _ prefix to avoid collision.
+ */
+function deduplicateViewExports(views) {
+  const seen = new Set();
+  // First pass: collect non-partial export names
+  for (const v of views) {
+    if (!v.isPartial) seen.add(v.exportName);
+  }
+  // Second pass: rename partials that conflict with non-partials
+  for (const v of views) {
+    if (v.isPartial && seen.has(v.exportName)) {
+      v.exportName = '_' + v.exportName;
+    }
+    seen.add(v.exportName);
+  }
+  return views;
+}
+
+/**
+ * Generate content for juntos:views/* virtual module.
+ * @param {string} appRoot - Application root
+ * @param {string} resource - Resource name (e.g., 'articles', 'workflows')
+ * @returns {string} Module content
+ */
+export function generateViewsModule(appRoot, resource) {
+  const viewsDir = path.join(appRoot, 'app/views', resource);
+  const leafName = resource.includes('/') ? resource.split('/').pop() : resource;
+  if (!fs.existsSync(viewsDir)) return `export const ${classify(singularize(leafName))}Views = {};`;
+
+  // Collect ERB views (.html.erb)
+  const erbViews = fs.readdirSync(viewsDir)
+    .filter(f => f.endsWith('.html.erb') && !f.startsWith('._'))
+    .map(f => {
+      const name = f.replace('.html.erb', '');
+      const isPartial = name.startsWith('_');
+      let exportName = isPartial ? name.slice(1) : name;
+      // Escape reserved words by adding $ prefix (matches Ruby2JS convention)
+      if (RESERVED.has(exportName)) exportName = '$' + exportName;
+      return { file: f, name, exportName, isPartial, isReact: false };
+    });
+
+  // Collect React views (.jsx.rb) - these export default, not render
+  const reactViews = fs.readdirSync(viewsDir)
+    .filter(f => f.endsWith('.jsx.rb') && !f.startsWith('._'))
+    .map(f => {
+      // Show.jsx.rb -> show (lowercase)
+      const name = f.replace('.jsx.rb', '');
+      let exportName = name.toLowerCase();
+      if (RESERVED.has(exportName)) exportName = '$' + exportName;
+      return { file: f, name, exportName, isPartial: false, isReact: true };
+    });
+
+  const views = deduplicateViewExports([...erbViews, ...reactViews]);
+
+  const imports = views.map(v => {
+    if (v.isReact) {
+      // React components export default
+      return `import ${v.exportName} from 'app/views/${resource}/${v.file}';`;
+    } else {
+      // ERB views export { render }
+      return `import { render as ${v.exportName} } from 'app/views/${resource}/${v.file}';`;
+    }
+  });
+
+  // Create namespace object: ArticleViews = { index, show, new_, edit, ... }
+  // Use singularized form to match controller filter (ArticleViews, not ArticlesViews)
+  // Use leaf name for the export (pages/edits → Edit, books → Book)
+  const leafResource = resource.includes('/') ? resource.split('/').pop() : resource;
+  const className = classify(singularize(leafResource)) + 'Views';
+  const members = views.map(v => v.exportName);
+
+  return `${imports.join('\n')}
+export const ${className} = { ${members.join(', ')} };
+export { ${members.join(', ')} };
+`;
+}
+
+/**
+ * Generate content for views module for ejected output.
+ */
+export function generateViewsModuleForEject(appRoot, resource) {
+  const viewsDir = path.join(appRoot, 'app/views', resource);
+  const leafName = resource.includes('/') ? resource.split('/').pop() : resource;
+  if (!fs.existsSync(viewsDir)) return `export const ${classify(singularize(leafName))}Views = {};`;
+
+  // Collect ERB views (.html.erb)
+  const erbViews = fs.readdirSync(viewsDir)
+    .filter(f => f.endsWith('.html.erb') && !f.startsWith('._'))
+    .map(f => {
+      const name = f.replace('.html.erb', '');
+      const isPartial = name.startsWith('_');
+      let exportName = isPartial ? name.slice(1) : name;
+      if (RESERVED.has(exportName)) exportName = '$' + exportName;
+      // Output filename: index.html.erb → index.js
+      const outputFile = f.replace('.html.erb', '.js');
+      return { file: f, outputFile, name, exportName, isPartial, isReact: false };
+    });
+
+  // Collect React views (.jsx.rb)
+  const reactViews = fs.readdirSync(viewsDir)
+    .filter(f => f.endsWith('.jsx.rb') && !f.startsWith('._'))
+    .map(f => {
+      const name = f.replace('.jsx.rb', '');
+      let exportName = name.toLowerCase();
+      if (RESERVED.has(exportName)) exportName = '$' + exportName;
+      // Output filename: Show.jsx.rb → Show.js
+      const outputFile = f.replace('.jsx.rb', '.js');
+      return { file: f, outputFile, name, exportName, isPartial: false, isReact: true };
+    });
+
+  const views = deduplicateViewExports([...erbViews, ...reactViews]);
+
+  // Use leaf name for the export and import paths
+  // For pages/edits, barrel is at pages/edits.js, imports from ./edits/show.js
+  const leafResource = resource.includes('/') ? resource.split('/').pop() : resource;
+
+  const imports = views.map(v => {
+    if (v.isReact) {
+      return `import ${v.exportName} from './${leafResource}/${v.outputFile}';`;
+    } else {
+      return `import { render as ${v.exportName} } from './${leafResource}/${v.outputFile}';`;
+    }
+  });
+
+  const className = classify(singularize(leafResource)) + 'Views';
+  const members = views.map(v => v.exportName);
+
+  return `${imports.join('\n')}
+export const ${className} = { ${members.join(', ')} };
+export { ${members.join(', ')} };
+`;
+}
+
+/**
+ * Generate a turbo stream module for ejected code.
+ * Mirrors the Vite virtual module logic for juntos:views/*_turbo_streams.
+ * Aggregates *.turbo_stream.erb files from a resource's view directory.
+ */
+export function generateTurboStreamModuleForEject(appRoot, resource) {
+  const viewsDir = path.join(appRoot, 'app/views', resource);
+  if (!fs.existsSync(viewsDir)) return null;
+
+  const turboViews = fs.readdirSync(viewsDir)
+    .filter(f => f.endsWith('.turbo_stream.erb') && !f.startsWith('._'))
+    .map(f => {
+      const name = f.replace('.turbo_stream.erb', '');
+      let exportName = name;
+      if (RESERVED.has(exportName)) exportName = '$' + exportName;
+      const outputFile = f.replace('.turbo_stream.erb', '.turbo_stream.js');
+      return { file: f, outputFile, name, exportName };
+    });
+
+  if (turboViews.length === 0) return null;
+
+  const imports = turboViews.map(v =>
+    `import { render as ${v.exportName}_render } from './${resource}/${v.outputFile}';`
+  );
+
+  const className = classify(singularize(resource)) + 'TurboStreams';
+  const members = turboViews.map(v => `${v.exportName}: ${v.exportName}_render`);
+
+  return `${imports.join('\n')}
+export const ${className} = { ${members.join(', ')} };
+`;
+}
+
+// ============================================================
+// Transformation functions
+// ============================================================
+
+// Lazy-loaded ruby2js module
+let ruby2jsModule = null;
+let filtersLoaded = false;
+const appFilterNames = [];  // Track app-specific filter names for inclusion in filter chains
+
+/**
+ * Ensure ruby2js module is loaded, Prism is initialized, and filters are loaded.
+ * @param {string} [appRoot] - Application root for loading app-specific filters
+ */
+export async function ensureRuby2jsReady(appRoot) {
+  if (!ruby2jsModule) {
+    ruby2jsModule = await import('ruby2js');
+    await ruby2jsModule.initPrism();
+  }
+
+  // Load all filters needed for Rails apps (used by both Vite and eject)
+  if (!filtersLoaded) {
+    // Core filters
+    await import('ruby2js/filters/active_support.js');
+    await import('ruby2js/filters/functions.js');
+    await import('ruby2js/filters/esm.js');
+    await import('ruby2js/filters/return.js');
+    await import('ruby2js/filters/pragma.js');
+    await import('ruby2js/filters/polyfill.js');
+
+    // Rails filters
+    await import('ruby2js/filters/rails/concern.js');
+    await import('ruby2js/filters/rails/model.js');
+    await import('ruby2js/filters/rails/controller.js');
+    await import('ruby2js/filters/rails/routes.js');
+    await import('ruby2js/filters/rails/seeds.js');
+    await import('ruby2js/filters/rails/migration.js');
+    await import('ruby2js/filters/rails/helpers.js');
+    await import('ruby2js/filters/rails/test.js');
+    await import('ruby2js/filters/rails/logger.js');
+
+    // Template filters
+    await import('ruby2js/filters/erb.js');
+
+    // Component filters
+    await import('ruby2js/filters/react.js');
+    await import('ruby2js/filters/stimulus.js');
+
+    // Node.js filter (File operations, backtick commands, etc.)
+    await import('ruby2js/filters/node.js');
+
+    // SecureRandom filter (Web Crypto API)
+    await import('ruby2js/filters/securerandom.js');
+
+    filtersLoaded = true;
+  }
+
+  // App-specific filter: load from config/ruby2js_filter.js if it exists
+  // Loaded outside filtersLoaded check so it works even when core filters
+  // were loaded by an earlier call without appRoot
+  if (appRoot && appFilterNames.length === 0) {
+    const filterPath = path.join(appRoot, 'config', 'ruby2js_filter.js');
+    if (fs.existsSync(filterPath)) {
+      const filterModule = await import(url.pathToFileURL(filterPath).href);
+      const filterClass = filterModule.default;
+      if (filterClass?.name) {
+        appFilterNames.push(filterClass.name);
+      }
+    }
+  }
+
+  return ruby2jsModule;
+}
+
+let playwrightFilterLoaded = false;
+
+/**
+ * Load the Playwright filter on demand (only needed for e2e transpilation).
+ */
+export async function ensurePlaywrightFilter() {
+  if (!playwrightFilterLoaded) {
+    await ensureRuby2jsReady();
+    await import('ruby2js/filters/rails/playwright.js');
+    playwrightFilterLoaded = true;
+  }
+}
+
+/**
+ * Transform Ruby source to JavaScript.
+ *
+ * @param {string} source - Ruby source code
+ * @param {string} filePath - Path to source file (for sourcemaps)
+ * @param {string} section - Transformation section (stimulus, controllers, jsx, or null for default)
+ * @param {Object} config - Configuration object with target, database, base, etc.
+ * @param {string} appRoot - Application root directory
+ * @returns {Promise<{code: string, map: Object}>}
+ */
+export async function transformRuby(source, filePath, section, config, appRoot, metadata = null) {
+  const { convert } = await ensureRuby2jsReady(appRoot);
+
+  // Get section-specific config from ruby2js.yml if available
+  const sectionConfig = config.sections?.[section] || null;
+  const options = {
+    ...getBuildOptions(section, config.target, sectionConfig),
+    file: path.relative(appRoot, filePath),
+    database: config.database,
+    target: config.target
+  };
+
+  // Thread shared metadata through to filters (populated by model/concern
+  // filters, consumed by test filter for await/sync decisions)
+  if (metadata) {
+    options.metadata = metadata;
+
+    // Add Playwright filter for e2e test transpilation
+    // Must be FIRST in the array: pipeline.rb reverses the filter list before
+    // building the mixin chain, so the first element ends up last-included
+    // (highest priority in Ruby's mixin MRO)
+    if (metadata.playwright && Array.isArray(options.filters)) {
+      options.filters = ['Rails_Playwright', ...options.filters];
+    }
+  }
+
+  // Routes need additional options
+  if (filePath.endsWith('/routes.rb')) {
+    options.base = config.base || '/';
+  }
+
+  const result = convert(source, options);
+  return {
+    code: result.toString(),
+    map: result.sourcemap
+  };
+}
+
+/**
+ * Lint Ruby source for transpilation issues.
+ *
+ * Combines two phases:
+ * 1. Structural checks on raw AST (anti-patterns that can't transpile)
+ * 2. Type-ambiguity checks via pragma filter (runs full convert with lint: true)
+ *
+ * @param {string} source - Ruby source code
+ * @param {string} filePath - Path to source file
+ * @param {string} section - Transformation section (models, controllers, etc.)
+ * @param {Object} config - Configuration object with target, database, etc.
+ * @param {string} appRoot - Application root directory
+ * @returns {Promise<Array>} Array of diagnostic objects
+ */
+export async function lintRuby(source, filePath, section, config, appRoot, lintOptions = {}) {
+  const { convert, parse } = await ensureRuby2jsReady();
+  const diagnostics = [];
+  const relPath = path.relative(appRoot, filePath);
+
+  // Phase 1: Structural checks on raw AST
+  try {
+    let checkStructural;
+    try {
+      ({ checkStructural } = await import('./lint.mjs'));
+    } catch {
+      // lint.mjs not available (e.g., older tarball) — skip structural checks
+    }
+
+    if (checkStructural) {
+      const [ast] = parse(source, relPath);
+      const structural = checkStructural(ast, relPath);
+      diagnostics.push(...structural);
+    }
+  } catch (e) {
+    diagnostics.push({
+      severity: 'error', rule: 'parse_error',
+      message: e.message, file: relPath, line: null, column: null
+    });
+    return diagnostics;
+  }
+
+  // Phase 2: Type-ambiguity checks via pragma filter (runs full convert)
+  try {
+    const sectionConfig = config.sections?.[section] || null;
+    const options = {
+      ...getBuildOptions(section, config.target, sectionConfig),
+      file: relPath,
+      database: config.database,
+      target: config.target,
+      lint: true,
+      strict: !!lintOptions.strict,
+      diagnostics: diagnostics,  // shared mutable array - pragma filter pushes to it
+      ...(lintOptions.type_hints ? { type_hints: lintOptions.type_hints } : {})
+    };
+
+    convert(source, options);
+  } catch (e) {
+    diagnostics.push({
+      severity: 'error', rule: 'conversion_error',
+      message: e.message, file: relPath, line: null, column: null
+    });
+  }
+
+  // Normalize severity to strings (Ruby symbols come back as strings from selfhost)
+  for (const d of diagnostics) {
+    if (typeof d.severity === 'symbol' || typeof d.severity !== 'string') {
+      d.severity = String(d.severity);
+    }
+    if (d.valid_types && !Array.isArray(d.valid_types)) {
+      d.valid_types = Array.from(d.valid_types);
+    }
+  }
+
+  return diagnostics;
+}
+
+/**
+ * Transform ERB template to JavaScript.
+ *
+ * @param {string} code - ERB source code
+ * @param {string} id - File path
+ * @param {boolean} isLayout - Whether this is a layout file
+ * @param {Object} config - Configuration object
+ * @returns {Promise<{code: string, map: Object|null}>}
+ */
+export async function transformErb(code, id, isLayout, config, metadata = null) {
+  const { convert } = await ensureRuby2jsReady();
+
+  let template = code;
+
+  // Step 1: Compile ERB to Ruby
+  const compiler = new ErbCompiler(template);
+  const rubySrc = compiler.src;
+
+  // Step 2: Convert Ruby to JavaScript with ERB filters
+  const nodeTargets = ['node', 'bun', 'deno', 'fly', 'electron'];
+  const nodeFilter = config.target && nodeTargets.includes(config.target) ? ['Node'] : [];
+  const options = {
+    filters: ['Pragma', 'Rails_Helpers', 'Erb', ...nodeFilter, 'ActiveSupport', 'Functions', 'Return'],
+    eslevel: config.eslevel || 2022,
+    include: ['class', 'call', 'keys', 'values'],
+    database: config.database,
+    target: config.target,
+    file: id
+  };
+
+  if (metadata) {
+    options.metadata = metadata;
+  }
+
+  if (isLayout) {
+    options.layout = true;
+  }
+
+  const result = convert(rubySrc, options);
+
+  // Step 3: Export the function
+  let js = result.toString();
+
+  // Add escapeHTML import if used by the compiled template
+  if (js.includes('escapeHTML(')) {
+    js = `import { escapeHTML } from "juntos/erb_runtime.mjs";\n` + js;
+  }
+
+  // Add helper imports for any helper methods used in the template
+  if (metadata?.helpers) {
+    const allHelperMethods = {};
+    for (const [mod, methods] of Object.entries(metadata.helpers)) {
+      for (const method of methods) {
+        allHelperMethods[method] = mod;
+      }
+    }
+    const usedHelpers = {};
+    for (const [method, mod] of Object.entries(allHelperMethods)) {
+      if (js.includes(method + '(')) {
+        if (!usedHelpers[mod]) usedHelpers[mod] = [];
+        usedHelpers[mod].push(method);
+      }
+    }
+    for (const [mod, methods] of Object.entries(usedHelpers)) {
+      const importPath = `@helpers/${mod}.rb`;
+      if (!js.includes(importPath) && !js.includes(`@helpers/${mod}.js`)) {
+        js = `import { ${methods.join(', ')} } from "${importPath}";\n` + js;
+      }
+    }
+  }
+
+  if (isLayout) {
+    js = js.replace(/(^|\n)(async )?function layout/, '$1export $2function layout');
+  } else {
+    js = js.replace(/(^|\n)(async )?function render/, '$1export $2function render');
+  }
+
+  return {
+    code: js,
+    map: result.sourcemap || null
+  };
+}
+
+/**
+ * Transform JSX.rb (Ruby + JSX) to JavaScript.
+ *
+ * @param {string} source - Ruby + JSX source code
+ * @param {string} filePath - File path
+ * @param {Object} config - Configuration object
+ * @returns {Promise<{code: string, map: Object|null}>}
+ */
+export async function transformJsxRb(source, filePath, config) {
+  const { convert } = await ensureRuby2jsReady();
+
+  // Get section-specific config from ruby2js.yml if available
+  const sectionConfig = config.sections?.jsx || null;
+  const options = {
+    ...getBuildOptions('jsx', config.target, sectionConfig),
+    file: filePath
+  };
+
+  const result = convert(source, options);
+  return {
+    code: result.toString(),
+    map: result.sourcemap || null
+  };
+}
+
+// Re-export ErbCompiler for direct use if needed
+export { ErbCompiler };
+
+// ================================================================
+// Test runner generation (lightweight Node-native, bypasses Vite)
+// ================================================================
+
+export function generateTestLoaderRegistration() {
+  return `// Register custom ESM loader to resolve 'vitest' imports to our shim.
+// Usage: node --import ./test/register-loader.mjs test/runner.mjs [files...]
+import { register } from 'node:module';
+register(new URL('./vitest-loader.mjs', import.meta.url));
+`;
+}
+
+export function generateTestLoaderHooks() {
+  return `// Custom ESM loader that resolves 'vitest' to our lightweight shim
+export function resolve(specifier, context, nextResolve) {
+  if (specifier === 'vitest' || specifier === 'vitest/config') {
+    return { url: new URL('./vitest-shim.mjs', import.meta.url).href, shortCircuit: true };
+  }
+  return nextResolve(specifier, context);
+}
+`;
+}
+
+export function generateTestVitestShim() {
+  return `// Vitest-compatible shim — re-exports test framework globals
+// These are set on globalThis by runner.mjs before this module is imported.
+export const describe = globalThis.describe;
+export const test = globalThis.test;
+export const it = globalThis.it;
+export const expect = globalThis.expect;
+export const beforeAll = globalThis.beforeAll;
+export const beforeEach = globalThis.beforeEach;
+export const afterEach = globalThis.afterEach;
+export const afterAll = globalThis.afterAll;
+export const vi = {};
+export function defineConfig(c) { return c; }
+`;
+}
+
+export function generateTestRunnerForEject() {
+  return `#!/usr/bin/env node
+// Lightweight Node-native test runner for ejected tests.
+// Bypasses Vite entirely — runs plain ESM with vitest-compatible globals.
+//
+// Usage (single file, per-process — recommended for batch runs):
+//   node --import ./test/register-loader.mjs test/runner.mjs [-q] test/models/foo.test.mjs
+//
+// Usage (multiple files in one process — may OOM on large suites):
+//   node --import ./test/register-loader.mjs test/runner.mjs --all
+
+import { resolve, dirname, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { glob } from 'node:fs/promises';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const rootDir = resolve(__dirname, '..');
+
+// ============================================================
+// Test Framework — vitest-compatible describe/test/expect/hooks
+// ============================================================
+
+const _suites = [];
+let _currentSuite = null;
+let _customTesters = [];
+
+class Suite {
+  constructor(name, parent) {
+    this.name = name; this.parent = parent;
+    this.children = []; this.tests = [];
+    this.beforeAlls = []; this.afterAlls = [];
+    this.beforeEachs = []; this.afterEachs = [];
+  }
+}
+
+globalThis.describe = function describe(name, fn) {
+  const suite = new Suite(name, _currentSuite);
+  if (_currentSuite) _currentSuite.children.push(suite);
+  else _suites.push(suite);
+  const prev = _currentSuite;
+  _currentSuite = suite;
+  try { fn(); } catch (e) { /* describe body threw */ } finally { _currentSuite = prev; }
+};
+
+globalThis.test = function test(name, fn) {
+  if (_currentSuite) _currentSuite.tests.push({ name, fn });
+  else { const s = new Suite('(top-level)', null); s.tests.push({ name, fn }); _suites.push(s); }
+};
+globalThis.it = globalThis.test;
+
+const _topLevelBeforeAlls = [];
+const _topLevelAfterAlls = [];
+const _topLevelBeforeEachs = [];
+const _topLevelAfterEachs = [];
+
+globalThis.beforeAll = fn => { if (_currentSuite) _currentSuite.beforeAlls.push(fn); else _topLevelBeforeAlls.push(fn); };
+globalThis.beforeEach = fn => { if (_currentSuite) _currentSuite.beforeEachs.push(fn); else _topLevelBeforeEachs.push(fn); };
+globalThis.afterEach = fn => { if (_currentSuite) _currentSuite.afterEachs.push(fn); else _topLevelAfterEachs.push(fn); };
+globalThis.afterAll = fn => { if (_currentSuite) _currentSuite.afterAlls.push(fn); else _topLevelAfterAlls.push(fn); };
+
+// --- expect ---
+function deepEqual(a, b) {
+  for (const tester of _customTesters) { const r = tester(a, b); if (r === true || r === false) return r; }
+  if (a === b) return true;
+  if (a == null || b == null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof RegExp && b instanceof RegExp) return a.toString() === b.toString();
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => deepEqual(v, b[i]));
+  if (typeof a === 'object') {
+    const ka = Object.keys(a), kb = Object.keys(b);
+    return ka.length === kb.length && ka.every(k => deepEqual(a[k], b[k]));
+  }
+  return false;
+}
+
+function fmt(v) {
+  if (v === undefined) return 'undefined'; if (v === null) return 'null';
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (typeof v === 'object') try { return JSON.stringify(v); } catch { return String(v); }
+  return String(v);
+}
+
+function createExpect(actual) {
+  const m = (neg) => ({
+    toBe(exp) { if (neg ? Object.is(actual, exp) : !Object.is(actual, exp)) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to be \${fmt(exp)}\`); },
+    toEqual(exp) { const p = deepEqual(actual, exp); if (neg ? p : !p) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to equal \${fmt(exp)}\`); },
+    toStrictEqual(exp) { this.toEqual(exp); },
+    toBeTruthy() { if (neg ? !!actual : !actual) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to be truthy\`); },
+    toBeFalsy() { if (neg ? !actual : !!actual) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to be falsy\`); },
+    toBeNull() { if (neg ? actual === null : actual !== null) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to be null\`); },
+    toBeUndefined() { if (neg ? actual === undefined : actual !== undefined) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to be undefined\`); },
+    toContain(item) {
+      let p = Array.isArray(actual) ? actual.some(v => deepEqual(v, item))
+            : typeof actual === 'string' ? actual.includes(item) : false;
+      if (neg ? p : !p) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to contain \${fmt(item)}\`);
+    },
+    toHaveLength(exp) { const l = actual?.length; if (neg ? l === exp : l !== exp) throw new Error(\`Expected length \${l} \${neg?'not ':''}to be \${exp}\`); },
+    toHaveProperty(key) { const p = actual != null && key in actual; if (neg ? p : !p) throw new Error(\`Expected object \${neg?'not ':''}to have property "\${key}"\`); },
+    toMatch(pat) { const p = pat instanceof RegExp ? pat.test(actual) : String(actual).includes(pat); if (neg ? p : !p) throw new Error(\`Expected \${fmt(actual)} \${neg?'not ':''}to match \${pat}\`); },
+    toThrow(exp) {
+      let threw = false, err;
+      try { actual(); } catch (e) { threw = true; err = e; }
+      if (neg) { if (threw) throw new Error('Expected function not to throw'); return; }
+      if (!threw) throw new Error('Expected function to throw');
+      if (exp !== undefined) {
+        if (typeof exp === 'string' && !err.message?.includes(exp)) throw new Error(\`Expected error to include "\${exp}", got "\${err.message}"\`);
+        if (exp instanceof RegExp && !exp.test(err.message)) throw new Error(\`Expected error to match \${exp}, got "\${err.message}"\`);
+        if (typeof exp === 'function' && !(err instanceof exp)) throw new Error(\`Expected \${exp.name}, got \${err.constructor.name}\`);
+      }
+    },
+    toBeGreaterThan(exp) { if (neg ? actual > exp : !(actual > exp)) throw new Error(\`Expected \${actual} \${neg?'not ':''}> \${exp}\`); },
+    toBeGreaterThanOrEqual(exp) { if (neg ? actual >= exp : !(actual >= exp)) throw new Error(\`Expected \${actual} \${neg?'not ':''}>= \${exp}\`); },
+    toBeLessThan(exp) { if (neg ? actual < exp : !(actual < exp)) throw new Error(\`Expected \${actual} \${neg?'not ':''}< \${exp}\`); },
+    toBeInstanceOf(exp) { if (neg ? actual instanceof exp : !(actual instanceof exp)) throw new Error(\`Expected \${neg?'not ':''}instance of \${exp.name}\`); },
+    get rejects() {
+      return { async toThrow(exp) {
+        let threw = false, err;
+        try { await (typeof actual === 'function' ? actual() : actual); } catch (e) { threw = true; err = e; }
+        if (neg) { if (threw) throw new Error('Expected async not to throw'); return; }
+        if (!threw) throw new Error('Expected async to throw');
+        if (exp !== undefined && typeof exp === 'string' && !err.message?.includes(exp))
+          throw new Error(\`Expected error to include "\${exp}", got "\${err.message}"\`);
+      }};
+    }
+  });
+  const obj = m(false); obj.not = m(true); return obj;
+}
+createExpect.addEqualityTesters = (testers) => { _customTesters.push(...testers); };
+globalThis.expect = createExpect;
+
+// ============================================================
+// Test Runner
+// ============================================================
+async function runSuite(suite, ancestors, stats) {
+  const fullName = [...ancestors, suite.name].join(' > ');
+  const allBE = [..._topLevelBeforeEachs], allAE = [..._topLevelAfterEachs];
+  let s = suite; const chain = [];
+  while (s) { chain.unshift(s); s = s.parent; }
+  for (const cs of chain) { allBE.push(...cs.beforeEachs); allAE.push(...cs.afterEachs); }
+
+  for (const fn of suite.beforeAlls) {
+    try { await fn(); } catch (err) { stats.failed += suite.tests.length; return; }
+  }
+  for (const tc of suite.tests) {
+    const testName = fullName + ' > ' + tc.name;
+    try {
+      for (const fn of allBE) await fn();
+      await tc.fn();
+      for (const fn of allAE.slice().reverse()) try { await fn(); } catch {}
+      stats.passed++;
+      if (stats.verbose) console.log('  \\x1b[32m✓\\x1b[0m ' + tc.name);
+    } catch (err) {
+      for (const fn of allAE.slice().reverse()) try { await fn(); } catch {}
+      stats.failed++;
+      stats.failures.push({ test: testName, error: err });
+      if (stats.verbose) console.log('  \\x1b[31m✗\\x1b[0m ' + tc.name);
+      if (stats.verbose) console.log('    ' + (err.message?.split('\\n')[0] || err));
+    }
+  }
+  for (const child of suite.children) await runSuite(child, [...ancestors, suite.name], stats);
+  for (const fn of suite.afterAlls) try { await fn(); } catch {}
+}
+
+// ============================================================
+// Main
+// ============================================================
+const args = process.argv.slice(2);
+const verbose = args.includes('--verbose') || args.includes('-v');
+const quiet = args.includes('--quiet') || args.includes('-q');
+const allMode = args.includes('--all');
+const files = args.filter(a => !a.startsWith('-'));
+
+if (!verbose) {
+  const _origDebug = console.debug;
+  const _origLog = console.log;
+  console.debug = (...a) => { if (typeof a[0] === 'string' && /^\\s+(SELECT|INSERT|UPDATE|DELETE|\\w+ (Create|Update|Destroy|Find))/.test(a[0])) return; _origDebug(...a); };
+  if (quiet) console.log = (...a) => { if (typeof a[0] === 'string' && /^\\s+\\w+ (Create|Update|Destroy|Find|affected)/.test(a[0])) return; _origLog(...a); };
+}
+
+if (files.length === 0 && !allMode) {
+  console.error('Usage: node --import ./test/register-loader.mjs test/runner.mjs [-q] [-v] [--all | test-files...]');
+  process.exit(1);
+}
+
+let testFiles;
+if (allMode) {
+  testFiles = [];
+  for await (const entry of glob('test/**/*.test.{mjs,js}', { cwd: rootDir })) testFiles.push(resolve(rootDir, entry));
+  testFiles.sort();
+} else {
+  testFiles = files.map(f => resolve(process.cwd(), f));
+}
+
+await import(resolve(rootDir, 'test/globals.mjs'));
+await import(resolve(rootDir, 'test/setup.mjs'));
+for (const fn of _topLevelBeforeAlls) await fn();
+
+const _setupBE = [..._topLevelBeforeEachs], _setupAE = [..._topLevelAfterEachs];
+const stats = { passed: 0, failed: 0, filesPassed: 0, filesFailed: 0, filesErrored: 0, failures: [] };
+
+for (const file of testFiles) {
+  const rel = relative(rootDir, file);
+  _suites.length = 0;
+  _topLevelBeforeEachs.length = 0; _topLevelAfterEachs.length = 0;
+  _topLevelBeforeEachs.push(..._setupBE); _topLevelAfterEachs.push(..._setupAE);
+
+  try { await import(file); } catch (err) {
+    console.error('\\x1b[31mERROR\\x1b[0m ' + rel + ': ' + err.message);
+    if (verbose) console.error(err.stack);
+    stats.filesErrored++; continue;
+  }
+
+  const fs = { passed: 0, failed: 0, verbose, failures: [] };
+  if (verbose) console.log('\\n' + rel);
+  for (const suite of _suites) await runSuite(suite, [], fs);
+
+  stats.passed += fs.passed; stats.failed += fs.failed; stats.failures.push(...fs.failures);
+  if (fs.failed > 0) { stats.filesFailed++; if (!verbose) console.log('\\x1b[31m✗\\x1b[0m ' + rel + '  (' + fs.passed + ' passed, ' + fs.failed + ' failed)'); }
+  else { stats.filesPassed++; if (!verbose) console.log('\\x1b[32m✓\\x1b[0m ' + rel + '  (' + fs.passed + ' passed)'); }
+}
+
+console.log('\\n' + '='.repeat(60));
+console.log(' Test Files  ' + stats.filesPassed + ' passed | ' + stats.filesFailed + ' failed | ' + stats.filesErrored + ' errored  (' + testFiles.length + ')');
+console.log('      Tests  ' + stats.passed + ' passed | ' + stats.failed + ' failed  (' + (stats.passed + stats.failed) + ')');
+console.log('='.repeat(60));
+
+if (stats.failures.length > 0 && verbose) {
+  console.log('\\nFailures:');
+  for (const f of stats.failures.slice(0, 50)) { console.log('  ' + f.test); console.log('    ' + (f.error.message?.split('\\n')[0] || f.error)); }
+  if (stats.failures.length > 50) console.log('  ... and ' + (stats.failures.length - 50) + ' more');
+}
+
+process.exit(stats.failed > 0 || stats.filesErrored > 0 ? 1 : 0);
+`;
+}

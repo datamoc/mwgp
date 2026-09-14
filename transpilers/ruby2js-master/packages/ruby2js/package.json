@@ -1,0 +1,34 @@
+{
+  "name": "ruby2js",
+  "version": "5.1.2",
+  "description": "Ruby to Javascript transpiler",
+  "contributors": [
+    "Sam Ruby",
+    "Jared White"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 14"
+  },
+  "main": "ruby2js.js",
+  "module": "ruby2js.mjs",
+  "homepage": "https://www.ruby2js.com/",
+  "keywords": [
+    "ruby2js"
+  ],
+  "scripts": {
+    "build": "rm -f -- ruby2js.js && bundle exec rake -f ../../docs/Rakefile ruby2js.js",
+    "test": "mocha"
+  },
+  "devDependencies": {
+    "mocha": "^10.0.0",
+    "terser": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ruby2js/ruby2js"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

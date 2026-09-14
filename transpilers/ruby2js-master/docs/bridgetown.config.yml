@@ -1,0 +1,22 @@
+url: "https://www.ruby2js.com"
+permalink: simple
+
+timezone: America/New_York
+
+# Disable ERB processing in markdown files (they contain code examples with ERB syntax)
+template_engine: liquid
+
+collections:
+  docs:
+    output: true
+    permalink: /:collection/:path.*
+    sort_by: order
+    name: Documentation
+  examples:
+    output: true
+    permalink: /:collection/:path.*
+    sort_by: order
+    name: Examples
+
+pagination:
+  enabled: true

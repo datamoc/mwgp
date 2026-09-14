@@ -1,0 +1,842 @@
+---
+order: 618
+title: Testing
+top_section: Juntos
+category: juntos
+---
+
+# Testing Juntos Applications
+
+Write tests in Ruby or JavaScript for your transpiled Juntos applications using Vitest and in-memory databases. Select a database adapter to run tests in Node.js (jsdom) or a real browser.
+
+{% toc %}
+
+## Why Test in JavaScript?
+
+Juntos transpiles your Rails code to JavaScript. The `dist/` directory contains what actually runs—ES2022 classes, async/await, standard modules. Testing the transpiled output ensures you're testing what you ship.
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Ruby tests via `juntos test` | Familiar Rails patterns, tests the JS that runs | Requires Juntos CLI |
+| JavaScript tests (Vitest) | Direct control, no transpilation layer | Different syntax from Rails |
+
+JavaScript testing catches transpilation issues—if Ruby2JS produces incorrect JavaScript, your tests will fail. With `juntos test`, you get both: write familiar Rails tests that are transpiled and run against the actual JavaScript output.
+
+## Writing Tests in Ruby
+
+The recommended approach is to write standard Rails tests that run under both `rails test` and `juntos test`. The Rails test filter transpiles Minitest assertions, controller actions, and test structure to Vitest equivalents automatically.
+
+### Running Tests
+
+```bash
+# Run transpiled tests with Vitest (Node.js + jsdom)
+npx juntos test -d sqlite
+
+# Run in a real browser (Vitest browser mode)
+npx juntos test -d dexie
+
+# Same tests work with Rails
+bundle exec rails test
+```
+
+### Model Tests
+
+Standard Rails model tests transpile directly:
+
+```ruby
+class MessageTest < ActiveSupport::TestCase
+  test "creates a message with valid attributes" do
+    message = messages(:one)
+    assert_not_nil message.id
+    assert_equal "Alice", message.username
+  end
+
+  test "validates username presence" do
+    message = Message.new(username: "", body: "Valid body")
+    assert_not message.save
+  end
+end
+```
+
+### Controller Tests
+
+Integration tests with HTTP methods, assertions, and DOM checks:
+
+```ruby
+class MessagesControllerTest < ActionDispatch::IntegrationTest
+  test "should get index" do
+    get messages_url
+    assert_response :success
+    assert_select "h1", "Chat Room"
+    assert_select "#messages" do
+      assert_select "div", minimum: 1
+    end
+  end
+
+  test "should create message" do
+    assert_difference("Message.count") do
+      post messages_url, params: { message: { username: "Carol", body: "Hello!" } }
+    end
+    assert_redirected_to messages_path
+  end
+end
+```
+
+The filter transforms `get`, `post`, etc. into controller action calls, `assert_response` and `assert_redirected_to` into `expect()` calls, and `assert_select` into DOM queries using jsdom.
+
+### System Tests
+
+Write Capybara-style system tests that run in jsdom without a browser. Use `visit`, `fill_in`, `click_on`, and assertion helpers — same API as Rails system tests:
+
+```ruby
+class StudiosSystemTest < ApplicationSystemTestCase
+  test "create, edit, and delete a studio" do
+    visit root_url
+    click_on "Studios"
+    assert_text "Studios"
+
+    click_on "New studio"
+    fill_in "Name", with: "Galaxy Dance"
+    click_on "Create Studio"
+    assert_text "Galaxy Dance"
+    assert_text "Showing studio"
+
+    click_on "Edit this studio"
+    fill_in "Name", with: "Galaxy Ballroom"
+    click_on "Update Studio"
+    assert_text "Galaxy Ballroom"
+    assert_text "Showing studio"
+
+    accept_confirm do
+      click_on "Destroy this studio"
+    end
+    assert_text "Studios"
+    assert_text "New studio"
+  end
+end
+```
+
+Place system tests in `test/system/`. They work under `rails test:system` (Selenium), `juntos test -d sqlite` (jsdom + fetch interceptor), or `juntos test -d dexie` (real browser + fetch interceptor).
+
+**How it works:**
+
+- `visit root_url` — fetches the page via the fetch interceptor (routes to your controller action), renders the HTML into `document.body`, auto-discovers `data-controller` attributes, and starts Stimulus controllers
+- `fill_in "Name", with: "value"` — finds an input by label text, placeholder, or name attribute, then sets its value
+- `click_on "Studios"` — finds a link or button by text and clicks it. For links, follows the `href` via `visit`. For buttons, submits the parent form via `fetch` and handles Turbo Stream responses or redirects
+- `click_button "Send"` — like `click_on` but only matches buttons (useful when a page has both a link and button with the same text)
+- `accept_confirm { click_on "Destroy" }` — executes the block, accepting any confirmation dialog. In jsdom, Turbo `data-turbo-confirm` dialogs are bypassed (fetch submits directly), so this simply executes the callback
+- `assert_field`, `assert_selector`, `assert_text` — DOM assertions using `querySelector` and `textContent`
+- Stimulus controllers are auto-registered from `test/setup.mjs` — `juntos test` discovers controllers in `app/javascript/controllers/` and calls `registerController()` at setup time
+- All fixtures are loaded before each system test in a `beforeEach` block, matching Rails behavior where all fixtures are available regardless of whether the test references them directly
+- DOM cleanup runs automatically after each test via `afterEach(() => cleanup())`
+
+**Capybara methods transpiled:**
+
+| Ruby | JavaScript |
+|------|-----------|
+| `visit root_url` | `await visit(root_path())` |
+| `fill_in "Name", with: "Alice"` | `await fillIn("Name", "Alice")` |
+| `click_on "Studios"` | `await clickOn("Studios")` |
+| `click_link "Studios"` | `await clickOn("Studios")` |
+| `click_button "Send"` | `await clickButton("Send")` |
+| `accept_confirm { click_on "X" }` | `await acceptConfirm(async () => await clickOn("X"))` |
+| `assert_field "Name", with: ""` | `expect(findField("Name").value).toBe("")` |
+| `assert_selector "#el", text: "Hi"` | `expect(document.querySelector("#el").textContent).toContain("Hi")` |
+| `assert_text "Welcome"` | `expect(document.body.textContent).toContain("Welcome")` |
+| `assert_no_text "Error"` | `expect(document.body.textContent).not.toContain("Error")` |
+| `assert_no_selector ".error"` | `expect(document.querySelector(".error")).toBeNull()` |
+
+**Flash messages:** Flash notices (e.g., "Studio was successfully created") work automatically in system tests. The fetch interceptor maintains an in-memory cookie jar that carries flash data across redirects, just like Rails does with session cookies. You can assert flash content after create/update/destroy actions.
+
+### Testing Stimulus Controllers
+
+For unit-testing individual Stimulus controller methods (rather than full user flows), use `connect_stimulus` inside an integration test:
+
+```ruby
+class MessagesControllerTest < ActionDispatch::IntegrationTest
+  test "clears input after form submission" do
+    skip unless defined? Document
+    get messages_url
+    connect_stimulus "chat", ChatController
+
+    body_input = document.querySelector("[data-chat-target='body']")
+    body_input.value = "Hello!"
+    form = document.querySelector("form")
+    form.dispatchEvent(Event.new("turbo:submit-end", bubbles: true))
+
+    assert_equal "", body_input.value
+  end
+end
+```
+
+**How it works:**
+
+- `skip unless defined? Document` — skips under Rails (no DOM), runs under Juntos (jsdom)
+- `connect_stimulus "chat", ChatController` — renders the response HTML into `document.body`, starts a Stimulus `Application`, and registers the controller. The `@vitest-environment jsdom` directive is emitted automatically.
+- `await_mutations` — yields to the event loop so Stimulus `MutationObserver` callbacks fire
+- Standard DOM APIs (`querySelector`, `dispatchEvent`, `appendChild`) work in jsdom
+- `vi.fn()` creates a Vitest mock function for verifying calls
+- Stimulus cleanup (`Application.stop()`, clearing `document.body`) runs automatically after each test
+
+### What Gets Transpiled
+
+| Ruby | JavaScript |
+|------|-----------|
+| `skip` | `return` |
+| `defined? Document` | `typeof Document !== "undefined"` |
+| `connect_stimulus "chat", ChatController` | innerHTML + Application.start + register + await |
+| `await_mutations` | `await new Promise(resolve => setTimeout(resolve, 0))` |
+| `Event.new("turbo:submit-end", bubbles: true)` | `new Event("turbo:submit-end", {bubbles: true})` |
+| `assert_equal "", input.value` | `expect(input.value).toBe("")` |
+| `assert_select "h1", "text"` | DOM querySelector + expect |
+
+## End-to-End Testing with Playwright
+
+The same `test/system/*.rb` files can also run as Playwright tests against a real browser. This gives a two-tier testing model:
+
+| Tier | Command | Runtime | Speed | Purpose |
+|------|---------|---------|-------|---------|
+| Fast | `juntos test` | Vitest + jsdom | Seconds | Functional correctness (every commit) |
+| Browser | `juntos test -d dexie` | Vitest + Chromium | Seconds | Real browser APIs (IndexedDB, Web Components, etc.) |
+| Thorough | `juntos e2e` | Playwright + Chromium | Minutes | Visual/experiential correctness (periodic) |
+
+Same source files, different transpilation targets.
+
+### Browser Mode
+
+When you select a browser database (`dexie`, `sqljs`, or `pglite`), `juntos test` automatically runs in Vitest browser mode — tests execute in a real Chromium browser instead of jsdom:
+
+```bash
+# Node.js + jsdom (run once)
+npx juntos test -d sqlite
+
+# Real browser + IndexedDB via Dexie (watch mode)
+npx juntos test -d dexie
+
+# Run once in browser (CI)
+npx juntos test -d dexie --run
+
+# Watch mode with jsdom
+npx juntos test -d sqlite --watch
+
+# Preview provider (no Playwright needed, ideal for WebContainers)
+npx juntos test -d dexie --preview
+
+# Visual test dashboard (works with any mode)
+npx juntos test -d sqlite --ui
+npx juntos test -d dexie --ui
+```
+
+Browser databases default to **watch mode** — the browser stays open and re-runs tests as you edit files. Server databases default to **run-once mode**. Use `--run` or `--watch` to override. The `--ui` flag implies watch mode.
+
+On first run, `juntos test` auto-installs the required browser provider. By default this is `@vitest/browser-playwright` with Chromium. Use `--preview` to use the lightweight `@vitest/browser-preview` provider instead — it runs tests in the page itself without Playwright or system browser binaries, making it ideal for WebContainers and quick local testing.
+
+Use `--ui` to open the [Vitest UI](https://vitest.dev/guide/ui) dashboard in your browser. It provides a visual test tree, pass/fail status, error details, and re-run controls. Works with both Node/jsdom and browser test modes.
+
+Browser mode is useful when your tests depend on real browser APIs that jsdom doesn't support (IndexedDB, Web Components, CSS queries, `IntersectionObserver`, etc.), or when you want to test with the same database adapter your production browser target uses.
+
+### Running E2E Tests
+
+```bash
+# Run all e2e tests
+npx juntos e2e
+
+# Run with visible browser
+npx juntos e2e --headed
+
+# Open Playwright UI mode
+npx juntos e2e --ui
+
+# Run with specific database
+npx juntos e2e -d sqlite
+```
+
+On first run, `juntos e2e` auto-installs `@playwright/test` and Chromium, generates `playwright.config.js`, and starts the dev server automatically.
+
+### How It Works
+
+`juntos e2e` transpiles `test/system/*.rb` files to `.spec.mjs` (Playwright) instead of `.test.mjs` (Vitest). The Playwright filter transforms Capybara methods to Playwright's locator-based API:
+
+| Ruby (Capybara) | Playwright output |
+|------|-----------|
+| `visit messages_url` | `await page.goto(messages_path())` |
+| `fill_in "Name", with: "Alice"` | `await page.getByLabel("Name").fill("Alice")` |
+| `click_button "Send"` | `await page.getByRole("button", {name: "Send"}).click()` |
+| `click_on "Link"` | `await page.getByRole("link", {name: "Link"}).click()` |
+| `assert_field "Name", with: ""` | `await expect(page.getByLabel("Name")).toHaveValue("")` |
+| `assert_selector "#el", text: "Hi"` | `await expect(page.locator("#el")).toContainText("Hi")` |
+| `assert_selector "#el"` | `await expect(page.locator("#el")).toBeVisible()` |
+| `assert_text "Welcome"` | `await expect(page.locator("body")).toContainText("Welcome")` |
+| `assert_no_selector ".error"` | `await expect(page.locator(".error")).not.toBeVisible()` |
+| `assert_no_text "Error"` | `await expect(page.locator("body")).not.toContainText("Error")` |
+| `select "X", from: "Y"` | `await page.getByLabel("Y").selectOption("X")` |
+| `find("css", match: :first).hover` | `await page.locator("css").first().hover()` |
+| `within("css") { ... }` | Scopes assertions to `page.locator("css")` |
+
+The test structure uses Playwright conventions — `test.describe` / `test` with `{ page }` destructuring:
+
+```javascript
+// Generated from class ChatSystemTest < ApplicationSystemTestCase
+import { test, expect } from "@playwright/test";
+import { messages_path } from "../config/routes.js";
+
+test.describe("ChatSystem", () => {
+  test("clears input after sending message", async ({ page }) => {
+    await page.goto(messages_path());
+    await page.getByLabel("Your name").fill("Alice");
+    await page.getByLabel("Type a message...").fill("Hello!");
+    await page.getByRole("button", {name: "Send"}).click();
+    await expect(page.getByLabel("Type a message...")).toHaveValue("")
+  });
+});
+```
+
+### The `defined? Playwright` Guard
+
+Use `defined? Playwright` to write code that differs between tiers. It works naturally across all three runtimes:
+
+| Runtime | `defined? Playwright` | Why |
+|---|---|---|
+| `rails test:system` | `nil` (falsy) | No `Playwright` constant in Ruby |
+| `juntos test` | `false` | Transpiles to `typeof Playwright !== "undefined"` — no such global |
+| `juntos e2e` | `true` | Playwright filter intercepts and returns `true` |
+
+```ruby
+class ChatSystemTest < ApplicationSystemTestCase
+  test "visual regression" do
+    visit messages_url
+    # Only in Playwright (real browser)
+    expect(page).to_have_screenshot if defined? Playwright
+  end
+
+  test "skip in e2e" do
+    skip if defined? Playwright
+    # jsdom-only test logic
+  end
+end
+```
+
+This follows the same pattern as `skip unless defined? Document` used in Stimulus controller tests (skips under Rails where there's no DOM, runs under Juntos with jsdom).
+
+### Generated Files
+
+| File pattern | Generated by | Runner |
+|---|---|---|
+| `test/system/*_test.rb` | Source (you write this) | `rails test:system` |
+| `test/system/*.test.mjs` | `juntos test` | Vitest + jsdom |
+| `test/system/*.spec.mjs` | `juntos e2e` | Playwright |
+
+The `.spec.mjs` and `.test.mjs` extensions prevent cross-contamination — Vitest only runs `.test.mjs` files, Playwright only runs `.spec.mjs` files.
+
+## Writing Tests in JavaScript
+
+If you prefer writing tests directly in JavaScript, or need more control over the test setup, you can write Vitest tests manually.
+
+### Setup
+
+Create a test directory with Vitest and better-sqlite3:
+
+```bash
+mkdir -p test/integration
+cd test/integration
+npm init -y
+npm install --save-dev vitest better-sqlite3
+```
+
+Create `vitest.config.mjs`:
+
+```javascript
+import { defineConfig } from 'vitest/config';
+import { resolve } from 'path';
+
+export default defineConfig({
+  test: {
+    testTimeout: 30000,
+  },
+  resolve: {
+    alias: {
+      // Point to juntos in your built dist
+      'juntos': resolve(__dirname, 'workspace/myapp/dist/node_modules/juntos')
+    }
+  }
+});
+```
+
+Add test scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  }
+}
+```
+
+### Project Structure
+
+```
+test/integration/
+├── package.json
+├── vitest.config.mjs
+├── app.test.mjs          # Your tests
+└── workspace/
+    └── myapp/
+        └── dist/         # Built Juntos app (juntos build -d sqlite -t node)
+```
+
+Build your app for testing:
+
+```bash
+cd myapp
+bin/juntos build -d sqlite -t node
+```
+
+### Testing Models
+
+#### Basic CRUD
+
+```javascript
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DIST_DIR = join(__dirname, 'workspace/myapp/dist');
+
+let Article, initDatabase, migrations, Application;
+
+describe('Article Model', () => {
+  beforeAll(async () => {
+    // Import the database adapter
+    const activeRecord = await import(join(DIST_DIR, 'lib/active_record.mjs'));
+    initDatabase = activeRecord.initDatabase;
+
+    // Import Application for migrations
+    const rails = await import(join(DIST_DIR, 'lib/rails.js'));
+    Application = rails.Application;
+
+    // Import migrations
+    const migrationsModule = await import(join(DIST_DIR, 'db/migrate/index.js'));
+    migrations = migrationsModule.migrations;
+
+    // Import models
+    const models = await import(join(DIST_DIR, 'app/models/index.js'));
+    Article = models.Article;
+
+    // Configure application
+    Application.configure({ migrations });
+    Application.registerModels({ Article });
+  });
+
+  beforeEach(async () => {
+    // Fresh in-memory database for each test
+    await initDatabase({ database: ':memory:' });
+    const adapter = await import(join(DIST_DIR, 'lib/active_record.mjs'));
+    await Application.runMigrations(adapter);
+  });
+
+  it('creates an article', async () => {
+    const article = await Article.create({
+      title: 'Hello World',
+      body: 'This is my first article.'
+    });
+
+    expect(article.id).toBeDefined();
+    expect(article.title).toBe('Hello World');
+  });
+
+  it('finds an article by id', async () => {
+    const created = await Article.create({ title: 'Find Me', body: 'Content' });
+    const found = await Article.find(created.id);
+
+    expect(found.title).toBe('Find Me');
+  });
+
+  it('updates an article', async () => {
+    const article = await Article.create({ title: 'Original', body: 'Content' });
+    await article.update({ title: 'Updated' });
+
+    const reloaded = await Article.find(article.id);
+    expect(reloaded.title).toBe('Updated');
+  });
+
+  it('destroys an article', async () => {
+    const article = await Article.create({ title: 'Delete Me', body: 'Content' });
+    const id = article.id;
+
+    await article.destroy();
+
+    const found = await Article.findBy({ id });
+    expect(found).toBeNull();
+  });
+});
+```
+
+#### Testing Validations
+
+```javascript
+it('validates title presence', async () => {
+  const article = new Article({ title: '', body: 'Some content here' });
+  const saved = await article.save();
+
+  expect(saved).toBe(false);
+  expect(article.errors.title).toBeDefined();
+});
+
+it('validates body length', async () => {
+  const article = new Article({ title: 'Valid Title', body: 'Short' });
+  const saved = await article.save();
+
+  expect(saved).toBe(false);
+  expect(article.errors.body).toBeDefined();
+});
+```
+
+#### Testing Associations
+
+```javascript
+describe('Associations', () => {
+  let Comment;
+
+  beforeAll(async () => {
+    const models = await import(join(DIST_DIR, 'app/models/index.js'));
+    Comment = models.Comment;
+    Application.registerModels({ Article, Comment });
+  });
+
+  it('article has many comments', async () => {
+    const article = await Article.create({ title: 'With Comments', body: 'Content here' });
+    await Comment.create({ article_id: article.id, body: 'First comment' });
+    await Comment.create({ article_id: article.id, body: 'Second comment' });
+
+    const comments = await article.comments;
+    expect(comments.length).toBe(2);
+  });
+
+  it('comment belongs to article', async () => {
+    const article = await Article.create({ title: 'Parent', body: 'Content here' });
+    const comment = await Comment.create({ article_id: article.id, body: 'Child' });
+
+    const parent = await comment.article;
+    expect(parent.id).toBe(article.id);
+  });
+
+  it('destroys dependent comments', async () => {
+    const article = await Article.create({ title: 'Cascade', body: 'Content here' });
+    await Comment.create({ article_id: article.id, body: 'Will be deleted' });
+
+    await article.destroy();
+
+    const orphans = await Comment.where({ article_id: article.id });
+    expect(orphans.length).toBe(0);
+  });
+});
+```
+
+#### Testing Query Interface
+
+```javascript
+describe('Query Interface', () => {
+  beforeEach(async () => {
+    await Article.create({ title: 'Alpha', body: 'First article content' });
+    await Article.create({ title: 'Beta', body: 'Second article content' });
+    await Article.create({ title: 'Gamma', body: 'Third article content' });
+  });
+
+  it('where filters by attributes', async () => {
+    const results = await Article.where({ title: 'Beta' });
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe('Beta');
+  });
+
+  it('order sorts results', async () => {
+    const results = await Article.order({ title: 'desc' });
+    expect(results[0].title).toBe('Gamma');
+    expect(results[2].title).toBe('Alpha');
+  });
+
+  it('limit restricts count', async () => {
+    const results = await Article.limit(2);
+    expect(results.length).toBe(2);
+  });
+
+  it('first returns single record', async () => {
+    const first = await Article.first();
+    expect(first).toBeDefined();
+    expect(first.id).toBe(1);
+  });
+
+  it('count returns total', async () => {
+    const count = await Article.count();
+    expect(count).toBe(3);
+  });
+
+  it('findBy returns matching record', async () => {
+    const article = await Article.findBy({ title: 'Beta' });
+    expect(article.title).toBe('Beta');
+  });
+
+  it('chains where, order, limit', async () => {
+    await Article.create({ title: 'Alpha 2', body: 'Another alpha article' });
+
+    const results = await Article.where({ title: 'Alpha' })
+      .order({ id: 'desc' })
+      .limit(1);
+
+    expect(results.length).toBe(1);
+  });
+});
+```
+
+### Testing Controllers
+
+Controllers need a mock context object simulating the request environment:
+
+```javascript
+describe('ArticlesController', () => {
+  let ArticlesController;
+
+  beforeAll(async () => {
+    const ctrl = await import(join(DIST_DIR, 'app/controllers/articles_controller.js'));
+    ArticlesController = ctrl.ArticlesController;
+  });
+
+  it('index returns article list', async () => {
+    await Article.create({ title: 'Listed', body: 'Content for listing' });
+
+    const context = {
+      params: {},
+      flash: {
+        get: () => '',
+        consumeNotice: () => '',
+        consumeAlert: () => ''
+      },
+      contentFor: {}
+    };
+
+    const html = await ArticlesController.index(context);
+
+    expect(html).toContain('Listed');
+  });
+
+  it('create adds new article', async () => {
+    const context = {
+      params: {},
+      flash: { set: () => {} },
+      contentFor: {},
+      request: { headers: { accept: 'text/html' } }
+    };
+
+    const params = {
+      title: 'New Article',
+      body: 'Created via controller test'
+    };
+
+    await ArticlesController.create(context, params);
+
+    const articles = await Article.all();
+    expect(articles.length).toBe(1);
+    expect(articles[0].title).toBe('New Article');
+  });
+
+  it('show displays single article', async () => {
+    const article = await Article.create({ title: 'Show Me', body: 'Detailed content' });
+
+    const context = {
+      params: { id: article.id },
+      flash: {
+        get: () => '',
+        consumeNotice: () => '',
+        consumeAlert: () => ''
+      },
+      contentFor: {}
+    };
+
+    const html = await ArticlesController.show(context);
+
+    expect(html).toContain('Show Me');
+    expect(html).toContain('Detailed content');
+  });
+});
+```
+
+#### Testing Turbo Stream Responses
+
+For controllers that return Turbo Streams:
+
+```javascript
+it('create returns turbo stream for turbo requests', async () => {
+  const context = {
+    params: {},
+    flash: { set: () => {} },
+    contentFor: {},
+    request: {
+      headers: { accept: 'text/vnd.turbo-stream.html' }
+    }
+  };
+
+  const result = await ArticlesController.create(context, {
+    title: 'Turbo Article',
+    body: 'Content for turbo stream'
+  });
+
+  expect(result.turbo_stream).toBeDefined();
+  expect(result.turbo_stream).toContain('turbo-stream');
+});
+```
+
+### Testing Path Helpers
+
+```javascript
+describe('Path Helpers', () => {
+  let articles_path, article_path, edit_article_path;
+
+  beforeAll(async () => {
+    const paths = await import(join(DIST_DIR, 'config/paths.js'));
+    articles_path = paths.articles_path;
+    article_path = paths.article_path;
+    edit_article_path = paths.edit_article_path;
+  });
+
+  it('articles_path returns index path', () => {
+    expect(articles_path()).toBe('/articles');
+  });
+
+  it('article_path returns show path', () => {
+    expect(article_path(42)).toBe('/articles/42');
+    expect(article_path({ id: 42 })).toBe('/articles/42');
+  });
+
+  it('edit_article_path returns edit path', () => {
+    expect(edit_article_path(42)).toBe('/articles/42/edit');
+  });
+
+  it('nested paths work correctly', async () => {
+    const paths = await import(join(DIST_DIR, 'config/paths.js'));
+    const { article_comments_path } = paths;
+
+    expect(article_comments_path(1)).toBe('/articles/1/comments');
+  });
+});
+```
+
+### In-Memory Database Pattern
+
+The key pattern for fast, isolated tests:
+
+```javascript
+beforeEach(async () => {
+  // Create fresh database for each test
+  await initDatabase({ database: ':memory:' });
+
+  // Re-import adapter to get fresh connection
+  const adapter = await import(join(DIST_DIR, 'lib/active_record.mjs'));
+
+  // Run migrations
+  await Application.runMigrations(adapter);
+});
+```
+
+Each test gets a clean slate. No cleanup needed. Tests can run in parallel without interference.
+
+### Testing React Components
+
+Applications using RBX files with React (like the workflow demo) need jsdom for DOM simulation:
+
+```bash
+npm install --save-dev jsdom
+```
+
+Update `vitest.config.mjs`:
+
+```javascript
+import { defineConfig } from 'vitest/config';
+import { resolve } from 'path';
+
+export default defineConfig({
+  test: {
+    testTimeout: 30000,
+    environment: 'jsdom',  // Enable DOM simulation
+    css: false,            // Mock CSS imports
+  },
+  resolve: {
+    alias: {
+      'juntos': resolve(__dirname, 'workspace/myapp/dist/node_modules/juntos'),
+      // Map absolute imports used by React components
+      '/lib/': resolve(__dirname, 'workspace/myapp/dist/lib') + '/',
+      '/app/': resolve(__dirname, 'workspace/myapp/dist/app') + '/',
+    }
+  }
+});
+```
+
+The `/lib/` and `/app/` aliases resolve absolute imports like `import JsonStreamProvider from '/lib/JsonStreamProvider.js'` that React components use.
+
+#### Testing Controllers with React Views
+
+Controllers that return React component output work the same way:
+
+```javascript
+describe('WorkflowsController', () => {
+  it('show renders workflow canvas', async () => {
+    const workflow = await Workflow.create({ name: 'Test Flow' });
+
+    const context = {
+      params: { id: workflow.id },
+      flash: { get: () => '', consumeNotice: () => '', consumeAlert: () => '' },
+      contentFor: {}
+    };
+
+    const result = await WorkflowsController.show(context, workflow.id);
+
+    // React components return rendered output
+    expect(result).toBeDefined();
+  });
+});
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run specific test file
+npm test -- articles.test.mjs
+
+# Watch mode during development
+npm run test:watch
+
+# Run with verbose output
+npm test -- --reporter=verbose
+```
+
+### Debugging Tests
+
+When a test fails, check:
+
+1. **Import paths** — Ensure DIST_DIR points to your built app
+2. **Missing migrations** — Run `bin/juntos build` to regenerate `dist/`
+3. **Context mocks** — Controllers expect specific context properties
+4. **Async/await** — Model methods are async; don't forget `await`
+
+Add console logging to debug:
+
+```javascript
+it('debug example', async () => {
+  const article = await Article.create({ title: 'Debug', body: 'Content' });
+  console.log('Created:', article);
+  console.log('Errors:', article.errors);
+
+  const all = await Article.all();
+  console.log('All articles:', all);
+});
+```
+
+## Next Steps
+
+- See [Active Record](/docs/juntos/active-record) for the full query interface, validations, and callbacks
+- See the [Architecture](/docs/juntos/architecture) to understand what gets generated
+- Check [Demo Applications](/docs/juntos/demos/) for complete test examples
+- Review the Ruby2JS [integration tests](https://github.com/ruby2js/ruby2js/tree/master/test/integration) for real-world patterns

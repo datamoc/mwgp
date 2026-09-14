@@ -3,4 +3,5 @@
 /notes/
 /RPGM_versions/
 /MWGP_versions/
-/transpilers/
+/transpilers/opal-master/
+/transpilers/ruby2js-master/**/node_modules/

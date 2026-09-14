@@ -1,0 +1,42 @@
+pkg
+demo/assets
+demo/filters.opal
+.DS_Store
+testrails
+node_modules
+
+# Selfhost generated outputs (regenerated via rake release)
+demo/selfhost/dist/
+demo/selfhost/ruby2js.js
+demo/selfhost/ruby2js.mjs
+demo/selfhost/prism_browser.js
+demo/selfhost/filters/
+demo/selfhost/lib/
+packages/juntos-dev/dist/
+packages/juntos-dev/lib/
+packages/juntos-dev/ruby2js.js
+
+# Editor swap files
+*.swp
+*.swo
+
+# Local config
+mise.toml
+.claude/
+packages/juntos/package-lock.json
+
+# Release tarballs
+*.tgz
+
+# Local test demos (generated apps)
+demo/blog/
+demo/chat/
+demo/dictaphone/
+demo/notes/
+demo/photo_gallery/
+demo/ssg-blog/
+demo/workflow_builder/
+artifacts/
+
+# Editor snapshots (built locally or by CI)
+editor/snapshots/

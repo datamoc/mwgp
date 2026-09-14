@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# Create a Ruby2JS photo gallery demo with camera integration and real-time updates
+# Usage: create-photo-gallery [app-name]
+#
+# Creates a Rails app with a Photo model, camera controller,
+# and platform-specific camera integration using target pragmas.
+#
+# Features:
+# - Real-time updates via broadcasts_to (photos appear for all users)
+# - Browser target: uses getUserMedia() for webcam access
+# - Capacitor target: uses @capacitor/camera for native camera
+# - Uses `# Pragma: capacitor` for compile-time target selection
+# - Uses `defined?(Camera)` for runtime branching
+
+set -e
+
+APP_NAME="${1:-photo_gallery}"
+
+echo "Creating Ruby2JS photo gallery: $APP_NAME"
+echo ""
+
+# Create Rails app (minimal, with Tailwind for nice styling)
+rails new "$APP_NAME" --skip-git --skip-docker --css tailwind
+cd "$APP_NAME"
+
+# Generate Photo model (no scaffold - we'll create custom views)
+rails generate model Photo client_id:string image_data:text caption:string taken_at:datetime
+
+# Create database
+rails db:create
+
+# Update Photo model with validations and real-time broadcasting
+cat > app/models/photo.rb << 'MODEL'
+class Photo < ApplicationRecord
+  validates :image_data, presence: true
+
+  # Broadcast new photos to all connected users
+  broadcasts_to -> { "photos" }, inserts_by: :prepend
+end
+MODEL
+
+# Create PhotosController
+mkdir -p app/controllers
+cat > app/controllers/photos_controller.rb << 'CONTROLLER'
+class PhotosController < ApplicationController
+  def index
+    @photos = Photo.order(taken_at: :desc)
+  end
+
+  def create
+    @photo = Photo.new(photo_params)
+    @photo.client_id = globalThis.crypto.randomUUID()
+    @photo.taken_at = new Date()
+
+    if @photo.save
+      respond_to do |format|
+        format.turbo_stream
+        format.html { redirect_to photos_path }
+      end
+    else
+      redirect_to photos_path, alert: "Could not save photo."
+    end
+  end
+
+  private
+
+  def photo_params
+    params.require(:photo).permit(:image_data, :caption)
+  end
+end
+CONTROLLER
+
+# Set up routes
+cat > config/routes.rb << 'ROUTES'
+Rails.application.routes.draw do
+  root "photos#index"
+  resources :photos, only: [:index, :create]
+end
+ROUTES
+
+# Create views directory
+mkdir -p app/views/photos
+
+# Create index view with camera UI
+cat > app/views/photos/index.html.erb << 'VIEW'
+<%# Subscribe to real-time photo updates from all users %>
+<%= turbo_stream_from "photos" %>
+
+<div class="container mx-auto px-4 py-8" data-controller="camera">
+  <h1 class="text-3xl font-bold mb-8">Photo Gallery</h1>
+
+  <!-- Camera controls -->
+  <div class="mb-8 p-6 bg-gray-100 rounded-lg">
+    <div class="flex gap-4 mb-4">
+      <button data-action="click->camera#takePhoto"
+              class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+        Take Photo
+      </button>
+      <button data-action="click->camera#chooseFromGallery"
+              class="bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-700 transition">
+        Choose from Gallery
+      </button>
+    </div>
+
+    <!-- Video preview for browser camera -->
+    <video data-camera-target="video"
+           class="hidden w-full max-w-md rounded-lg mb-4"
+           autoplay playsinline></video>
+
+    <!-- Capture button (shown when video is active) -->
+    <button data-camera-target="captureBtn"
+            data-action="click->camera#capture"
+            class="hidden bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition mb-4">
+      Capture
+    </button>
+
+    <!-- New photo form -->
+    <%= form_with url: "/photos", method: :post,
+                  data: { camera_target: "form", action: "turbo:submit-end->camera#reset" },
+                  class: "hidden" do |f| %>
+      <input type="hidden" name="photo[image_data]" data-camera-target="imageData">
+
+      <!-- Image preview after capture -->
+      <img data-camera-target="preview" class="w-full max-w-md rounded-lg mb-4" />
+
+      <div class="flex gap-4 items-end">
+        <input type="text" name="photo[caption]"
+               placeholder="Add a caption..."
+               data-camera-target="captionInput"
+               class="flex-1 border rounded-lg p-3">
+
+        <%= f.submit "Save Photo",
+               class: "bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition cursor-pointer" %>
+      </div>
+    <% end %>
+  </div>
+
+  <!-- Gallery grid -->
+  <div id="photos" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <%= render @photos %>
+    <p id="empty-message" class="text-gray-500 text-center py-12 col-span-full hidden only:block">
+      No photos yet. Take one to get started!
+    </p>
+  </div>
+</div>
+VIEW
+
+# Create photo partial
+cat > app/views/photos/_photo.html.erb << 'PARTIAL'
+<div id="<%= dom_id(photo) %>" class="bg-white rounded-lg shadow-md overflow-hidden">
+  <img src="data:image/jpeg;base64,<%= photo.image_data %>"
+       class="w-full h-48 object-cover"
+       alt="<%= photo.caption || 'Photo' %>" />
+  <div class="p-4">
+    <% if photo.caption %>
+      <p class="text-gray-800 mb-2"><%= photo.caption %></p>
+    <% end %>
+    <% if photo.taken_at %>
+      <time class="text-gray-500 text-sm"><%= photo.taken_at.toLocaleString() %></time>
+    <% end %>
+  </div>
+</div>
+PARTIAL
+
+# Create turbo stream response for create
+cat > app/views/photos/create.turbo_stream.erb << 'TURBO'
+<%= turbo_stream.prepend "photos", @photo %>
+TURBO
+
+# Create Stimulus camera controller (Ruby)
+# Uses target-specific pragmas for compile-time platform selection
+mkdir -p app/javascript/controllers
+cat > app/javascript/controllers/camera_controller.rb << 'STIMULUS'
+# Capacitor Camera plugin - only included when building for capacitor target
+import ["Camera", "CameraResultType", "CameraSource"], from: "@capacitor/camera" # Pragma: capacitor
+
+class CameraController < Stimulus::Controller
+  def takePhoto
+    if defined?(Camera)
+      # Native mobile - use Capacitor Camera plugin
+      takePhotoCapacitor()
+    else
+      # Browser - use getUserMedia
+      takePhotoBrowser()
+    end
+  end
+
+  def takePhotoCapacitor
+    # Camera is guaranteed to exist when building for capacitor target
+    result = await Camera.getPhoto(
+      quality: 80,
+      allowEditing: false,
+      resultType: CameraResultType.Base64,
+      source: CameraSource.Camera
+    )
+    handlePhoto(result.base64String)
+  end
+
+  def takePhotoBrowser
+    # Start video stream from webcam
+    stream = await navigator.mediaDevices.getUserMedia(video: { facingMode: "user" })
+    videoTarget.srcObject = stream
+    videoTarget.classList.remove("hidden")
+    captureBtnTarget.classList.remove("hidden")
+    formTarget.classList.add("hidden")
+  end
+
+  def capture
+    # Capture frame from video to canvas
+    canvas = document.createElement("canvas")
+    canvas.width = videoTarget.videoWidth
+    canvas.height = videoTarget.videoHeight
+    canvas.getContext("2d").drawImage(videoTarget, 0, 0)
+
+    # Stop video stream
+    videoTarget.srcObject.getTracks().each { |track| track.stop() }
+    videoTarget.classList.add("hidden")
+    captureBtnTarget.classList.add("hidden")
+
+    # Get base64 image data (without data URL prefix)
+    dataUrl = canvas.toDataURL("image/jpeg", 0.8)
+    base64 = dataUrl.sub("data:image/jpeg;base64,", "")
+
+    # Show preview and form
+    handlePhoto(base64)
+  end
+
+  def chooseFromGallery
+    if defined?(Camera)
+      # Native mobile - use Capacitor Camera with Photos source
+      chooseFromGalleryCapacitor()
+    else
+      # Browser - use file input
+      chooseFromGalleryBrowser()
+    end
+  end
+
+  def chooseFromGalleryCapacitor
+    result = await Camera.getPhoto(
+      quality: 80,
+      allowEditing: false,
+      resultType: CameraResultType.Base64,
+      source: CameraSource.Photos
+    )
+    handlePhoto(result.base64String)
+  end
+
+  def chooseFromGalleryBrowser
+    input = document.createElement("input")
+    input.type = "file"
+    input.accept = "image/*"
+    input.onchange = -> { handleFileSelect(input) }
+    input.click()
+  end
+
+  def handleFileSelect(input)
+    file = input.files[0]
+    return unless file
+
+    reader = FileReader.new
+    reader.onload = -> {
+      base64 = reader.result.sub(/^data:image\/\w+;base64,/, "")
+      handlePhoto(base64)
+    }
+    reader.readAsDataURL(file)
+  end
+
+  def handlePhoto(base64)
+    imageDataTarget.value = base64
+    previewTarget.src = "data:image/jpeg;base64,#{base64}"
+    formTarget.classList.remove("hidden")
+    captionInputTarget.focus()
+  end
+
+  def reset
+    # Reset form after successful save
+    imageDataTarget.value = ""
+    previewTarget.src = ""
+    captionInputTarget.value = ""
+    formTarget.classList.add("hidden")
+  end
+end
+STIMULUS
+
+# Create seeds with sample photos (placeholder - real photos come from camera)
+cat > db/seeds.rb << 'SEEDS'
+# Photo gallery seeds
+# In a real app, photos come from the camera
+# This just ensures the database is ready
+puts "Photo gallery ready - take some photos!"
+SEEDS
+
+# Create ruby2js.yml with dependencies
+# These get added to dist/package.json and bundled by Vite
+cat > config/ruby2js.yml << 'CONFIG'
+dependencies:
+  "@capacitor/camera": "^6.0.0"
+CONFIG
+
+# Create integration test for photos (demo-specific)
+cat > test/photos.test.mjs << 'TEST'
+import { describe, it, expect } from 'vitest';
+
+describe('Photo Model', () => {
+  it('creates a photo with valid attributes', async () => {
+    const { Photo } = await import('juntos:models');
+
+    const photo = await Photo.create({
+      image_data: 'base64encodedimagedata',
+      caption: 'Test photo'
+    });
+
+    expect(photo.id).toBeDefined();
+    expect(photo.image_data).toBe('base64encodedimagedata');
+    expect(photo.caption).toBe('Test photo');
+  });
+
+  it('validates image_data presence', async () => {
+    const { Photo } = await import('juntos:models');
+
+    const photo = new Photo({ image_data: '', caption: 'No image' });
+    const saved = await photo.save();
+
+    expect(saved).toBe(false);
+    expect(photo.errors.image_data).toBeDefined();
+  });
+
+  it('allows photo without caption', async () => {
+    const { Photo } = await import('juntos:models');
+
+    const photo = await Photo.create({
+      image_data: 'base64data'
+    });
+
+    expect(photo.id).toBeDefined();
+    expect(photo.caption).toBeUndefined();
+  });
+});
+
+describe('PhotosController', () => {
+  it('index action returns list', async () => {
+    const { Photo } = await import('juntos:models');
+    const { PhotosController } = await import('../app/controllers/photos_controller.rb');
+
+    await Photo.create({ image_data: 'testdata', caption: 'Gallery photo' });
+
+    const context = {
+      params: {},
+      flash: { get: () => '', consumeNotice: () => ({ present: false }), consumeAlert: () => '' },
+      contentFor: {}
+    };
+
+    const html = await PhotosController.index(context);
+    expect(html).toContain('Photo Gallery');
+  });
+
+  it('create action adds a new photo', async () => {
+    const { Photo } = await import('juntos:models');
+    const { PhotosController } = await import('../app/controllers/photos_controller.rb');
+
+    const context = {
+      params: {},
+      flash: { set: () => {} },
+      contentFor: {},
+      request: { headers: { get: () => 'text/html' } }
+    };
+
+    const params = {
+      photo: {
+        image_data: 'newphotobase64data',
+        caption: 'New photo from controller'
+      }
+    };
+
+    const result = await PhotosController.create(context, params);
+
+    // Should return redirect after successful create
+    expect(result.redirect).toBeDefined();
+
+    const photos = await Photo.all();
+    expect(photos.length).toBe(1);
+    expect(photos[0].caption).toBe('New photo from controller');
+  });
+});
+TEST
+
+echo ""
+echo "Photo gallery created: $APP_NAME/"
+echo ""
+echo "Features:"
+echo "  - Real-time updates via Turbo Streams broadcasting"
+echo "  - Photos appear instantly for all connected users"
+echo "  - Platform-specific camera integration (browser/Capacitor)"
+echo ""
+echo "To run with Juntos (transpiled to JavaScript):"
+echo "  cd $APP_NAME"
+echo "  bin/juntos dev -d dexie              # Browser with IndexedDB"
+echo ""
+echo "To build for specific targets:"
+echo "  bin/juntos build -t browser          # Browser build (uses getUserMedia)"
+echo "  bin/juntos build -t capacitor        # Capacitor build (uses native Camera)"
+echo ""
+echo "The camera controller uses target-specific pragmas:"
+echo "  - Browser target: excludes @capacitor/camera, uses getUserMedia"
+echo "  - Capacitor target: includes @capacitor/camera, uses native camera"
+echo ""
+echo "Camera will request permission to access your webcam (browser) or"
+echo "native camera (Capacitor). Click 'Take Photo' to start."
+echo ""
+echo "Open multiple browser tabs to see real-time photo sharing!"
+echo ""
+echo "To run with Rails:"
+echo "  cd $APP_NAME"
+echo "  bin/rails db:prepare"
+echo "  bin/rails server"
+echo ""

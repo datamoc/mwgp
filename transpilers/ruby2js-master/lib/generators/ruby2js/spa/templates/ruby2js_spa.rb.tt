@@ -1,0 +1,73 @@
+# Ruby2JS SPA Configuration
+#
+# This file defines which parts of your Rails application should be
+# transpiled into an offline-capable Single Page Application.
+#
+# The SPA will be built to: public/spa/<%= options[:name] %>/
+#
+# Build the SPA with: rails ruby2js:spa:build
+#
+# For more information, see: https://www.ruby2js.com/docs/spa
+
+require 'ruby2js/spa'
+
+Ruby2JS::Spa.configure do
+  name :<%= options[:name] %>
+  mount_path '<%= options[:mount_path] %>'
+
+  # Target runtime and database
+  # Run `rails g ruby2js:spa:install --help` for valid combinations
+  runtime :<%= options[:runtime] %>
+  database :<%= options[:database] %>
+
+  # CSS framework: none, pico, or tailwind
+  css :<%= options[:css] %>
+<% if @root_route %>
+
+  # Root route
+  root '<%= @root_route %>'
+<% end %>
+
+  # Models: specify which models to include
+  # Associations are automatically resolved - if you include a model,
+  # its associated models (has_many, belongs_to) will be included too
+  models do
+<% if @detected_scaffolds.any? -%>
+<% @detected_scaffolds.each do |scaffold| -%>
+    include :<%= scaffold %>
+<% end -%>
+<% else -%>
+    # No models detected - add your models here
+    # include :Article
+<% end -%>
+  end
+
+  # Controllers: specify which controllers and actions to include
+  controllers do
+<% if @detected_scaffolds.any? -%>
+<% @detected_scaffolds.each do |scaffold| -%>
+    include :<%= scaffold.underscore.pluralize %>
+<% end -%>
+<% else -%>
+    # No controllers detected - add your controllers here
+    # include :articles
+<% end -%>
+  end
+
+  # Views: ERB templates to transpile to JavaScript render functions
+  views do
+<% if @detected_scaffolds.any? -%>
+<% @detected_scaffolds.each do |scaffold| -%>
+    include '<%= scaffold.underscore.pluralize %>/*.html.erb'
+<% end -%>
+<% else -%>
+    # No views detected - add your view patterns here
+    # include 'articles/*.html.erb'
+<% end -%>
+  end
+
+  # Stimulus: JavaScript controllers to copy (not transpiled)
+  # stimulus do
+  #   include 'example_controller.js'
+  # end
+end

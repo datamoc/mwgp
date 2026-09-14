@@ -1,0 +1,457 @@
+# Selfhost Rake tasks
+# These build and test the self-hosted Ruby2JS converter
+#
+# Run from the repository root:
+#   bundle exec rake -f demo/selfhost/Rakefile <task>
+#
+# Main tasks (run with -T for full list):
+#
+#   rake local      - Build everything for local development
+#   rake release    - Build everything for npm release (includes tarballs)
+#   rake clean      - Remove all generated files
+#   rake test       - Build and run all tests
+#
+# The `local` build produces files that reference local paths (../../demo/selfhost/).
+# The `release` build converts these to npm package imports (ruby2js, juntos, juntos-dev).
+
+require 'json'
+require 'fileutils'
+
+ROOT = File.expand_path('../..', __dir__)
+SELFHOST = __dir__
+DIST = File.join(SELFHOST, 'dist')
+
+# Helper to run bundle exec from root directory (where Gemfile is)
+def bundle_exec(cmd)
+  "cd #{ROOT} && BUNDLE_GEMFILE=#{ROOT}/Gemfile bundle exec #{cmd}"
+end
+
+# Load manifest
+def manifest
+  @manifest ||= JSON.parse(File.read(File.join(SELFHOST, 'spec_manifest.json')))
+end
+
+directory DIST
+
+# Walker dependencies
+walker_deps = FileList["#{ROOT}/lib/ruby2js/node.rb", "#{ROOT}/lib/ruby2js/prism_walker.rb", "#{ROOT}/lib/ruby2js/prism_walker/*.rb"]
+
+# Converter dependencies
+converter_deps = FileList["#{ROOT}/lib/ruby2js/converter.rb", "#{ROOT}/lib/ruby2js/converter/*.rb", "#{ROOT}/lib/ruby2js/serializer.rb"]
+
+# Selfhost filter dependencies
+selfhost_deps = FileList["#{ROOT}/lib/ruby2js/filter/selfhost.rb", "#{ROOT}/lib/ruby2js/filter/selfhost/*.rb"]
+
+# Namespace dependencies
+namespace_deps = FileList["#{ROOT}/lib/ruby2js/namespace.rb"]
+
+# Runtime dependencies
+runtime_deps = FileList["#{ROOT}/lib/ruby2js/selfhost/runtime.rb"]
+
+# Prism browser dependencies
+prism_browser_deps = FileList["#{ROOT}/lib/ruby2js/selfhost/prism_browser.rb"]
+
+# Bundle dependencies (includes CLI and JSX parser)
+bundle_deps = FileList["#{ROOT}/lib/ruby2js/selfhost/bundle.rb", "#{ROOT}/lib/ruby2js/selfhost/cli.rb", "#{ROOT}/lib/ruby2js/jsx.rb"]
+
+# ERB Compiler dependencies
+erb_compiler_deps = FileList["#{ROOT}/lib/ruby2js/rails/erb_compiler.rb"]
+migration_sql_deps = FileList["#{ROOT}/lib/ruby2js/rails/migration_sql.rb"]
+seed_sql_deps = FileList["#{ROOT}/lib/ruby2js/rails/seed_sql.rb"]
+
+desc "Build prism_browser.js (in selfhost root for correct node_modules paths)"
+file "#{SELFHOST}/prism_browser.js" => [*prism_browser_deps, *selfhost_deps] do
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_prism_browser.rb > #{SELFHOST}/prism_browser.js")
+end
+
+desc "Build ruby2js.js (library for CLI, browser, and tests)"
+file "#{SELFHOST}/ruby2js.js" => [*bundle_deps, *runtime_deps, *namespace_deps, *walker_deps, *converter_deps, *selfhost_deps, "#{SELFHOST}/filter_runtime.js"] do
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_bundle.rb > #{SELFHOST}/ruby2js.js")
+end
+
+desc "Build erb_compiler.js (ERB to Ruby compiler)"
+file "#{SELFHOST}/lib/erb_compiler.js" => [*erb_compiler_deps] do
+  FileUtils.mkdir_p("#{SELFHOST}/lib")
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_erb_compiler.rb > #{SELFHOST}/lib/erb_compiler.js")
+end
+
+desc "Build migration_sql.js (SQL generator for D1 migrations)"
+file "#{SELFHOST}/lib/migration_sql.js" => [*migration_sql_deps] do
+  FileUtils.mkdir_p("#{SELFHOST}/lib")
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_migration_sql.rb > #{SELFHOST}/lib/migration_sql.js")
+end
+
+desc "Build seed_sql.js (SQL generator for D1 seeds)"
+file "#{SELFHOST}/lib/seed_sql.js" => [*seed_sql_deps] do
+  FileUtils.mkdir_p("#{SELFHOST}/lib")
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_seed_sql.rb > #{SELFHOST}/lib/seed_sql.js")
+end
+
+# Map spec names to filter names (when they differ)
+SPEC_TO_FILTER = {
+  'camelcase_spec.rb' => 'camelCase',
+  'cjs_spec.rb' => 'cjs',
+  'rails_logger_spec.rb' => 'rails/logger',
+  'rails_model_spec.rb' => 'rails/model',
+  'rails_controller_spec.rb' => 'rails/controller',
+  'rails_routes_spec.rb' => 'rails/routes',
+  'rails_migration_spec.rb' => 'rails/migration',
+  'rails_seeds_spec.rb' => 'rails/seeds',
+  'rails_test_spec.rb' => 'rails/test'
+}
+
+# Derive filter name from spec name
+def filter_for_spec(spec_name)
+  SPEC_TO_FILTER[spec_name] || spec_name.sub('_spec.rb', '')
+end
+
+# Extra filter dependencies (not tied to specs)
+# These are shared modules required by other filters
+EXTRA_FILTERS = ['rails/active_record', 'rails/concern', 'rails/logger', 'rails/playwright', 'active_support'].freeze
+
+# Get filters needed for ready + partial specs (only those with actual filter files)
+def manifest_filters
+  specs = manifest['ready'] + manifest['partial'].map { |e| e.is_a?(Hash) ? e['spec'] : e }
+  filters = specs.map { |s| filter_for_spec(s) }
+  # Add extra dependencies
+  filters += EXTRA_FILTERS
+  filters.uniq.select { |name| File.exist?("#{ROOT}/lib/ruby2js/filter/#{name}.rb") }
+end
+
+# Filter output files for manifest specs
+filters_dir = "#{SELFHOST}/filters"
+FILTER_TARGETS = manifest_filters.map { |name| "#{filters_dir}/#{name}.js" }
+
+desc "Build lib files (erb_compiler, migration_sql, seed_sql)"
+task :build_lib => ["#{SELFHOST}/lib/erb_compiler.js", "#{SELFHOST}/lib/migration_sql.js", "#{SELFHOST}/lib/seed_sql.js"]
+
+# ===========================================================================
+# Framework Transformers (Vue, Svelte, Astro)
+# ===========================================================================
+
+# Transformer dependencies
+astro_template_deps = FileList["#{ROOT}/lib/ruby2js/astro_template_compiler.rb"]
+svelte_template_deps = FileList["#{ROOT}/lib/ruby2js/svelte_template_compiler.rb"]
+vue_template_deps = FileList["#{ROOT}/lib/ruby2js/vue_template_compiler.rb"]
+astro_component_deps = FileList["#{ROOT}/lib/ruby2js/astro_component_transformer.rb"]
+svelte_component_deps = FileList["#{ROOT}/lib/ruby2js/svelte_component_transformer.rb"]
+vue_component_deps = FileList["#{ROOT}/lib/ruby2js/vue_component_transformer.rb"]
+erb_pnode_deps = FileList["#{ROOT}/lib/ruby2js/erb_pnode_transformer.rb"]
+
+desc "Build astro_template_compiler.mjs"
+file "#{SELFHOST}/dist/astro_template_compiler.mjs" => [*astro_template_deps, "#{SELFHOST}/ruby2js.js"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_astro_template_compiler.rb > #{SELFHOST}/dist/astro_template_compiler.mjs")
+end
+
+desc "Build svelte_template_compiler.mjs"
+file "#{SELFHOST}/dist/svelte_template_compiler.mjs" => [*svelte_template_deps, "#{SELFHOST}/ruby2js.js"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_svelte_template_compiler.rb > #{SELFHOST}/dist/svelte_template_compiler.mjs")
+end
+
+desc "Build vue_template_compiler.mjs"
+file "#{SELFHOST}/dist/vue_template_compiler.mjs" => [*vue_template_deps, "#{SELFHOST}/ruby2js.js"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_vue_template_compiler.rb > #{SELFHOST}/dist/vue_template_compiler.mjs")
+end
+
+desc "Build astro_component_transformer.mjs"
+file "#{SELFHOST}/dist/astro_component_transformer.mjs" => [*astro_component_deps, "#{SELFHOST}/dist/astro_template_compiler.mjs"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_astro_component_transformer.rb > #{SELFHOST}/dist/astro_component_transformer.mjs")
+end
+
+desc "Build svelte_component_transformer.mjs"
+file "#{SELFHOST}/dist/svelte_component_transformer.mjs" => [*svelte_component_deps, "#{SELFHOST}/dist/svelte_template_compiler.mjs"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_svelte_component_transformer.rb > #{SELFHOST}/dist/svelte_component_transformer.mjs")
+end
+
+desc "Build vue_component_transformer.mjs"
+file "#{SELFHOST}/dist/vue_component_transformer.mjs" => [*vue_component_deps, "#{SELFHOST}/dist/vue_template_compiler.mjs"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_vue_component_transformer.rb > #{SELFHOST}/dist/vue_component_transformer.mjs")
+end
+
+desc "Build erb_pnode_transformer.mjs (ERB-style templates to JSX)"
+file "#{SELFHOST}/dist/erb_pnode_transformer.mjs" => [*erb_pnode_deps, "#{SELFHOST}/ruby2js.js"] do
+  FileUtils.mkdir_p(DIST)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_erb_pnode_transformer.rb > #{SELFHOST}/dist/erb_pnode_transformer.mjs")
+end
+
+TRANSFORMER_TARGETS = [
+  "#{SELFHOST}/dist/astro_template_compiler.mjs",
+  "#{SELFHOST}/dist/svelte_template_compiler.mjs",
+  "#{SELFHOST}/dist/vue_template_compiler.mjs",
+  "#{SELFHOST}/dist/astro_component_transformer.mjs",
+  "#{SELFHOST}/dist/svelte_component_transformer.mjs",
+  "#{SELFHOST}/dist/vue_component_transformer.mjs",
+  "#{SELFHOST}/dist/erb_pnode_transformer.mjs"
+]
+
+desc "Build SFC filter (required by transformers)"
+file "#{SELFHOST}/filters/sfc.js" => ["#{SELFHOST}/ruby2js.js", "#{ROOT}/lib/ruby2js/filter/sfc.rb"] do
+  FileUtils.mkdir_p("#{SELFHOST}/filters")
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_sfc_filter.rb > #{SELFHOST}/filters/sfc.js")
+end
+
+desc "Build framework transformers (Vue, Svelte, Astro)"
+task :build_transformers => [*TRANSFORMER_TARGETS, "#{SELFHOST}/filters/sfc.js"]
+
+desc "Build manifest filters (batch)"
+task :build_filters => ["#{SELFHOST}/ruby2js.js"] do
+  puts "Building filters..."
+  sh bundle_exec("ruby #{SELFHOST}/scripts/build_all.rb filters")
+end
+
+# Core build targets (library and prism_browser)
+CORE_TARGETS = ["#{SELFHOST}/ruby2js.js", "#{SELFHOST}/prism_browser.js"]
+
+desc "Build all transpiled files (bundle, prism_browser, specs, filters)"
+task :build => [*CORE_TARGETS, :build_filters] do
+  puts "Building specs..."
+  sh bundle_exec("ruby #{SELFHOST}/scripts/build_all.rb specs")
+end
+
+desc "Build only ready specs"
+task :build_ready => [*CORE_TARGETS, :build_filters] do
+  puts "Building ready specs..."
+  sh bundle_exec("ruby #{SELFHOST}/scripts/build_all.rb ready")
+end
+
+desc "Build partial specs"
+task :build_partial => [*CORE_TARGETS, :build_filters] do
+  puts "Building partial specs..."
+  sh bundle_exec("ruby #{SELFHOST}/scripts/build_all.rb partial")
+end
+
+desc "Install npm dependencies"
+task :npm_install do
+  Dir.chdir(SELFHOST) do
+    sh "npm install" unless File.exist?('node_modules/@ruby/prism')
+  end
+end
+
+desc "Run walker unit tests"
+task :test_walker => [:npm_install, "#{SELFHOST}/ruby2js.js"] do
+  Dir.chdir(SELFHOST) do
+    sh "node test_walker.mjs"
+  end
+end
+
+desc "Create symlink to spec/require for ESM require tests"
+task :setup_require_symlink do
+  require_link = File.join(DIST, 'require')
+  unless File.exist?(require_link)
+    FileUtils.ln_s(File.join('..', '..', '..', 'spec', 'require'), require_link)
+  end
+end
+
+desc "Create symlink to spec/combiner for combiner fixture tests"
+task :setup_combiner_symlink do
+  combiner_link = File.join(DIST, 'combiner')
+  unless File.exist?(combiner_link)
+    FileUtils.ln_s(File.join('..', '..', '..', 'spec', 'combiner'), combiner_link)
+  end
+end
+
+desc "Run spec tests (requires build first)"
+task :test_specs => [:npm_install, :setup_require_symlink, :setup_combiner_symlink] do
+  Dir.chdir(SELFHOST) do
+    sh "node run_all_specs.mjs --skip-transpile"
+  end
+end
+
+desc "Run only ready spec tests"
+task :test_ready => [:npm_install, :setup_require_symlink, :setup_combiner_symlink] do
+  Dir.chdir(SELFHOST) do
+    sh "node run_all_specs.mjs --skip-transpile --ready-only"
+  end
+end
+
+desc "Run partial spec tests (informational, won't fail)"
+task :test_partial => :npm_install do
+  Dir.chdir(SELFHOST) do
+    # Run partial specs but don't fail CI - they're informational
+    sh "node run_all_specs.mjs --skip-transpile --partial-only || true"
+  end
+end
+
+TRANSFORMER_SPECS = %w[
+  astro_component_transformer_spec
+  svelte_component_transformer_spec
+  vue_component_transformer_spec
+]
+
+desc "Build transformer specs"
+task :build_transformer_specs => :build_transformers do
+  TRANSFORMER_SPECS.each do |spec|
+    source = "#{ROOT}/spec/#{spec}.rb"
+    output = "#{SELFHOST}/dist/#{spec}.mjs"
+    sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_spec.rb #{source} > #{output}")
+  end
+end
+
+desc "Run transformer spec tests"
+task :test_transformers => [:npm_install, :build_transformer_specs] do
+  Dir.chdir(SELFHOST) do
+    sh "node run_transformer_specs.mjs"
+  end
+end
+
+PACKAGE = File.join(ROOT, 'packages/juntos-dev')
+RUNTIME_PACKAGE = File.join(ROOT, 'packages/juntos')
+
+desc "Install npm dependencies for juntos-dev package"
+task :npm_install_package do
+  Dir.chdir(PACKAGE) do
+    sh "npm install" unless File.exist?('node_modules/js-yaml')
+  end
+end
+
+desc "Build Rails-specific lib files into juntos-dev package"
+task :build_package_lib do
+  lib_dir = File.join(PACKAGE, 'lib')
+  FileUtils.mkdir_p(lib_dir)
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_erb_compiler.rb > #{lib_dir}/erb_compiler.js")
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_migration_sql.rb > #{lib_dir}/migration_sql.js")
+  sh bundle_exec("ruby #{SELFHOST}/scripts/transpile_seed_sql.rb > #{lib_dir}/seed_sql.js")
+
+  # Fix imports in lib files to use npm package instead of relative paths
+  Dir.glob("#{lib_dir}/*.js").each do |file|
+    content = File.read(file)
+    content = content.gsub('../ruby2js.js', 'ruby2js')
+    content = content.gsub('"ruby2js"', '"ruby2js/ruby2js.js"')  # Need full path for named exports
+    File.write(file, content)
+  end
+  puts "Built lib files in #{lib_dir}"
+end
+
+desc "Build and run all tests"
+task :test => [:build, :test_walker, :test_specs, :test_transformers]
+
+desc "Build and run CI tests (ready must pass, partial informational)"
+task :ci => [:build_ready, :build_partial, :test_walker, :test_ready, :test_partial, :test_transformers]
+
+desc "Clean dist directory and generated files"
+task :clean do
+  rm_rf DIST
+  rm_rf "#{SELFHOST}/filters"
+  rm_rf "#{SELFHOST}/lib"
+  rm_f "#{SELFHOST}/ruby2js.js"
+  rm_f "#{SELFHOST}/prism_browser.js"
+  rm_f File.join(PACKAGE, 'lib/erb_compiler.js')
+  rm_f File.join(PACKAGE, 'lib/migration_sql.js')
+  rm_f File.join(PACKAGE, 'lib/seed_sql.js')
+end
+
+# ===========================================================================
+# Main entry-point tasks
+# ===========================================================================
+
+desc "Build everything for local development"
+task :local => [:build, :build_lib, :build_transformers] do
+  # Copy lib files to packages/juntos-dev/lib/ for local vite.mjs imports
+  package_lib = File.join(PACKAGE, 'lib')
+  FileUtils.mkdir_p(package_lib)
+  FileUtils.cp Dir.glob("#{SELFHOST}/lib/*.js"), package_lib
+
+  # Copy transformer files to package dist/ for local imports
+  package_dist = File.join(PACKAGE, 'dist')
+  FileUtils.mkdir_p(package_dist)
+  FileUtils.cp Dir.glob("#{SELFHOST}/dist/*_compiler.mjs"), package_dist
+  FileUtils.cp Dir.glob("#{SELFHOST}/dist/*_transformer.mjs"), package_dist
+
+  # Copy ruby2js.js to both packages (lib files import ../ruby2js.js)
+  FileUtils.cp File.join(SELFHOST, 'ruby2js.js'), PACKAGE
+  FileUtils.cp File.join(SELFHOST, 'ruby2js.js'), File.join(ROOT, 'packages/ruby2js')
+
+  puts ""
+  puts "Local build complete. Files reference local paths."
+  puts "To test: node ruby2js.mjs -e 'puts 1'"
+end
+
+desc "Build everything for npm release (tarballs in artifacts/tarballs/)"
+task :release => [:build, :build_lib, :build_transformers, :build_package_lib] do
+  tarballs_dir = File.join(ROOT, 'artifacts/tarballs')
+  FileUtils.mkdir_p(tarballs_dir)
+
+  # Timestamped version for npm cache invalidation
+  timestamp = Time.now.strftime('%Y%m%d%H%M')
+  ruby2js_version = "6.0.0-beta.#{timestamp}"
+  vite_plugin_version = "1.0.0-beta.#{timestamp}"
+
+  Dir.chdir(SELFHOST) do
+    sh "npm version #{ruby2js_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 6.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(RUNTIME_PACKAGE) do
+    sh "npm version #{ruby2js_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 6.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(PACKAGE) do
+    sh "npm version #{ruby2js_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 6.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(File.join(ROOT, 'packages/vite-plugin-ruby2js')) do
+    sh "npm version #{vite_plugin_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 1.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(File.join(ROOT, 'packages/esbuild-plugin-ruby2js')) do
+    sh "npm version #{vite_plugin_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 1.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(File.join(ROOT, 'packages/ruby2js-astro')) do
+    sh "npm version #{vite_plugin_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 1.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(File.join(ROOT, 'packages/ruby2js-svelte')) do
+    sh "npm version #{vite_plugin_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 1.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(File.join(ROOT, 'packages/ruby2js-nuxt')) do
+    sh "npm version #{vite_plugin_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 1.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  Dir.chdir(File.join(ROOT, 'packages/content-adapter')) do
+    sh "npm version #{vite_plugin_version} --no-git-tag-version --allow-same-version"
+    sh "npm pack --pack-destination #{tarballs_dir}"
+    sh "npm version 0.1.0 --no-git-tag-version --allow-same-version"
+  end
+
+  # Rename to stable names (strip version numbers for predictable paths)
+  Dir.chdir(tarballs_dir) do
+    Dir.glob('ruby2js-6*.tgz').each { |f| FileUtils.mv(f, 'ruby2js-beta.tgz') }
+    Dir.glob('ruby2js-[0-9]*.tgz').each { |f| FileUtils.mv(f, 'ruby2js-beta.tgz') } if !File.exist?('ruby2js-beta.tgz')
+    Dir.glob('juntos-6*.tgz').reject { |f| f == 'juntos-beta.tgz' }.each { |f| FileUtils.mv(f, 'juntos-beta.tgz') }
+    Dir.glob('juntos-dev-*.tgz').reject { |f| f == 'juntos-dev-beta.tgz' }.each { |f| FileUtils.mv(f, 'juntos-dev-beta.tgz') }
+    Dir.glob('vite-plugin-ruby2js-*.tgz').reject { |f| f == 'vite-plugin-ruby2js-beta.tgz' }.each { |f| FileUtils.mv(f, 'vite-plugin-ruby2js-beta.tgz') }
+    Dir.glob('esbuild-plugin-ruby2js-*.tgz').reject { |f| f == 'esbuild-plugin-ruby2js-beta.tgz' }.each { |f| FileUtils.mv(f, 'esbuild-plugin-ruby2js-beta.tgz') }
+    Dir.glob('ruby2js-astro-*.tgz').reject { |f| f == 'ruby2js-astro-beta.tgz' }.each { |f| FileUtils.mv(f, 'ruby2js-astro-beta.tgz') }
+    Dir.glob('ruby2js-svelte-*.tgz').reject { |f| f == 'ruby2js-svelte-beta.tgz' }.each { |f| FileUtils.mv(f, 'ruby2js-svelte-beta.tgz') }
+    Dir.glob('ruby2js-nuxt-*.tgz').reject { |f| f == 'ruby2js-nuxt-beta.tgz' }.each { |f| FileUtils.mv(f, 'ruby2js-nuxt-beta.tgz') }
+    Dir.glob('ruby2js-content-adapter-*.tgz').reject { |f| f == 'ruby2js-content-adapter-beta.tgz' }.each { |f| FileUtils.mv(f, 'ruby2js-content-adapter-beta.tgz') }
+  end
+
+  puts ""
+  puts "Release build complete. Tarballs in artifacts/tarballs/"
+end
+
+task :default => :test

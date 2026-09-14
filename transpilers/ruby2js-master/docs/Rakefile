@@ -1,0 +1,359 @@
+begin
+  require "bridgetown"
+
+  Bridgetown.load_tasks
+rescue LoadError => e
+  puts "Warning: Bridgetown gem not available in this environment. (OK when compiling JS packages)"
+end
+
+#
+# Standard set of tasks, which you can customize if you wish:
+#
+desc "Build the Bridgetown site for deployment"
+task :deploy => [:bt_clean, "frontend:build", :npm_packages] do
+  Bridgetown::Commands::Build.start
+end
+
+desc "Build the site in a test environment"
+task :test do
+  ENV["BRIDGETOWN_ENV"] = "test"
+  Bridgetown::Commands::Build.start
+end
+
+desc "Runs the clean command"
+task :bt_clean do
+  Bridgetown::Commands::Clean.start
+end
+
+namespace :frontend do
+  desc "Build the frontend with esbuild for deployment"
+  task :build do
+    sh "yarn run esbuild"
+  end
+
+  desc "Watch the frontend with esbuild during development"
+  task :dev do
+    sh "yarn run esbuild-dev"
+  rescue Interrupt
+  end
+end
+
+####
+
+docs = File.expand_path(__dir__)
+dest = "#{docs}/src/demo"
+root = File.expand_path('..', docs)
+demo = "#{root}/demo"
+source_files = Rake::FileList.new("#{root}/lib/**/*.rb", "#{root}/lib/ruby2js.rb")
+filters = Rake::FileList.new("#{root}/lib/ruby2js/filter/*.rb")
+controller_files = Rake::FileList.new("#{root}/demo/controllers/*_controller.js.rb")
+
+require 'bundler/setup'
+
+terser = "npx terser --compress --mangle"
+terser = "cat" if ENV['NODE_ENV'] == 'development'
+
+file "#{dest}/index.erb" => [*filters, "#{root}/demo/views/demo.erb"] do
+  puts "Generating #{dest}/index.erb"
+  mkdir dest unless Dir.exist? dest
+
+  require 'erb'
+  require 'ruby2js/demo'
+
+  # Set up template variables for live mode (Shoelace/Bridgetown)
+  # Uses shared configuration from Ruby2JS::Demo
+  @live = true
+  @ruby = Ruby2JS::Demo.default_ruby
+  @eslevel = nil
+  @ast = false
+  @preset = true
+  @filter_list = Ruby2JS::Demo.available_filters
+  @eslevel_list = Ruby2JS::Demo.available_eslevels
+  @option_list = Ruby2JS::Demo.available_options
+  @selected = []
+  @options_checked = {}
+  @js_output = nil
+  @parsed_html = nil
+  @filtered_html = nil
+  @error = nil
+
+  # Render the shared ERB template
+  template_path = "#{root}/demo/views/demo.erb"
+  template = ERB.new(File.read(template_path), trim_mode: '-')
+  body = template.result(binding)
+
+  erb_output = [
+    "---\nlayout: default\n---\n",
+    body
+  ].join("\n")
+
+  IO.write("#{dest}/index.erb", erb_output)
+end
+
+file "#{dest}/editor.js" => ["#{root}/demo/editor.js"] do
+  sh "cat #{root}/demo/editor.js | " +
+    "npx rollup -f iife -p @rollup/plugin-node-resolve 2>/dev/null | " +
+    "#{terser} > src/demo/editor.js"
+end
+
+file "#{dest}/litelement.js" => ["#{root}/demo/litelement.js"] do
+  sh "cat #{root}/demo/litelement.js | " +
+    "npx rollup -f iife -p @rollup/plugin-node-resolve 2>/dev/null | " +
+    "#{terser} > src/demo/litelement.js"
+end
+
+file "#{dest}/livedemo.js" => ["#{root}/demo/livedemo.js.rb", *controller_files] do
+  sh "#{RbConfig.ruby} #{root}/demo/ruby2js.rb --filter esm --filter require --filter stimulus --filter functions --identity --es2020 #{root}/demo/livedemo.js.rb | " +
+    "npx rollup -f iife --context window -p @rollup/plugin-node-resolve 2>/dev/null | " +
+    "#{terser} > #{dest}/livedemo.js"
+end
+
+task :clean do
+  rm_rf "#{docs}/src/demo"
+end
+
+task :clobber => :clean do
+  rm_rf "#{root}/demo/selfhost/dist"
+end
+
+desc "Install all dependencies (Ruby gems, Node packages, selfhost)"
+task :install do
+  sh "bundle install"
+  sh "yarn install"
+  Dir.chdir("#{root}/demo/selfhost") do
+    sh "npm install"
+  end
+end
+
+# Selfhost demo - delegates to demo/selfhost/Rakefile for building,
+# then copies files to docs site
+selfhost_dir = "#{dest}/selfhost"
+selfhost_source = "#{root}/demo/selfhost"
+selfhost_rakefile = "#{selfhost_source}/Rakefile"
+
+directory dest
+directory selfhost_dir => dest
+
+# Build selfhost bundle using the authoritative Rakefile
+# This ensures dependency tracking is in one place
+task :selfhost_build do
+  Dir.chdir(selfhost_source) do
+    # Build core files, filters, erb_compiler (for website demo), and lib files for npm package
+    sh "bundle exec rake #{selfhost_source}/ruby2js.js #{selfhost_source}/prism_browser.js #{selfhost_source}/lib/erb_compiler.js build_filters build_package_lib"
+  end
+end
+
+# Install selfhost npm dependencies if needed (provides @ruby/prism)
+selfhost_prism_source = "#{selfhost_source}/node_modules/@ruby/prism"
+task :selfhost_npm_install do
+  unless File.exist?(selfhost_prism_source)
+    Dir.chdir(selfhost_source) do
+      sh "npm install"
+    end
+  end
+end
+
+# Copy @ruby/prism module (needed for browser to load WASM)
+prism_dir = "#{selfhost_dir}/node_modules/@ruby/prism"
+directory "#{selfhost_dir}/node_modules/@ruby" => selfhost_dir
+
+task :selfhost_copy_prism => ["#{selfhost_dir}/node_modules/@ruby", :selfhost_npm_install] do
+  cp_r selfhost_prism_source, prism_dir unless File.exist?(prism_dir)
+end
+
+# Copy browser-compatible Prism loader
+task :selfhost_copy_prism_browser => [selfhost_dir, :selfhost_build] do
+  cp "#{selfhost_source}/prism_browser.js", "#{selfhost_dir}/prism_browser.js"
+end
+
+# Copy the library bundle
+task :selfhost_copy_bundle => [selfhost_dir, :selfhost_build] do
+  cp "#{selfhost_source}/ruby2js.js", "#{selfhost_dir}/ruby2js.js"
+end
+
+# Copy filters directory - all filters needed for combo boxes
+task :selfhost_copy_filters => [selfhost_dir, :selfhost_build] do
+  filters_dir = "#{selfhost_dir}/filters"
+  rails_dir = "#{filters_dir}/rails"
+  mkdir_p filters_dir unless File.exist?(filters_dir)
+  mkdir_p rails_dir unless File.exist?(rails_dir)
+
+  # Copy all built filters
+  Dir.glob("#{selfhost_source}/filters/*.js").each do |src|
+    cp src, "#{filters_dir}/#{File.basename(src)}"
+  end
+
+  # Copy all Rails filters
+  if File.exist?("#{selfhost_source}/filters/rails")
+    Dir.glob("#{selfhost_source}/filters/rails/*.js").each do |src|
+      cp src, "#{rails_dir}/#{File.basename(src)}"
+    end
+  end
+
+  # Replace node: imports with browser-safe stubs (these filters use
+  # path/fs for file resolution which is only needed in Node.js tooling)
+  Dir.glob("#{filters_dir}/**/*.js").each do |file|
+    content = File.read(file)
+    next unless content.include?('from "node:')
+    content = content
+      .sub(/^import path from "node:path";\n/,
+        "const path = { dirname: () => '.', relative: () => '', " \
+        "resolve: (...a) => a[a.length-1], join: (...a) => a.join('/') };\n")
+      .sub(/^import fs from "node:fs";\n/,
+        "const fs = { existsSync: () => false, statSync: () => ({isFile: () => false}), " \
+        "readFileSync: () => '', realpathSync: (p) => p };\n")
+    File.write(file, content)
+  end
+end
+
+# Copy lib directory (erb_compiler.js, etc.)
+task :selfhost_copy_lib => [selfhost_dir, :selfhost_build] do
+  lib_dir = "#{selfhost_dir}/lib"
+  mkdir_p lib_dir unless File.exist?(lib_dir)
+
+  %w[erb_compiler.js].each do |file|
+    src = "#{selfhost_source}/lib/#{file}"
+    cp src, "#{lib_dir}/#{file}" if File.exist?(src)
+  end
+end
+
+task :selfhost => [
+  :selfhost_copy_prism_browser,
+  :selfhost_copy_bundle,
+  :selfhost_copy_filters,
+  :selfhost_copy_lib,
+  :selfhost_copy_prism
+] do
+  # Ensure all files are world-readable (needed for nginx in Docker)
+  FileUtils.chmod_R(0644, Dir.glob("#{selfhost_dir}/**/*.js"))
+  FileUtils.chmod_R(0644, Dir.glob("#{selfhost_dir}/**/*.wasm"))
+end
+
+desc "Build livedemo.js (for CI smoke test)"
+task :livedemo => "#{dest}/livedemo.js"
+
+
+# NPM package tarballs for beta distribution
+# These go to /releases/ on the website for URL-based npm install
+releases_dir = "#{docs}/src/releases"
+directory releases_dir
+
+# Build ruby2js npm package tarball
+task :ruby2js_tarball => [:selfhost_build, releases_dir] do
+  Dir.chdir(selfhost_source) do
+    # Clean up old tarballs
+    FileUtils.rm_f Dir.glob("ruby2js-*.tgz")
+
+    # Set timestamped version for npm update detection
+    version = "6.0.0-beta.#{Time.now.strftime('%Y%m%d%H%M')}"
+    sh "npm version #{version} --no-git-tag-version --allow-same-version"
+
+    # Pack only (build already done by :selfhost_build dependency)
+    sh "npm run pack:only"
+
+    # Copy to releases with stable name
+    tarball = Dir.glob("ruby2js-*.tgz").first
+    cp tarball, "#{releases_dir}/ruby2js-beta.tgz"
+    puts "  ruby2js-beta.tgz (#{(File.size("#{releases_dir}/ruby2js-beta.tgz") / 1024.0).round(1)} KB)"
+
+    # Reset version for git
+    sh "npm version 6.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+end
+
+# Build juntos and juntos-dev npm package tarballs
+# Packages live at packages/juntos/ and packages/juntos-dev/
+# Depends on selfhost_build to generate build.mjs with npm package imports
+task :juntos_tarballs => [:vite_plugin_tarball, :selfhost_build] do
+  # Build juntos (runtime) package
+  juntos_pkg_dir = "#{root}/packages/juntos"
+  Dir.chdir(juntos_pkg_dir) do
+    FileUtils.rm_f Dir.glob("juntos-*.tgz")
+
+    version = "6.0.0-beta.#{Time.now.strftime('%Y%m%d%H%M')}"
+    sh "npm version #{version} --no-git-tag-version --allow-same-version"
+
+    sh "npm pack"
+
+    tarball = Dir.glob("juntos-*.tgz").first
+    cp tarball, "#{releases_dir}/juntos-beta.tgz"
+    puts "  juntos-beta.tgz (#{(File.size("#{releases_dir}/juntos-beta.tgz") / 1024.0).round(1)} KB)"
+
+    sh "npm version 6.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+
+  # Build juntos-dev (build tooling) package
+  juntos_dev_pkg_dir = "#{root}/packages/juntos-dev"
+  Dir.chdir(juntos_dev_pkg_dir) do
+    FileUtils.rm_f Dir.glob("juntos-dev-*.tgz")
+
+    version = "6.0.0-beta.#{Time.now.strftime('%Y%m%d%H%M')}"
+    sh "npm version #{version} --no-git-tag-version --allow-same-version"
+
+    # Remove peerDependencies first (npm quirk: peerDeps with "*" override dependency URLs)
+    sh "npm pkg delete peerDependencies.ruby2js"
+    sh "npm pkg delete peerDependencies.vite-plugin-ruby2js"
+
+    # Add dependencies for the published package
+    sh "npm pkg set dependencies.ruby2js=https://www.ruby2js.com/releases/ruby2js-beta.tgz"
+    sh "npm pkg set dependencies.vite-plugin-ruby2js=https://www.ruby2js.com/releases/vite-plugin-ruby2js-beta.tgz"
+
+    sh "npm pack"
+
+    # Restore peerDependencies and remove dependencies (keep source clean for development)
+    sh "npm pkg set peerDependencies.ruby2js='*'"
+    sh "npm pkg set peerDependencies.vite-plugin-ruby2js='*'"
+    sh "npm pkg delete dependencies.ruby2js"
+    sh "npm pkg delete dependencies.vite-plugin-ruby2js"
+
+    tarball = Dir.glob("juntos-dev-*.tgz").first
+    cp tarball, "#{releases_dir}/juntos-dev-beta.tgz"
+    puts "  juntos-dev-beta.tgz (#{(File.size("#{releases_dir}/juntos-dev-beta.tgz") / 1024.0).round(1)} KB)"
+
+    sh "npm version 6.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+end
+
+# Build vite-plugin-ruby2js npm package tarball
+# Package lives at packages/vite-plugin-ruby2js/
+task :vite_plugin_tarball => [:ruby2js_tarball, releases_dir] do
+  vite_pkg_dir = "#{root}/packages/vite-plugin-ruby2js"
+  Dir.chdir(vite_pkg_dir) do
+    # Clean up old tarballs
+    FileUtils.rm_f Dir.glob("vite-plugin-ruby2js-*.tgz")
+
+    # Set timestamped version
+    version = "1.0.0-beta.#{Time.now.strftime('%Y%m%d%H%M')}"
+    sh "npm version #{version} --no-git-tag-version --allow-same-version"
+
+    # Add ruby2js dependency for the published package
+    sh "npm pkg set dependencies.ruby2js=https://www.ruby2js.com/releases/ruby2js-beta.tgz"
+
+    # Pack
+    sh "npm pack"
+
+    # Remove dependency (keep source clean for development)
+    sh "npm pkg delete dependencies.ruby2js"
+
+    # Copy to releases with stable name
+    tarball = Dir.glob("vite-plugin-ruby2js-*.tgz").first
+    cp tarball, "#{releases_dir}/vite-plugin-ruby2js-beta.tgz"
+    puts "  vite-plugin-ruby2js-beta.tgz (#{(File.size("#{releases_dir}/vite-plugin-ruby2js-beta.tgz") / 1024.0).round(1)} KB)"
+
+    # Reset version for git
+    sh "npm version 1.0.0-beta --no-git-tag-version --allow-same-version"
+  end
+end
+
+desc "Build npm package tarballs for beta distribution"
+task :npm_packages => [:ruby2js_tarball, :juntos_tarballs, :vite_plugin_tarball]
+
+task :default => [
+  "#{dest}/index.erb",
+  "#{dest}/editor.js",
+  "#{dest}/litelement.js",
+  "#{dest}/livedemo.js",
+  :selfhost,
+  :npm_packages
+]
+

@@ -1,0 +1,363 @@
+---
+order: 335
+title: Functions
+top_section: Filters
+category: functions
+---
+
+The **Functions** filter provides a large number of convenience methods Rubyists are familar with. Statements such as `"252.3".to_i` transform into `parseInt("252.3")`, or `[1,3,5].yield_self { |arr| arr[1] }` into `(arr => arr[1])([1, 3, 5])`. Generally you will want to include this filter in your configuration unless you have specific reason not to.
+
+{% rendercontent "docs/note", title: "ES Level Enhancements" %}
+If you set the `eslevel` option to `2021` or newer, the Functions filter enables additional functionality, [documented on the ES Levels page](/docs/eslevels).
+{% endrendercontent %}
+
+## List of Transformations
+
+{% capture caret %}<sl-icon name="caret-right-fill"></sl-icon>{% endcapture %}
+
+{:.functions-list}
+* `.abs` {{ caret }} `Math.abs()`
+* `.all?` {{ caret }} `.every` (with block) or `.every(Boolean)` (without block)
+* `.any?` {{ caret }} `.some` (with block) or `.some(Boolean)` (without block)
+* `.ceil` {{ caret }} `Math.ceil()`
+* `.chars` {{ caret }} `Array.from()`
+* `.chr` {{ caret }} `fromCharCode`
+* `.clear` {{ caret }} `.length = 0`
+* `.collect {}` {{ caret }} `.map()` (alias for `.map`)
+* `.compact` {{ caret }} `.filter(x => x != null)`
+* `.compact!` {{ caret }} `.splice(0, a.length, ...a.filter(x => x != null))` (mutating)
+* `debugger` {{ caret }} `debugger` (JS debugger statement)
+* `.define_method` {{ caret }} `klass.prototype.meth = function ...`
+* `.delete` {{ caret }} `delete target[arg]`
+* `.dig(:a, :b)` {{ caret }} `?.["a"]?.["b"]` (optional chaining)
+* `.downcase` {{ caret }} `.toLowerCase`
+* `.each` {{ caret }} `.forEach`
+* `.each_key` {{ caret }} `for (i in ...) {}`
+* `.each_pair` {{ caret }} `for (let key in item) {let value = item[key]; ...}`
+* `.each_value` {{ caret }} `.forEach`
+* `.each_with_index` {{ caret }} `.forEach`
+* `.end_with?` {{ caret }} `.slice(-arg.length) == arg`
+* `.empty?` {{ caret }} `.length == 0`
+* `.find_all {}` {{ caret }} `.filter()` (alias for `.select`)
+* `.find_index` {{ caret }} `findIndex`
+* `.first` {{ caret }} `[0]`
+* `.first(n)` {{ caret }} `.slice(0, n)`
+* `.flat_map {}` {{ caret }} `.flatMap()`
+* `.floor` {{ caret }} `Math.floor()`
+* `.freeze` {{ caret }} `Object.freeze()`
+* `.getbyte(n)` {{ caret }} `charCodeAt(n)`
+* `.group_by {}` {{ caret }} `Object.groupBy()` (ES2024+) or `.reduce()` fallback
+* `.group_by {|k,v| ...}` {{ caret }} destructuring support `([k, v]) => ...`
+* `.gsub` {{ caret }} `replace(//g)`
+* `.has_key?` {{ caret }} `key in hash`
+* `.include?` {{ caret }} `.indexOf() != -1`
+* `.index` {{ caret }} `indexOf` (with string arg), `search` (with regex arg), or `findIndex` (with block)
+* `.inspect` {{ caret }} `JSON.stringify()`
+* `.join` {{ caret }} `.join('')` (Ruby defaults to `""`, JS to `","`)
+* `.key?` {{ caret }} `key in hash`
+* `.keys()` {{ caret }} `Object.keys()`
+* `.last` {{ caret }} `[*.length-1]`
+* `.last(n)` {{ caret }} `.slice(*.length-1, *.length)`
+* `.lstrip` {{ caret }} `.replace(/^\s+/, "")`
+* `.max` {{ caret }} `Math.max.apply(Math)`
+* `.max_by {}` {{ caret }} `.reduce()`
+* `.member?` {{ caret }} `key in hash`
+* `.merge` {{ caret }} `Object.assign({}, ...)`
+* `.merge!` {{ caret }} `Object.assign()`
+* `.method_defined?` {{ caret }} `klass.prototype.hasOwnProperty(meth)` or `meth in klass.prototype`
+* `.min` {{ caret }} `Math.min.apply(Math)`
+* `.min_by {}` {{ caret }} `.reduce()`
+* `.negative?` {{ caret }} `< 0`
+* `.none?` {{ caret }} `!.some` (with block) or `!.some(Boolean)` (without block)
+* `[-n] = x` {{ caret }} `[*.length-n] = x` for literal negative index assignment
+* `.new(size,default)` {{ caret }} `== .new(size).fill(default)`
+* `.nil?` {{ caret }} `== null` (see [index result tracking](#index-result-tracking) for special case)
+* `.ord` {{ caret }} `charCodeAt(0)`
+* `.positive?` {{ caret }} `> 0`
+* `puts` {{ caret }} `console.log`
+* `rand` {{ caret }} `Math.random`
+* `.reject {}` {{ caret }} `.filter(x => !(...))` (negated condition)
+* `.reject(&:method)` {{ caret }} `.filter(item => !item.method())` (symbol-to-proc)
+* `.replace` {{ caret }} `.length = 0; ...push.apply(*)`
+* `.respond_to?` {{ caret }} `right in left`
+* `.rindex` {{ caret }} `.lastIndexOf`
+* `.round` {{ caret }} `Math.round()`
+* `.rstrip` {{ caret }} `.replace(/s+$/, "")`
+* `.scan` {{ caret }} `.match(//g)`
+* `.select {}` {{ caret }} `.filter()`
+* `.send` {{ caret }} dynamic method dispatch `obj.send(:foo, x)` becomes `obj.foo(x)` or `obj[method](x)`
+* `.size` {{ caret }} `.length`
+* `.sort_by {}` {{ caret }} `.toSorted()` (ES2023+) or `.slice().sort()` fallback
+* `.sum` {{ caret }} `.reduce((a, b) => a + b, 0)`
+* `.reduce(:+)` {{ caret }} `.reduce((a, b) => a + b)` (symbol-to-proc for operators)
+* `.reduce(:merge)` {{ caret }} `.reduce((a, b) => ({...a, ...b}))` (hash merge)
+* `.times` {{ caret }} `for (let i = 0; i < n; i++)`
+* `.start_with?` {{ caret }} `.startsWith(arg)`
+* `.upto(lim)` {{ caret }} `for (let i=num; i<=lim; i+=1)`
+* `.downto(lim)` {{ caret }} `for (let i=num; i>=lim; i-=1)`
+* `.step(lim, n).each` {{ caret }} `for (let i=num; i<=lim; i+=n)`
+* `.step(lim, -n).each` {{ caret }} `for (let i=num; i>=lim; i-=n)`
+* `(0..a).to_a` {{ caret }} `[...Array(a+1).keys()]`
+* `(b..a).to_a` {{ caret }} `Array.from({length: (a-b+1)}, (_, idx) => idx+b)`
+* `(b...a).to_a` {{ caret }} `Array.from({length: (a-b)}, (_, idx) => idx+b)`
+* `.strip` {{ caret }} `.trim`
+* `.sub` {{ caret }} `.replace`
+* `.tap {|n| n}` {{ caret }} `(n => {n; return n})(...)`
+* `.to_f` {{ caret }} `parseFloat`
+* `.to_i` {{ caret }} `parseInt`
+* `.to_s` {{ caret }} `.toString`
+* `.to_sym` {{ caret }} (removed - symbols are strings in JS)
+* `.to_json` {{ caret }} `JSON.stringify(obj)`
+* `JSON.generate(x)` {{ caret }} `JSON.stringify(x)`
+* `JSON.pretty_generate(x)` {{ caret }} `JSON.stringify(x, null, 2)`
+* `JSON.parse(x)` {{ caret }} `JSON.parse(x)`
+* `JSON::ParserError` {{ caret }} `SyntaxError` (JS equivalent for JSON parse errors)
+* `URI.join(base, relative)` {{ caret }} `new URL(relative, base)`
+* `URI.parse(str)` {{ caret }} `new URL(str)`
+* `OpenStruct.new(name: "x")` {{ caret }} `{name: "x"}` (plain JS object)
+* `OpenStruct.new` {{ caret }} `{}` (empty object)
+* `require 'ostruct'` {{ caret }} (removed - JS objects are effectively OpenStructs)
+* `typeof(x)` {{ caret }} `typeof x` (JS type checking operator)
+* `.upcase` {{ caret }} `.toUpperCase`
+* `.yield_self {|n| n}` {{ caret }} `(n => n)(...)`
+* `.zero?` {{ caret }} `=== 0`
+* `[-n]` {{ caret }} `[*.length-n]` for literal values of `n`
+* `[n...m]` {{ caret }} `.slice(n,m)`
+* `[n..m]` {{ caret }} `.slice(n,m+1)`
+* `[start, length]` {{ caret }} `.slice(start, start+length)` (Ruby 2-arg slice)
+* `[n..m] = v` {{ caret }} `.splice(n, m-n+1, ...v)`
+* `.slice!(n..m)` {{ caret }} `.splice(n, m-n+1)`
+* `[/r/, n]` {{ caret }} `.match(/r/)[n]`
+* `[/r/, n]=` {{ caret }} `.replace(/r/, ...)`
+* `(1..2).each {|i| ...}` {{ caret }} `for (let i=1; i<=2; i+=1)`
+* `"string" * length` {{ caret }} `"string".repeat(length)`
+* `[element] * n` {{ caret }} `Array(n).fill(element)`
+* `[a, b] * n` {{ caret }} `Array.from({length: n}, () => [a, b]).flat()`
+* `array + [elements]` {{ caret }} `array.concat([elements])`
+* `@foo.call(args)` {{ caret }} `this._foo(args)`
+* `@@foo.call(args)` {{ caret }} `this.constructor._foo(args)`
+* `Array(x)` {{ caret }} `Array.from(x)`
+* `delete x` {{ caret }} `delete x` (note lack of parenthesis)
+
+## Regular Functions with `Function.new`
+
+By default, Ruby blocks become JavaScript arrow functions (`=>`), which have
+lexical `this` binding. When you need a regular `function` with dynamic `this`
+binding (e.g., for DOM event handlers, method composition, or prototype methods),
+use `Function.new`:
+
+```ruby
+fn = Function.new { |x| x * 2 }
+# => let fn = function(x) {x * 2}
+
+callback = Function.new { handle_click(this) }
+# => let callback = function() {handle_click(this)}
+```
+
+Compare with regular procs (arrow functions):
+
+```ruby
+fn = proc { |x| x * 2 }
+# => let fn = x => x * 2
+```
+
+**When to use `Function.new`:**
+* jQuery/DOM event handlers where `this` should refer to the element
+* Method composition with dynamic super calls
+* Situations where `this` must be determined at call time, not definition time
+
+**Alternative:** You can also use the [Pragma filter](/docs/filters/pragma) with
+`# Pragma: function` to force regular function syntax for any block.
+
+## Additional Features
+
+* `.sub!` and `.gsub!` become equivalent `x = x.replace` statements
+* `.collect` becomes `.map` (Ruby alias)
+* `.map!`, `.collect!`, `.reverse!`, and `.select!` become equivalent
+  `.splice(0, .length, *.method())` statements
+* `setInterval` and `setTimeout` allow block to be treated as the
+    first parameter on the call
+* for the following methods, if the block consists entirely of a simple
+  expression (or ends with one), a `return` is added prior to the
+  expression: `sub`, `gsub`, `any?`, `all?`, `map`, `find`, `find_index`.
+* New classes subclassed off of `Exception` will become subclassed off
+  of `Error` instead; and default constructors will be provided
+* `loop do...end` will be replaced with `while (true) {...}`
+* `n.times do...end` and `n.times { |i| ... }` will be replaced with `for` loops
+* `raise Exception.new(...)` will be replaced with `throw new Error(...)`
+* `block_given?` will check for the presence of optional argument `_implicitBlockYield` which is a function made accessible through the use of `yield` in a method body.
+* `alias_method` works both inside of a class definition as well as called directly on a class name (e.g. `MyClass.alias_method`)
+* `define_method` and `method_defined?` work inside class bodies (with or without explicit receiver), including inside loops like `[:a, :b].each { |m| define_method(m) { ... } }`
+* Block parameter destructuring is supported: `.map {|k, v| ...}` becomes `.map(([k, v]) => ...)`
+
+## Collection Methods: group_by, sort_by, max_by, min_by
+
+These methods provide Ruby-like collection operations with intelligent JavaScript output
+based on your ES level.
+
+### group_by
+
+Groups elements by a key extracted from each element.
+
+```ruby
+# Group users by role
+users.group_by { |u| u.role }
+# ES2024+: Object.groupBy(users, u => u.role)
+# Pre-ES2024: users.reduce(($acc, u) => {
+#   let $key = u.role;
+#   ($acc[$key] = $acc[$key] ?? []).push(u);
+#   return $acc
+# }, {})
+
+# Group with computed key
+items.group_by { |i| i.price > 100 ? "expensive" : "affordable" }
+# ES2024+: Object.groupBy(items, i => i.price > 100 ? "expensive" : "affordable")
+
+# Destructuring support for key-value pairs
+pairs.group_by { |k, v| k }
+# ES2024+: Object.groupBy(pairs, ([k, v]) => k)
+```
+
+### sort_by
+
+Sorts elements by a key, returning a new array (non-mutating).
+
+```ruby
+# Sort by property
+users.sort_by { |u| u.name }
+# ES2023+: users.toSorted((u_a, u_b) => {
+#   if (u_a.name < u_b.name) {return -1}
+#   else if (u_a.name > u_b.name) {return 1}
+#   else {return 0}
+# })
+# Pre-ES2023: users.slice().sort(...)
+
+# Sort by computed value
+items.sort_by { |i| i.price * i.quantity }
+# Compares (i.price * i.quantity) for each element
+
+# Sort by method result (with filter chaining)
+words.sort_by { |w| w.length }
+# Sorts words by their length
+```
+
+### max_by
+
+Finds the element with the maximum value for the given key.
+
+```ruby
+# Find user with highest score
+users.max_by { |u| u.score }
+# => users.reduce((a, b) => a.score >= b.score ? a : b)
+
+# Find longest word
+words.max_by { |w| w.length }
+# => words.reduce((a, b) => a.length >= b.length ? a : b)
+
+# Find item with highest total value
+items.max_by { |i| i.price * i.qty }
+# => items.reduce((a, b) => a.price * a.qty >= b.price * b.qty ? a : b)
+```
+
+### min_by
+
+Finds the element with the minimum value for the given key.
+
+```ruby
+# Find user with lowest score
+users.min_by { |u| u.score }
+# => users.reduce((a, b) => a.score <= b.score ? a : b)
+
+# Find shortest word
+words.min_by { |w| w.length }
+# => words.reduce((a, b) => a.length <= b.length ? a : b)
+
+# Find cheapest item
+items.min_by { |i| i.price }
+# => items.reduce((a, b) => a.price <= b.price ? a : b)
+```
+
+## Methods Always Called with Parentheses
+
+Ruby allows calling methods without parentheses, but JavaScript requires them for
+methods that return values. The following methods always output with `()` in JS,
+even when written without parentheses in Ruby:
+
+`reverse`, `pop`, `shift`, `sort`, `dup`, `clone`
+
+```ruby
+arr.reverse.each { |x| puts x }
+# => for (let x of arr.reverse()) { console.log(x) }
+
+x = arr.pop
+# => let x = arr.pop()
+```
+
+## Methods Requiring Parentheses
+
+Some Ruby method names like `keys`, `values`, `index`, `max`, etc. could also be
+property accesses in JavaScript (e.g., on DOM nodes). To avoid incorrect
+transformations, these methods are only converted when called with parentheses:
+
+```ruby
+a.keys     # => a.keys (no conversion - could be property access)
+a.keys()   # => Object.keys(a) (converted - clearly a method call)
+```
+
+The following methods require parentheses for automatic conversion:
+`keys`, `values`, `entries`, `index`, `rindex`, `clear`, `reverse!`, `max`, `min`
+
+To force conversion even without parentheses, explicitly include the method:
+
+```ruby
+Ruby2JS.convert('a.keys', include: [:keys])  # => Object.keys(a)
+```
+
+Or use `include_all: true` to enable conversion for all such methods:
+
+```ruby
+Ruby2JS.convert('a.keys', include_all: true)  # => Object.keys(a)
+```
+
+## Methods Requiring Explicit Inclusion
+
+The following mappings will only be done if explicitly included
+(pass `include: [:class, :call]` as a `convert` option to enable):
+
+{:.functions-list}
+* `.class` {{ caret }} `.constructor`
+* `a.call` {{ caret }} `a()`
+
+## Index Result Tracking
+
+Ruby's `String#index` and `Array#index` return `nil` when the element is not found,
+but JavaScript's `indexOf` returns `-1`. The Functions filter tracks local variables
+assigned from `.index()` calls and converts `.nil?` checks on those variables to
+use `=== -1` instead of `== null`:
+
+```ruby
+idx = str.index("x")
+return nil if idx.nil?
+# => let idx = str.indexOf("x"); if (idx === -1) return null
+```
+
+This tracking is scoped per method, so variables in different methods are handled
+independently:
+
+```ruby
+def find_char(str)
+  idx = str.index("x")
+  return nil if idx.nil?  # Uses === -1
+  idx
+end
+
+def other_method
+  idx = some_value
+  return nil if idx.nil?  # Uses == null (normal behavior)
+  idx
+end
+```
+
+{% rendercontent "docs/note", extra_margin: true %}
+More examples of how this filter works are in the [specs file](https://github.com/ruby2js/ruby2js/blob/master/spec/functions_spec.rb).
+{% endrendercontent %}

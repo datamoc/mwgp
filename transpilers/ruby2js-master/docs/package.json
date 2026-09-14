@@ -1,0 +1,35 @@
+{
+  "name": "docs",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "shoelace:copy-assets": "mkdir -p src/shoelace-assets && cp -r node_modules/@shoelace-style/shoelace/dist/assets src/shoelace-assets",
+    "esbuild": "yarn shoelace:copy-assets && node esbuild.config.js --minify",
+    "esbuild-dev": "yarn shoelace:copy-assets && node esbuild.config.js --watch"
+  },
+  "devDependencies": {
+    "@codemirror/lang-html": "^6.0.0",
+    "@codemirror/lang-javascript": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/legacy-modes": "^6.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "@ruby2js/esbuild-plugin": "^1.0.0",
+    "codemirror": "^6.0.0",
+    "esbuild": "^0.27",
+    "glob": "^8.0.1",
+    "postcss": "^8.4.12",
+    "postcss-flexbugs-fixes": "^5.0.2",
+    "postcss-import": "^14.1.0",
+    "postcss-load-config": "^4.0.1",
+    "postcss-preset-env": "^7.4.3",
+    "read-cache": "^1.0.0",
+    "rollup": "^4.59.0"
+  },
+  "dependencies": {
+    "@hotwired/stimulus": "^3.0.0",
+    "@shoelace-style/shoelace": "^2.0.0",
+    "animated-scroll-to": "^2.0.12",
+    "bridgetown-quick-search": "3.0.3",
+    "lit": "^2.0.0"
+  }
+}

@@ -1,0 +1,1011 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ["*"]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Sets permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  # ===========================================================================
+  # Stage 1: Build artifacts (all run in parallel)
+  # ===========================================================================
+
+  build-tarballs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install npm dependencies
+        run: |
+          cd demo/selfhost && npm install
+          cd ../../packages/juntos && npm install
+
+      - name: Build and pack tarballs
+        run: bundle exec rake -f demo/selfhost/Rakefile release
+
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs/
+          retention-days: 7
+
+  create-blog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Rails
+        run: gem install rails
+
+      - name: Create blog demo
+        run: |
+          test/blog/create-blog artifacts/blog
+          tar --exclude='node_modules' -czf artifacts/demo-blog.tar.gz -C artifacts blog
+
+      - name: Upload blog demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-blog
+          path: artifacts/demo-blog.tar.gz
+          retention-days: 7
+
+  create-chat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Rails
+        run: gem install rails
+
+      - name: Create chat demo
+        run: |
+          test/chat/create-chat artifacts/chat
+          tar --exclude='node_modules' -czf artifacts/demo-chat.tar.gz -C artifacts chat
+
+      - name: Upload chat demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-chat
+          path: artifacts/demo-chat.tar.gz
+          retention-days: 7
+
+  create-photo-gallery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Rails
+        run: gem install rails
+
+      - name: Create photo_gallery demo
+        run: |
+          test/photo_gallery/create-photo-gallery artifacts/photo_gallery
+          tar --exclude='node_modules' -czf artifacts/demo-photo-gallery.tar.gz -C artifacts photo_gallery
+
+      - name: Upload photo_gallery demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-photo-gallery
+          path: artifacts/demo-photo-gallery.tar.gz
+          retention-days: 7
+
+  create-dictaphone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Rails
+        run: gem install rails
+
+      - name: Create dictaphone demo
+        run: |
+          test/dictaphone/create-dictaphone artifacts/dictaphone
+          tar --exclude='node_modules' -czf artifacts/demo-dictaphone.tar.gz -C artifacts dictaphone
+
+      - name: Upload dictaphone demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-dictaphone
+          path: artifacts/demo-dictaphone.tar.gz
+          retention-days: 7
+
+  create-workflow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Rails
+        run: gem install rails
+
+      - name: Create workflow demo
+        run: |
+          test/workflow/create-workflow artifacts/workflow
+          tar --exclude='node_modules' -czf artifacts/demo-workflow.tar.gz -C artifacts workflow
+
+      - name: Upload workflow demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-workflow
+          path: artifacts/demo-workflow.tar.gz
+          retention-days: 7
+
+  create-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Rails
+        run: gem install rails
+
+      - name: Create notes demo
+        run: |
+          test/notes/create-notes artifacts/notes
+          tar --exclude='node_modules' -czf artifacts/demo-notes.tar.gz -C artifacts notes
+
+      - name: Upload notes demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-notes
+          path: artifacts/demo-notes.tar.gz
+          retention-days: 7
+
+  create-astro-blog:
+    needs: [build-tarballs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Create astro-blog demo
+        run: |
+          export RUBY2JS_TARBALL="$GITHUB_WORKSPACE/artifacts/tarballs/ruby2js-beta.tgz"
+          export ASTRO_INTEGRATION_TARBALL="$GITHUB_WORKSPACE/artifacts/tarballs/ruby2js-astro-beta.tgz"
+          export VITE_PLUGIN_TARBALL="$GITHUB_WORKSPACE/artifacts/tarballs/vite-plugin-ruby2js-beta.tgz"
+          export JUNTOS_TARBALL="$GITHUB_WORKSPACE/artifacts/tarballs/juntos-beta.tgz"
+          export JUNTOS_DEV_TARBALL="$GITHUB_WORKSPACE/artifacts/tarballs/juntos-dev-beta.tgz"
+          test/astro-blog/create-astro-blog artifacts/astro-blog
+          tar --exclude='node_modules' -czf artifacts/demo-astro-blog.tar.gz -C artifacts astro-blog
+
+      - name: Upload astro-blog demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-astro-blog
+          path: artifacts/demo-astro-blog.tar.gz
+          retention-days: 7
+
+  create-ssg-blog:
+    needs: [build-tarballs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Create ssg-blog demo
+        run: |
+          export CONTENT_ADAPTER_TARBALL="$GITHUB_WORKSPACE/artifacts/tarballs/ruby2js-content-adapter-beta.tgz"
+          test/ssg-blog/create-ssg-blog artifacts/ssg-blog
+          tar --exclude='node_modules' -czf artifacts/demo-ssg-blog.tar.gz -C artifacts ssg-blog
+
+      - name: Upload ssg-blog demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-ssg-blog
+          path: artifacts/demo-ssg-blog.tar.gz
+          retention-days: 7
+
+  package-ballroom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Package ballroom demo
+        run: |
+          mkdir -p artifacts
+          cp -r test/ballroom artifacts/ballroom
+          tar --exclude='node_modules' --exclude='.git' -czf artifacts/demo-ballroom.tar.gz -C artifacts ballroom
+
+      - name: Upload ballroom demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-ballroom
+          path: artifacts/demo-ballroom.tar.gz
+          retention-days: 7
+
+  package-writebook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Package writebook demo
+        run: |
+          mkdir -p artifacts
+          cp -r test/writebook artifacts/writebook
+          tar --exclude='node_modules' --exclude='.git' -czf artifacts/demo-writebook.tar.gz -C artifacts writebook
+
+      - name: Upload writebook demo
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-writebook
+          path: artifacts/demo-writebook.tar.gz
+          retention-days: 7
+
+  # ===========================================================================
+  # Stage 2: Tests (some run immediately, others depend on Stage 1 artifacts)
+  # ===========================================================================
+
+  gem-test:
+    # No artifact dependencies - runs immediately with Stage 1
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.2", "3.3", "3.4", "4.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      - name: Run tests
+        run: bundle exec rake test
+
+  selfhost-test:
+    needs: [build-tarballs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Install from tarballs
+        run: |
+          cd demo/selfhost
+          npm install ../../artifacts/tarballs/ruby2js-beta.tgz
+
+      - name: Run selfhost CI tests
+        run: bundle exec rake -f demo/selfhost/Rakefile ci
+
+  ballroom-test:
+    needs: [build-tarballs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Install dependencies and initialize
+        run: |
+          cd test/ballroom
+          npm install \
+            ../../artifacts/tarballs/ruby2js-beta.tgz \
+            ../../artifacts/tarballs/juntos-beta.tgz \
+            ../../artifacts/tarballs/juntos-dev-beta.tgz \
+            ../../artifacts/tarballs/vite-plugin-ruby2js-beta.tgz
+          npx juntos init --no-install
+
+      - name: Run Juntos tests
+        run: |
+          cd test/ballroom
+          npx juntos test
+
+  writebook-test:
+    needs: [build-tarballs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Install dependencies
+        run: |
+          cd test/writebook
+          npm install \
+            ../../artifacts/tarballs/ruby2js-beta.tgz \
+            ../../artifacts/tarballs/juntos-beta.tgz \
+            ../../artifacts/tarballs/juntos-dev-beta.tgz \
+            ../../artifacts/tarballs/vite-plugin-ruby2js-beta.tgz
+
+      - name: Eject and verify server starts
+        run: |
+          cd test/writebook
+          npx juntos eject -t node
+          cd ejected
+          npm install
+          timeout 10 node main.js &
+          sleep 5
+          curl -s http://localhost:3000/ | grep -q '<title>Writebook</title>'
+          echo "✓ Writebook root page renders"
+
+  smoke-test-blog:
+    needs: [build-tarballs, create-blog]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [dexie, sqlite]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Download blog demo
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: artifacts
+
+      - name: Extract blog demo
+        run: tar -xzf artifacts/demo-blog.tar.gz -C artifacts
+
+      - name: Install juntos from tarball
+        run: npm install artifacts/tarballs/ruby2js-beta.tgz artifacts/tarballs/juntos-beta.tgz artifacts/tarballs/juntos-dev-beta.tgz
+
+      - name: Run smoke test
+        run: node test/smoke-test.mjs artifacts/blog --database ${{ matrix.database }}
+
+  smoke-test-chat:
+    needs: [build-tarballs, create-chat]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [dexie, sqlite]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Download chat demo
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-chat
+          path: artifacts
+
+      - name: Extract chat demo
+        run: tar -xzf artifacts/demo-chat.tar.gz -C artifacts
+
+      - name: Install juntos from tarball
+        run: npm install artifacts/tarballs/ruby2js-beta.tgz artifacts/tarballs/juntos-beta.tgz artifacts/tarballs/juntos-dev-beta.tgz
+
+      - name: Run smoke test
+        run: node test/smoke-test.mjs artifacts/chat --database ${{ matrix.database }}
+
+  integration-test:
+    needs: [build-tarballs, create-blog, create-chat, create-photo-gallery, create-dictaphone, create-notes, create-astro-blog, create-ssg-blog]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        demo: [blog, chat, photo_gallery, dictaphone, notes, astro_blog, ssg_blog]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: 'npm'
+          cache-dependency-path: test/integration/package-lock.json
+
+      - name: Cache better-sqlite3 prebuild
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm/_prebuilds
+          key: ${{ runner.os }}-better-sqlite3-${{ hashFiles('test/integration/package-lock.json') }}
+
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: artifacts/tarballs
+
+      - name: Download demo
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-${{ matrix.demo == 'photo_gallery' && 'photo-gallery' || matrix.demo == 'astro_blog' && 'astro-blog' || matrix.demo == 'ssg_blog' && 'ssg-blog' || matrix.demo }}
+          path: artifacts
+
+      - name: Run integration tests
+        run: |
+          cd test/integration
+          npm install
+          node setup.mjs --local ${{ matrix.demo }}
+          # Test files use hyphens to avoid vitest substring matching
+          # blog -> juntos-blog, chat -> juntos-chat, photo_gallery -> juntos-photo-gallery
+          TEST_FILE=$(echo "${{ matrix.demo }}" | tr '_' '-')
+          if [ "$TEST_FILE" = "blog" ]; then TEST_FILE="juntos-blog"; fi
+          if [ "$TEST_FILE" = "chat" ]; then TEST_FILE="juntos-chat"; fi
+          if [ "$TEST_FILE" = "photo-gallery" ]; then TEST_FILE="juntos-photo-gallery"; fi
+          if [ "$TEST_FILE" = "dictaphone" ]; then TEST_FILE="juntos-dictaphone"; fi
+          if [ "$TEST_FILE" = "notes" ]; then TEST_FILE="juntos-notes"; fi
+          npm test -- "./${TEST_FILE}.test.mjs"
+
+  # ===========================================================================
+  # Stage 2: Deploy (runs in parallel with tests, depends on Stage 1)
+  # ===========================================================================
+
+  build-site:
+    needs: [build-tarballs, create-blog, create-chat, create-photo-gallery, create-dictaphone, create-workflow, create-notes, create-astro-blog, create-ssg-blog, package-ballroom, package-writebook]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract demo tarballs
+        run: |
+          for tarball in artifacts/demo-*/demo-*.tar.gz; do
+            tar -xzf "$tarball" -C artifacts
+          done
+
+      - name: Extract CLI for init
+        run: |
+          mkdir -p artifacts/cli
+          tar -xzf artifacts/tarballs/juntos-dev-beta.tgz -C artifacts/cli
+          # Install juntos runtime as peer dependency (needed by transform.mjs)
+          mkdir -p artifacts/cli/package/node_modules
+          tar -xzf artifacts/tarballs/juntos-beta.tgz -C artifacts/cli/package/node_modules
+          mv artifacts/cli/package/node_modules/package artifacts/cli/package/node_modules/juntos
+
+      - name: Build browser demos
+        run: |
+          for demo in blog chat photo_gallery dictaphone workflow notes ballroom; do
+            echo "Building $demo for browser..."
+            base_path="/ruby2js/${demo//_/-}/"
+            # Initialize Juntos config (package.json, vite.config.js, bin/juntos)
+            (cd "artifacts/$demo" && node ../cli/package/cli.mjs init --no-install)
+            # Install fresh tarballs into demo root (where package.json lives in vite-native architecture)
+            # Must install: ruby2js (transpiler), juntos (runtime), juntos-dev (build tools), vite-plugin-ruby2js (build plugin)
+            # Also install browser runtime dependencies: dexie (IndexedDB), turbo/stimulus (Rails UJS), react (ERB rendering)
+            (cd "artifacts/$demo" && npm install ../tarballs/ruby2js-beta.tgz ../tarballs/juntos-beta.tgz ../tarballs/juntos-dev-beta.tgz ../tarballs/vite-plugin-ruby2js-beta.tgz dexie @hotwired/turbo-rails @hotwired/stimulus react react-dom)
+            # Demo-specific dependencies are auto-installed by ensurePackagesInstalled
+            # from ruby2js.yml (e.g., @xenova/transformers for dictaphone, reactflow for workflow)
+            # Build from demo root - pure JavaScript via Vite
+            (cd "artifacts/$demo" && bin/juntos build -d dexie -t browser --base "$base_path" --sourcemap)
+          done
+
+          # Writebook: full Rails app with SQLite OPFS via SharedWorker
+          echo "Building writebook for browser..."
+          (cd "artifacts/writebook" && node ../cli/package/cli.mjs init --no-install)
+          (cd "artifacts/writebook" && npm install ../tarballs/ruby2js-beta.tgz ../tarballs/juntos-beta.tgz ../tarballs/juntos-dev-beta.tgz ../tarballs/vite-plugin-ruby2js-beta.tgz @hotwired/turbo-rails @hotwired/stimulus @rails/request.js)
+          (cd "artifacts/writebook" && bin/juntos build -d sqlite_wasm -t worker --base "/ruby2js/writebook/" --sourcemap)
+
+      - name: Package editor snapshots
+        run: |
+          mkdir -p _site/editor/snapshots
+          for demo in blog chat photo_gallery dictaphone workflow notes ballroom ssg-blog astro-blog; do
+            echo "Packaging $demo snapshot for editor..."
+            (cd "artifacts/$demo" && tar --exclude='./dist' --exclude='./tmp' --exclude='./log' --exclude='./storage' --exclude='./.git' -czf "../../_site/editor/snapshots/${demo}.tar.gz" .)
+          done
+
+      - name: Build Astro demo
+        run: |
+          echo "Building astro-blog for GitHub Pages..."
+          base_path="/ruby2js/astro-blog/"
+          cd artifacts/astro-blog
+          # Install ruby2js packages from tarballs (includes vite-plugin for .jsx.rb support)
+          npm install ../tarballs/ruby2js-beta.tgz ../tarballs/ruby2js-astro-beta.tgz ../tarballs/vite-plugin-ruby2js-beta.tgz ../tarballs/juntos-beta.tgz ../tarballs/juntos-dev-beta.tgz
+          # Build with base path for GitHub Pages
+          npm run build -- --base "$base_path"
+
+      - name: Build SSG demo
+        run: |
+          echo "Building ssg-blog for GitHub Pages..."
+          cd artifacts/ssg-blog
+          # Install content adapter from tarball
+          npm install ../tarballs/ruby2js-content-adapter-beta.tgz
+          # Build static site
+          npm run build
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+
+          # Copy favicon
+          cp docs/src/favicon.ico _site/
+
+          # Copy tarballs to releases/
+          mkdir -p _site/releases
+          cp artifacts/tarballs/*.tgz _site/releases/
+          cp artifacts/demo-*/demo-*.tar.gz _site/releases/
+
+          # Create releases index
+          cat > _site/releases/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Ruby2JS Downloads</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; line-height: 1.6; }
+              h1 { color: #1a202c; }
+              a { color: #2563eb; }
+              .section { margin-top: 2rem; padding: 1.5rem; background: #f7fafc; border-radius: 8px; border: 1px solid #e2e8f0; }
+              .section h2 { margin: 0 0 1rem 0; }
+              ul { margin: 0; padding-left: 1.5rem; }
+              li { margin: 0.5rem 0; }
+              .back { margin-top: 2rem; }
+            </style>
+          </head>
+          <body>
+            <h1>Ruby2JS Downloads</h1>
+            <div class="section">
+              <h2>NPM Packages</h2>
+              <ul>
+                <li><a href="ruby2js-beta.tgz">ruby2js-beta.tgz</a> - Core transpiler</li>
+                <li><a href="juntos-beta.tgz">juntos-beta.tgz</a> - Runtime (ActiveRecord, adapters, targets)</li>
+                <li><a href="juntos-dev-beta.tgz">juntos-dev-beta.tgz</a> - Build tooling (CLI, Vite plugins, transpiler)</li>
+                <li><a href="vite-plugin-ruby2js-beta.tgz">vite-plugin-ruby2js-beta.tgz</a> - Vite plugin</li>
+                <li><a href="esbuild-plugin-ruby2js-beta.tgz">esbuild-plugin-ruby2js-beta.tgz</a> - esbuild plugin</li>
+                <li><a href="ruby2js-astro-beta.tgz">ruby2js-astro-beta.tgz</a> - Astro integration</li>
+                <li><a href="ruby2js-svelte-beta.tgz">ruby2js-svelte-beta.tgz</a> - SvelteKit preprocessor</li>
+                <li><a href="ruby2js-nuxt-beta.tgz">ruby2js-nuxt-beta.tgz</a> - Nuxt module</li>
+                <li><a href="ruby2js-content-adapter-beta.tgz">ruby2js-content-adapter-beta.tgz</a> - Content adapter for SSG</li>
+              </ul>
+            </div>
+            <div class="section">
+              <h2>Demo App Tarballs</h2>
+              <ul>
+                <li><a href="demo-ssg-blog.tar.gz">demo-ssg-blog.tar.gz</a> - SSG blog demo (11ty, static)</li>
+                <li><a href="demo-astro-blog.tar.gz">demo-astro-blog.tar.gz</a> - Astro blog demo (islands)</li>
+                <li><a href="demo-blog.tar.gz">demo-blog.tar.gz</a> - Blog demo (Rails, CRUD)</li>
+                <li><a href="demo-chat.tar.gz">demo-chat.tar.gz</a> - Chat demo (Turbo Streams)</li>
+                <li><a href="demo-notes.tar.gz">demo-notes.tar.gz</a> - Notes demo (JSON API)</li>
+                <li><a href="demo-photo-gallery.tar.gz">demo-photo-gallery.tar.gz</a> - Photo gallery demo (Camera, Capacitor, Electron)</li>
+                <li><a href="demo-dictaphone.tar.gz">demo-dictaphone.tar.gz</a> - Dictaphone demo (Active Storage, Whisper)</li>
+                <li><a href="demo-workflow.tar.gz">demo-workflow.tar.gz</a> - Workflow builder demo (React Flow, RPC)</li>
+                <li><a href="demo-ballroom.tar.gz">demo-ballroom.tar.gz</a> - Ballroom (full application)</li>
+                <li><a href="demo-writebook.tar.gz">demo-writebook.tar.gz</a> - Writebook (full application)</li>
+              </ul>
+            </div>
+            <div class="section">
+              <h2>Create Scripts</h2>
+              <ul>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/ssg-blog/create-ssg-blog">create-ssg-blog</a> - SSG blog</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/astro-blog/create-astro-blog">create-astro-blog</a> - Astro blog</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/blog/create-blog">create-blog</a> - Blog</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/chat/create-chat">create-chat</a> - Chat</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/notes/create-notes">create-notes</a> - Notes</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/photo_gallery/create-photo-gallery">create-photo-gallery</a> - Photo gallery</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/dictaphone/create-dictaphone">create-dictaphone</a> - Dictaphone</li>
+                <li><a href="https://github.com/ruby2js/ruby2js/blob/master/test/workflow/create-workflow">create-workflow</a> - Workflow builder</li>
+              </ul>
+            </div>
+            <p class="back"><a href="../">← Back to demos</a></p>
+          </body>
+          </html>
+          EOF
+
+          # Copy editor page
+          mkdir -p _site/editor
+          cp editor/index.html _site/editor/
+          cp editor/explore.html _site/editor/
+          cp editor/coi-serviceworker.js _site/editor/
+
+          # Copy browser demos
+          cp -r artifacts/blog/dist _site/blog
+          cp -r artifacts/chat/dist _site/chat
+          cp -r artifacts/notes/dist _site/notes
+          cp -r artifacts/photo_gallery/dist _site/photo-gallery
+          cp -r artifacts/dictaphone/dist _site/dictaphone
+          cp -r artifacts/workflow/dist _site/workflow
+          cp -r artifacts/ballroom/dist _site/ballroom
+          cp -r artifacts/writebook/dist _site/writebook
+          cp -r artifacts/astro-blog/dist _site/astro-blog
+          cp -r artifacts/ssg-blog/_site _site/ssg-blog
+
+          # Create index page
+          cat > _site/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Ruby2JS Demos</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; line-height: 1.6; }
+              h1 { color: #1a202c; }
+              h2.section { margin-top: 2rem; margin-bottom: 0.5rem; font-size: 1.1rem; color: #4a5568; }
+              .tagline { font-weight: bold; color: #2d3748; margin-bottom: 0.5rem; }
+              .demos { display: grid; gap: 1rem; margin-top: 1rem; }
+              .demo { padding: 1.5rem; background: #f7fafc; border-radius: 8px; border: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; }
+              .demo-content { flex: 1; }
+              .demo h3 { margin: 0 0 0.5rem 0; }
+              .demo h3 a { color: #2563eb; text-decoration: none; }
+              .demo h3 a:hover { text-decoration: underline; }
+              .demo p { margin: 0; color: #4a5568; }
+              .demo-links { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem 0.75rem; margin-left: 1rem; font-size: 0.875rem; }
+              .demo-links a { color: #2563eb; text-decoration: none; white-space: nowrap; }
+              .demo-links a:hover { text-decoration: underline; }
+              .releases { margin-top: 2rem; padding: 1rem; background: #edf2f7; border-radius: 8px; }
+              .releases h2 { margin: 0 0 0.5rem 0; font-size: 1rem; }
+              .releases a { color: #2563eb; }
+            </style>
+          </head>
+          <body>
+            <h1>Ruby2JS Demos</h1>
+            <p class="tagline">Start anywhere. Go anywhere. Same patterns throughout.</p>
+            <p>Whether you're publishing content or building an application, the same ActiveRecord patterns work everywhere.</p>
+
+            <h2 class="section">Starting from Application</h2>
+            <div class="demos">
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="blog/">Blog</a></h3>
+                  <p>Full CRUD. Deploy to browser, Node, or Edge. (Rails)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=blog">Editor</a>
+                  <a href="editor/?demo=blog&mode=test">Test</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/blog/create-blog">Create</a>
+                  <a href="releases/demo-blog.tar.gz">Tarball</a>
+                </div>
+              </div>
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="chat/">Chat</a></h3>
+                  <p>Real-time Turbo Streams, Stimulus controllers. (Rails)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=chat">Editor</a>
+                  <a href="editor/?demo=chat&mode=test">Test</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/chat/create-chat">Create</a>
+                  <a href="releases/demo-chat.tar.gz">Tarball</a>
+                </div>
+              </div>
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="notes/">Notes</a></h3>
+                  <p>JSON API, path helper RPC. (Rails + React)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=notes">Editor</a>
+                  <a href="editor/?demo=notes&mode=test">Test</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/notes/create-notes">Create</a>
+                  <a href="releases/demo-notes.tar.gz">Tarball</a>
+                </div>
+              </div>
+            </div>
+
+            <h2 class="section">Starting from Content</h2>
+            <div class="demos">
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="ssg-blog/">SSG Blog</a></h3>
+                  <p>Pure static. Markdown → HTML. Zero JavaScript. (11ty)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=ssg-blog">Editor</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/ssg-blog/create-ssg-blog">Create</a>
+                  <a href="releases/demo-ssg-blog.tar.gz">Tarball</a>
+                </div>
+              </div>
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="astro-blog/">Astro Blog</a></h3>
+                  <p>Content + islands. Client-side CRUD when needed. (Astro)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=astro-blog">Editor</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/astro-blog/create-astro-blog">Create</a>
+                  <a href="releases/demo-astro-blog.tar.gz">Tarball</a>
+                </div>
+              </div>
+            </div>
+
+            <h2 class="section">Adding Capabilities</h2>
+            <div class="demos">
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="photo-gallery/">Photo Gallery</a></h3>
+                  <p>Device APIs: camera, Capacitor, Electron.</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=photo_gallery">Editor</a>
+                  <a href="editor/?demo=photo_gallery&mode=test">Test</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/photo_gallery/create-photo-gallery">Create</a>
+                  <a href="releases/demo-photo-gallery.tar.gz">Tarball</a>
+                </div>
+              </div>
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="dictaphone/">Dictaphone</a></h3>
+                  <p>Active Storage, Whisper AI speech-to-text.</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=dictaphone">Editor</a>
+                  <a href="editor/?demo=dictaphone&mode=test">Test</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/dictaphone/create-dictaphone">Create</a>
+                  <a href="releases/demo-dictaphone.tar.gz">Tarball</a>
+                </div>
+              </div>
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="workflow/">Workflow Builder</a></h3>
+                  <p>Third-party React libraries: React Flow.</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=workflow">Editor</a>
+                  <a href="editor/?demo=workflow&mode=test">Test</a>
+                  <a href="https://github.com/ruby2js/ruby2js/blob/master/test/workflow/create-workflow">Create</a>
+                  <a href="releases/demo-workflow.tar.gz">Tarball</a>
+                </div>
+              </div>
+            </div>
+
+            <h2 class="section">Full Applications <span style="font-size: 0.6em; font-weight: normal; color: #888;">(work in progress)</span></h2>
+            <div class="demos">
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="ballroom/">Ballroom</a></h3>
+                  <p>Dance competition scoring. 40+ models, concerns, validations. (Rails)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="editor/?demo=ballroom">Editor</a>
+                  <a href="editor/?demo=ballroom&mode=test">Test</a>
+                  <a href="https://github.com/rubys/ballroom">GitHub</a>
+                  <a href="releases/demo-ballroom.tar.gz">Tarball</a>
+                </div>
+              </div>
+              <div class="demo">
+                <div class="demo-content">
+                  <h3><a href="writebook/">Writebook</a></h3>
+                  <p>Collaborative book publishing. Basecamp's Rails 8 app. (Rails)</p>
+                </div>
+                <div class="demo-links">
+                  <a href="writebook/">Live</a>
+                  <a href="https://github.com/rubys/writebook">GitHub</a>
+                  <a href="releases/demo-writebook.tar.gz">Tarball</a>
+                </div>
+              </div>
+            </div>
+
+            <div class="releases">
+              <h2>Downloads</h2>
+              <p><a href="releases/">NPM packages and demo app tarballs</a></p>
+            </div>
+          </body>
+          </html>
+          EOF
+
+          # Create 404.html for SPA routing on GitHub Pages
+          # When a route like /ruby2js/blog/articles/new is accessed directly,
+          # GitHub serves 404.html. This script detects the demo and redirects
+          # with the path stored in sessionStorage, which the SPA reads on load.
+          cat > _site/404.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Redirecting...</title>
+            <script>
+              // GitHub Pages SPA redirect for direct URL access
+              // Detects which demo the path belongs to and redirects there
+              const path = location.pathname;
+              const demos = ['ssg-blog', 'astro-blog', 'blog', 'chat', 'notes', 'photo-gallery', 'dictaphone', 'workflow', 'ballroom', 'writebook'];
+              const base = '/ruby2js/';
+
+              // Find which demo this path belongs to
+              for (const demo of demos) {
+                const demoPath = base + demo + '/';
+                if (path.startsWith(demoPath) || path === base + demo) {
+                  // Store the full path for the SPA to read after redirect
+                  sessionStorage.setItem('spa-redirect-path', path);
+                  // Redirect to the demo's index.html
+                  location.replace(demoPath);
+                  break;
+                }
+              }
+            </script>
+          </head>
+          <body>
+            <p>Redirecting...</p>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: [build-site]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

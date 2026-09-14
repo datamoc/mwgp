@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ruby2JS Editor</title>
+  <script src="coi-serviceworker.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/editor/editor.main.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; font-family: system-ui, sans-serif; background: #1e1e1e; color: #ccc; overflow: hidden; }
+    #app { display: grid; grid-template-columns: 220px 4px 1fr 4px 1fr; grid-template-rows: 1fr 4px 200px; height: 100vh; overflow: hidden; }
+    #file-tree { grid-column: 1; grid-row: 1; overflow-y: auto; background: #252526; padding: 8px 0; font-size: 13px; }
+    #editor-container { grid-column: 3; grid-row: 1; min-width: 0; }
+    #preview-pane { grid-column: 5; grid-row: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #preview-pane iframe { flex: 1; border: none; background: #fff; width: 100%; min-height: 0; }
+    #preview-header { padding: 4px 8px; background: #252526; border-bottom: 1px solid #333; font-size: 12px; color: #999; flex-shrink: 0; }
+    #preview-placeholder { flex: 1; display: flex; align-items: center; justify-content: center; background: #1a1a1a; color: #666; font-size: 13px; text-align: center; padding: 20px; }
+    #terminal-pane { grid-column: 1 / -1; grid-row: 3; display: flex; flex-direction: column; overflow: hidden; }
+    #terminal-header { padding: 4px 8px; background: #252526; border-bottom: 1px solid #333; font-size: 12px; color: #999; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+    #terminal-status { color: #569cd6; }
+    #terminal { flex: 1; overflow: hidden; }
+    .gutter-col { grid-row: 1; cursor: col-resize; background: #333; }
+    .gutter-col:hover { background: #569cd6; }
+    .gutter-row { grid-column: 1 / -1; grid-row: 2; cursor: row-resize; background: #333; }
+    .gutter-row:hover { background: #569cd6; }
+
+    .tree-item { padding: 2px 8px 2px 0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tree-item:hover { background: #2a2d2e; }
+    .tree-item.active { background: #37373d; color: #fff; }
+    .tree-item.dir { color: #999; }
+    .tree-item.file { color: #ccc; }
+    .tree-dir-children { display: none; }
+    .tree-dir-children.open { display: block; }
+
+    #loading-overlay { position: fixed; inset: 0; background: #1e1e1e; display: flex; align-items: center; justify-content: center; z-index: 1000; flex-direction: column; gap: 16px; }
+    #loading-overlay.hidden { display: none; }
+    .spinner { width: 40px; height: 40px; border: 3px solid #333; border-top-color: #569cd6; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-status { font-size: 14px; color: #999; }
+    #loading-progress { width: 300px; height: 4px; background: #333; border-radius: 2px; overflow: hidden; }
+    #loading-bar { height: 100%; background: #569cd6; width: 0%; transition: width 0.3s; }
+  </style>
+</head>
+<body>
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-status">Initializing...</div>
+    <div id="loading-progress"><div id="loading-bar"></div></div>
+  </div>
+  <div id="app">
+    <div id="file-tree"></div>
+    <div class="gutter-col" data-col="1"></div>
+    <div id="editor-container"></div>
+    <div class="gutter-col" data-col="2"></div>
+    <div id="preview-pane">
+      <div id="preview-header">Preview</div>
+      <div id="preview-placeholder">Starting server...</div>
+      <iframe id="preview-iframe" style="display: none;"></iframe>
+      <iframe id="js-iframe" style="display: none; flex: 1; min-height: 0; border: none; background: #1e1e1e;"></iframe>
+    </div>
+    <div class="gutter-row"></div>
+    <div id="terminal-pane">
+      <div id="terminal-header">
+        <span>Terminal</span>
+        <span id="terminal-status"></span>
+      </div>
+      <div id="terminal"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { Terminal } from 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/+esm';
+    import { FitAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/+esm';
+
+    // =========================================================================
+    // Resizable pane dividers
+    // =========================================================================
+    {
+      const app = document.getElementById('app');
+      let dragging = null;
+
+      for (const gutter of document.querySelectorAll('.gutter-col, .gutter-row')) {
+        gutter.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          dragging = { el: gutter, type: gutter.classList.contains('gutter-col') ? 'col' : 'row' };
+          document.body.style.cursor = dragging.type === 'col' ? 'col-resize' : 'row-resize';
+          // Prevent iframe from stealing mouse events
+          document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = 'none');
+        });
+      }
+
+      document.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const rect = app.getBoundingClientRect();
+        if (dragging.type === 'col') {
+          const x = e.clientX - rect.left;
+          const cols = getComputedStyle(app).gridTemplateColumns.split(' ').map(parseFloat);
+          // cols: [fileTree, gutter, editor, gutter, preview]
+          const colIndex = parseInt(dragging.el.dataset.col);
+          if (colIndex === 1) {
+            // Dragging between file-tree and editor
+            const newFileTree = Math.max(100, Math.min(x, rect.width - 200));
+            app.style.gridTemplateColumns = `${newFileTree}px 4px 1fr 4px 1fr`;
+          } else {
+            // Dragging between editor and preview
+            const fileTreeWidth = cols[0];
+            const available = rect.width - fileTreeWidth - 8; // minus two gutters
+            const editorWidth = Math.max(100, Math.min(x - fileTreeWidth - 4, available - 100));
+            const previewWidth = available - editorWidth;
+            app.style.gridTemplateColumns = `${fileTreeWidth}px 4px ${editorWidth}px 4px ${previewWidth}px`;
+          }
+        } else {
+          // Dragging horizontal divider between top panes and terminal
+          const y = e.clientY - rect.top;
+          const topHeight = Math.max(100, Math.min(y - 2, rect.height - 100));
+          const bottomHeight = rect.height - topHeight - 4;
+          app.style.gridTemplateRows = `${topHeight}px 4px ${bottomHeight}px`;
+        }
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (!dragging) return;
+        dragging = null;
+        document.body.style.cursor = '';
+        document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = '');
+      });
+    }
+
+    const RELEASES = 'https://ruby2js.github.io/ruby2js/releases';
+    const params = new URLSearchParams(location.search);
+    const demo = params.get('demo') || 'blog';
+    const mode = params.get('mode') || 'dev'; // 'dev', 'test', or 'transpile'
+    const isTestMode = mode === 'test';
+    const isTranspileMode = mode === 'transpile';
+    const titleSuffix = isTestMode ? 'Tests' : isTranspileMode ? 'Transpile' : 'Editor';
+    document.title = `Ruby2JS ${titleSuffix} — ${demo}`;
+
+    const previewHeaderText = isTestMode ? 'Test Results' : isTranspileMode ? 'JavaScript Output' : 'Preview';
+    const previewPlaceholderText = isTestMode ? 'Starting test runner...' : isTranspileMode ? 'Starting transpiler...' : 'Starting server...';
+    document.getElementById('preview-header').textContent = previewHeaderText;
+    document.getElementById('preview-placeholder').textContent = previewPlaceholderText;
+
+    const loadingStatus = document.getElementById('loading-status');
+    const loadingBar = document.getElementById('loading-bar');
+    const terminalStatus = document.getElementById('terminal-status');
+
+    function setProgress(pct, msg) {
+      loadingBar.style.width = pct + '%';
+      if (msg) loadingStatus.textContent = msg;
+    }
+
+    function setTerminalStatus(msg) {
+      terminalStatus.textContent = msg;
+    }
+
+    // =========================================================================
+    // Tar parser with pax extended header support
+    // =========================================================================
+    function parseTar(buffer) {
+      const files = {};
+      const view = new Uint8Array(buffer);
+      let offset = 0;
+      let paxHeaders = {};
+
+      while (offset < view.length - 512) {
+        let allZero = true;
+        for (let i = 0; i < 512 && allZero; i++) {
+          if (view[offset + i] !== 0) allZero = false;
+        }
+        if (allZero) break;
+
+        const nameBytes = view.slice(offset, offset + 100);
+        let name = decodeString(nameBytes);
+        const sizeStr = decodeString(view.slice(offset + 124, offset + 136));
+        const size = parseInt(sizeStr, 8) || 0;
+        const typeFlag = String.fromCharCode(view[offset + 156]) || '0';
+        const prefix = decodeString(view.slice(offset + 345, offset + 500));
+        if (prefix) name = prefix + '/' + name;
+        if (paxHeaders.path) { name = paxHeaders.path; delete paxHeaders.path; }
+        if (name.startsWith('./')) name = name.slice(2);
+
+        offset += 512;
+
+        if (typeFlag === 'x' || typeFlag === 'g') {
+          const paxData = view.slice(offset, offset + size);
+          const paxStr = new TextDecoder().decode(paxData);
+          for (const line of paxStr.split('\n')) {
+            const match = line.match(/^\d+ ([^=]+)=(.*)$/);
+            if (match) paxHeaders[match[1]] = match[2];
+          }
+        } else if (typeFlag === 'L') {
+          paxHeaders.path = decodeString(view.slice(offset, offset + size));
+        } else if ((typeFlag === '0' || typeFlag === '\0' || typeFlag === '') && name) {
+          files[name] = new Uint8Array(view.slice(offset, offset + size));
+        }
+
+        offset += Math.ceil(size / 512) * 512;
+      }
+      return files;
+    }
+
+    function decodeString(bytes) {
+      const nullIdx = bytes.indexOf(0);
+      const slice = nullIdx >= 0 ? bytes.slice(0, nullIdx) : bytes;
+      return new TextDecoder().decode(slice);
+    }
+
+    // =========================================================================
+    // Build WebContainer mount tree from parsed files
+    // =========================================================================
+    function buildMountTree(files) {
+      const tree = {};
+
+      // Detect and strip common prefix directory
+      const paths = Object.keys(files);
+      let stripPrefix = '';
+      if (paths.length > 0) {
+        const firstParts = paths[0].split('/');
+        if (firstParts.length > 1) {
+          const candidate = firstParts[0] + '/';
+          if (paths.every(p => p.startsWith(candidate))) {
+            stripPrefix = candidate;
+          }
+        }
+      }
+
+      for (const [rawPath, content] of Object.entries(files)) {
+        const path = stripPrefix && rawPath.startsWith(stripPrefix)
+          ? rawPath.slice(stripPrefix.length)
+          : rawPath;
+
+        const parts = path.split('/').filter(p => p);
+        let node = tree;
+
+        for (let i = 0; i < parts.length - 1; i++) {
+          const dir = parts[i];
+          if (!node[dir]) node[dir] = { directory: {} };
+          node = node[dir].directory;
+        }
+
+        const fileName = parts[parts.length - 1];
+        if (!fileName) continue;
+
+        let contents;
+        try {
+          const text = new TextDecoder('utf-8', { fatal: true }).decode(content);
+          let isBinary = false;
+          for (let i = 0; i < Math.min(content.length, 8192); i++) {
+            if (content[i] === 0) { isBinary = true; break; }
+          }
+          contents = isBinary ? content : text;
+        } catch {
+          contents = content;
+        }
+
+        node[fileName] = { file: { contents } };
+      }
+
+      return tree;
+    }
+
+    // =========================================================================
+    // File tree helpers
+    // =========================================================================
+    const EDITABLE_EXT = /\.(rb|erb|html|css|js|json|yml|yaml|rake|ru|gemfile)$/i;
+    const EDITABLE_DIRS = ['app/', 'config/', 'db/', 'test/', 'Gemfile', 'Rakefile'];
+
+    function shouldShow(path) {
+      if (path.startsWith('node_modules/') || path.startsWith('.git/') ||
+          path.startsWith('dist/') || path.startsWith('tmp/') ||
+          path.startsWith('log/') || path.startsWith('storage/')) return false;
+      for (const d of EDITABLE_DIRS) {
+        if (path.startsWith(d) || path === d.replace(/\/$/, '')) return true;
+      }
+      if (!path.includes('/') && EDITABLE_EXT.test(path)) return true;
+      return false;
+    }
+
+    function buildFileTreeUI(files, containerEl, onFileClick) {
+      containerEl.innerHTML = '';
+      const paths = Object.keys(files).filter(shouldShow).sort();
+      const dirTree = {};
+
+      for (const p of paths) {
+        const parts = p.split('/');
+        let node = dirTree;
+        for (let i = 0; i < parts.length; i++) {
+          const key = parts[i];
+          if (i === parts.length - 1) {
+            node[key] = p;
+          } else {
+            if (!node[key] || typeof node[key] === 'string') node[key] = {};
+            node = node[key];
+          }
+        }
+      }
+
+      function renderTree(obj, parent, depth) {
+        const entries = Object.entries(obj).sort(([a, va], [b, vb]) => {
+          const aDir = typeof va === 'object';
+          const bDir = typeof vb === 'object';
+          if (aDir !== bDir) return aDir ? -1 : 1;
+          return a.localeCompare(b);
+        });
+
+        for (const [name, value] of entries) {
+          if (typeof value === 'object') {
+            const dirEl = document.createElement('div');
+            dirEl.className = 'tree-item dir';
+            dirEl.style.paddingLeft = (depth * 12 + 8) + 'px';
+            dirEl.textContent = '\u25B8 ' + name;
+            parent.appendChild(dirEl);
+
+            const children = document.createElement('div');
+            children.className = 'tree-dir-children';
+            parent.appendChild(children);
+
+            dirEl.addEventListener('click', () => {
+              const open = children.classList.toggle('open');
+              dirEl.textContent = (open ? '\u25BE ' : '\u25B8 ') + name;
+            });
+
+            renderTree(value, children, depth + 1);
+          } else {
+            const fileEl = document.createElement('div');
+            fileEl.className = 'tree-item file';
+            fileEl.style.paddingLeft = (depth * 12 + 8) + 'px';
+            fileEl.textContent = name;
+            fileEl.dataset.path = value;
+            fileEl.addEventListener('click', () => onFileClick(value, fileEl));
+            parent.appendChild(fileEl);
+          }
+        }
+      }
+
+      renderTree(dirTree, containerEl, 0);
+    }
+
+    function langForPath(path) {
+      if (path.endsWith('.rb')) return 'ruby';
+      if (path.endsWith('.erb')) return 'html';
+      if (path.endsWith('.js')) return 'javascript';
+      if (path.endsWith('.json')) return 'json';
+      if (path.endsWith('.css')) return 'css';
+      if (path.endsWith('.html')) return 'html';
+      if (path.endsWith('.yml') || path.endsWith('.yaml')) return 'yaml';
+      return 'plaintext';
+    }
+
+    // =========================================================================
+    // Run a command and wait for it to complete
+    // =========================================================================
+    async function runCommand(container, xterm, cmd, args, statusMsg) {
+      setTerminalStatus(statusMsg);
+      xterm.writeln(`\x1b[36m$ ${cmd} ${args.join(' ')}\x1b[0m`);
+
+      const process = await container.spawn(cmd, args, {
+        env: { JUNTOS_DATABASE: 'dexie' },
+      });
+
+      process.output.pipeTo(new WritableStream({
+        write(data) { xterm.write(data); }
+      }));
+
+      const exitCode = await process.exit;
+      if (exitCode !== 0) {
+        xterm.writeln(`\x1b[31mCommand failed with exit code ${exitCode}\x1b[0m`);
+      }
+      return exitCode;
+    }
+
+    // =========================================================================
+    // Main boot sequence
+    // =========================================================================
+    async function boot() {
+      try {
+        // Step 1: Fetch tarballs in parallel
+        setProgress(5, `Fetching ${demo} demo...`);
+
+        const [demoResponse, ...packageResponses] = await Promise.all([
+          fetch(`${RELEASES}/demo-${demo}.tar.gz`),
+          fetch(`${RELEASES}/ruby2js-beta.tgz`),
+          fetch(`${RELEASES}/juntos-beta.tgz`),
+          fetch(`${RELEASES}/juntos-dev-beta.tgz`),
+          fetch(`${RELEASES}/vite-plugin-ruby2js-beta.tgz`),
+        ]);
+
+        if (!demoResponse.ok) {
+          throw new Error(`Demo "${demo}" not found (HTTP ${demoResponse.status})`);
+        }
+
+        setProgress(20, 'Decompressing...');
+        const demoGz = await demoResponse.arrayBuffer();
+        const ds = new DecompressionStream('gzip');
+        const demoTar = await new Response(
+          new Response(new Blob([demoGz])).body.pipeThrough(ds)
+        ).arrayBuffer();
+
+        setProgress(30, 'Parsing files...');
+        const demoFiles = parseTar(demoTar);
+        const mountTree = buildMountTree(demoFiles);
+
+        // Keep package tarballs as raw buffers (written after mount to avoid encoding issues)
+        const packageNames = ['ruby2js-beta.tgz', 'juntos-beta.tgz', 'juntos-dev-beta.tgz', 'vite-plugin-ruby2js-beta.tgz'];
+        const packageBuffers = await Promise.all(
+          packageResponses.map(r => r.arrayBuffer())
+        );
+
+        // Step 2: Boot WebContainer
+        setProgress(40, 'Booting WebContainer...');
+        const { WebContainer } = await import('https://unpkg.com/@webcontainer/api@1.6.1/dist/index.js');
+
+        let container;
+        try {
+          container = await WebContainer.boot();
+        } catch (err) {
+          if (!window.crossOriginIsolated) {
+            setProgress(40, 'Enabling Cross-Origin Isolation (reloading)...');
+            setTimeout(() => location.reload(), 1500);
+            return;
+          }
+          throw err;
+        }
+
+        // Step 3: Mount files
+        setProgress(50, 'Mounting files...');
+        await container.mount(mountTree);
+
+        // Write binary tarballs directly to avoid mount tree encoding issues
+        for (let i = 0; i < packageNames.length; i++) {
+          await container.fs.writeFile(packageNames[i], new Uint8Array(packageBuffers[i]));
+        }
+
+        // Step 4: Load Monaco editor
+        setProgress(60, 'Loading editor...');
+        await new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js';
+          script.onload = () => {
+            require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+            require(['vs/editor/editor.main'], resolve);
+          };
+          document.head.appendChild(script);
+        });
+
+        const editor = monaco.editor.create(document.getElementById('editor-container'), {
+          value: '// Select a file from the tree on the left\n// Server is starting in the terminal below...',
+          language: 'plaintext',
+          theme: 'vs-dark',
+          minimap: { enabled: false },
+          fontSize: 13,
+          automaticLayout: true,
+        });
+
+        // In transpile mode the third pane is an iframe served from the WC's
+        // own origin (transpile.html), so all its fetches are same-origin and
+        // not subject to cross-origin policy. The iframe runs Monaco and
+        // receives file paths via postMessage from this parent window.
+        const jsIframe = document.getElementById('js-iframe');
+        let jsIframeReady = false;
+        if (isTranspileMode) {
+          document.getElementById('preview-placeholder').style.display = 'none';
+          jsIframe.style.display = 'block';
+        }
+
+        // Extract text files for editor
+        const textCache = {};
+        function extractFiles(node, prefix) {
+          for (const [name, entry] of Object.entries(node)) {
+            const path = prefix ? `${prefix}/${name}` : name;
+            if (entry.directory) {
+              extractFiles(entry.directory, path);
+            } else if (entry.file && typeof entry.file.contents === 'string') {
+              textCache[path] = entry.file.contents;
+            }
+          }
+        }
+        extractFiles(mountTree, '');
+
+        let currentPath = null;
+        let activeTreeItem = null;
+        let writeTimeout = null;
+        let serverBaseUrl = null;
+
+        const TRANSPILABLE_EXT = /\.(rb|erb)$/;
+
+        function refreshTranspile() {
+          if (!isTranspileMode) return;
+          if (!jsIframeReady || !currentPath) return;
+          jsIframe.contentWindow.postMessage({
+            type: 'transpile-fetch',
+            path: currentPath,
+            transpilable: TRANSPILABLE_EXT.test(currentPath)
+          }, '*');
+        }
+
+        window.addEventListener('message', (event) => {
+          if (!event.data) return;
+          if (event.data.type === 'transpile-iframe-ready') {
+            jsIframeReady = true;
+            refreshTranspile();
+          }
+        });
+
+        function openFile(path, treeEl) {
+          if (activeTreeItem) activeTreeItem.classList.remove('active');
+          if (treeEl) { treeEl.classList.add('active'); activeTreeItem = treeEl; }
+          currentPath = path;
+          const text = textCache[path] || '';
+          const model = monaco.editor.createModel(text, langForPath(path));
+          editor.setModel(model);
+          refreshTranspile();
+        }
+
+        // Debounced write-back to WebContainer
+        editor.onDidChangeModelContent(() => {
+          if (!currentPath) return;
+          const value = editor.getValue();
+          textCache[currentPath] = value;
+          clearTimeout(writeTimeout);
+          writeTimeout = setTimeout(async () => {
+            await container.fs.writeFile(currentPath, value);
+            refreshTranspile();
+          }, 300);
+        });
+
+        // Build file tree
+        const treeEl = document.getElementById('file-tree');
+        buildFileTreeUI(textCache, treeEl, openFile);
+
+        // Auto-expand first dir and open default file
+        const appDir = treeEl.querySelector('.tree-item.dir');
+        if (appDir) appDir.click();
+
+        const defaultFile = isTestMode ? 'test/models/article_test.rb' : 'app/models/article.rb';
+        if (textCache[defaultFile]) {
+          const fileEl = treeEl.querySelector(`[data-path="${defaultFile}"]`);
+          if (fileEl) {
+            let parent = fileEl.parentElement;
+            while (parent && parent !== treeEl) {
+              if (parent.classList.contains('tree-dir-children')) {
+                parent.classList.add('open');
+                const dirItem = parent.previousElementSibling;
+                if (dirItem) dirItem.textContent = dirItem.textContent.replace('\u25B8', '\u25BE');
+              }
+              parent = parent.parentElement;
+            }
+            openFile(defaultFile, fileEl);
+          }
+        }
+
+        // Step 5: Set up terminal
+        setProgress(70, 'Starting terminal...');
+        const xterm = new Terminal({
+          theme: { background: '#1a1a1a', foreground: '#cccccc', cursor: '#ffffff' },
+          fontSize: 13,
+          fontFamily: "'Cascadia Code', 'Fira Code', 'Menlo', monospace",
+          cursorBlink: true,
+        });
+        const fitAddon = new FitAddon();
+        xterm.loadAddon(fitAddon);
+        xterm.open(document.getElementById('terminal'));
+        fitAddon.fit();
+        new ResizeObserver(() => fitAddon.fit()).observe(document.getElementById('terminal'));
+
+        // Hide loading overlay - user can now browse files
+        setProgress(100, 'Ready!');
+        document.getElementById('loading-overlay').classList.add('hidden');
+
+        // Listen for server-ready and xdg-open
+        const isFirefox = navigator.userAgent.includes('Firefox');
+
+        function showPreview(iframeUrl, label) {
+          const header = document.getElementById('preview-header');
+          header.textContent = label;
+
+          document.getElementById('preview-placeholder').style.display = 'none';
+          if (isFirefox) {
+            const placeholder = document.getElementById('preview-placeholder');
+            placeholder.style.display = '';
+            placeholder.innerHTML = 'Preview is not available in Firefox due to<br>WebContainer cross-origin isolation limitations.<br><br>The terminal below shows full output.<br>Use Chrome or Edge for the visual preview.';
+          } else {
+            document.getElementById('preview-iframe').style.display = 'block';
+            document.getElementById('preview-iframe').src = iframeUrl;
+          }
+        }
+
+        container.on('server-ready', (port, url) => {
+          serverBaseUrl = url;
+          xterm.writeln(`\r\n\x1b[32m Server ready: ${url}\x1b[0m\r\n`);
+          setTerminalStatus('Server running');
+
+          if (isTranspileMode) {
+            // Load the in-WC HTML page that hosts Monaco. It will postMessage
+            // back when ready and we'll send the current file path then.
+            jsIframe.src = url.replace(/\/?$/, '/') + 'transpile.html';
+          } else if (!isTestMode) {
+            // Dev mode: load the app directly
+            setTimeout(() => showPreview(url, `Preview — ${url}`), 500);
+          }
+          // Test mode: wait for xdg-open event with the proper session URL
+        });
+
+        // In test mode, vitest's preview provider calls openBrowser() which
+        // triggers xdg-open. The URL includes the session ID needed for the
+        // WebSocket connection. Rewrite localhost URL to WebContainer URL.
+        container.on('xdg-open', (localUrl) => {
+          if (!isTestMode || !serverBaseUrl) return;
+          // localUrl is like http://localhost:63315/__vitest_test__/?sessionId=...
+          // Rewrite to the WebContainer's external URL
+          const path = new URL(localUrl).pathname + new URL(localUrl).search;
+          const iframeUrl = serverBaseUrl.replace(/\/?$/, path);
+          xterm.writeln(`\x1b[32m Opening test UI: ${iframeUrl}\x1b[0m\r\n`);
+          showPreview(iframeUrl, 'Tests');
+        });
+
+        // Step 6: Auto-run setup commands
+        const modeLabel = isTestMode ? 'TESTS' : isTranspileMode ? 'TRANSPILE' : 'DEMO';
+        xterm.writeln('\x1b[36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m');
+        xterm.writeln(`\x1b[36m  ${demo.toUpperCase()} ${modeLabel} - Setting up...\x1b[0m`);
+        xterm.writeln('\x1b[36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\r\n');
+
+        // npm install
+        await runCommand(container, xterm, 'npm', [
+          'install',
+          './ruby2js-beta.tgz',
+          './juntos-beta.tgz',
+          './juntos-dev-beta.tgz',
+          './vite-plugin-ruby2js-beta.tgz',
+          'dexie', '@hotwired/turbo', '@hotwired/stimulus', 'react', 'react-dom'
+        ], 'Installing dependencies...');
+
+        // juntos init
+        await runCommand(container, xterm, 'npx', [
+          'juntos', 'init', '--no-install'
+        ], 'Configuring Vite...');
+
+        // Small delay to ensure config files are fully written
+        await new Promise(r => setTimeout(r, 500));
+
+        // In transpile mode, inject:
+        //  - vite.config.js with a /api/transpile.js endpoint (uses
+        //    server.transformRequest() to leverage juntos's existing filter
+        //    chains and metadata pipeline)
+        //  - public/transpile.html: a same-origin Monaco page the editor's
+        //    third pane embeds via iframe, so its fetches don't hit CORS
+        if (isTranspileMode) {
+          // Same-origin Monaco host page served by our middleware.
+          const transpileHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Transpile output</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/editor/editor.main.css">
+  <style>
+    html, body { height: 100%; margin: 0; padding: 0; background: #1e1e1e; }
+    #editor { position: absolute; inset: 0; }
+  </style>
+</head>
+<body>
+  <div id="editor"></div>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"><\/script>
+  <script>
+    let editor = null;
+    let lastSeq = 0;
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+    require(['vs/editor/editor.main'], () => {
+      editor = monaco.editor.create(document.getElementById('editor'), {
+        value: '// Waiting for source...',
+        language: 'javascript',
+        theme: 'vs-dark',
+        readOnly: true,
+        minimap: { enabled: false },
+        fontSize: 13,
+        automaticLayout: true,
+      });
+      // Tell parent we're ready to receive paths.
+      try { window.parent.postMessage({ type: 'transpile-iframe-ready' }, '*'); } catch (e) {}
+    });
+
+    window.addEventListener('message', async (event) => {
+      const data = event.data || {};
+      if (data.type !== 'transpile-fetch' || !editor || !data.path) return;
+      if (data.transpilable === false) {
+        editor.setValue('// No transpile output for ' + data.path);
+        return;
+      }
+      const seq = ++lastSeq;
+      const url = '/api/transpile.js?path=' + encodeURIComponent(data.path) + '&t=' + Date.now();
+      try {
+        const response = await fetch(url);
+        const text = await response.text();
+        if (seq !== lastSeq) return;
+        if (response.ok) {
+          editor.setValue(text);
+        } else {
+          editor.setValue('// Transform error (HTTP ' + response.status + '):\\n\\n' + text);
+        }
+      } catch (err) {
+        if (seq !== lastSeq) return;
+        editor.setValue('// Fetch error: ' + (err && err.message ? err.message : String(err)));
+      }
+    });
+  <\/script>
+</body>
+</html>
+`;
+          // Embed the HTML inside vite.config.js as a string, served by our
+          // plugin middleware on /transpile.html. Avoids touching public/
+          // (which previously triggered Vite's watcher mid-startup).
+          const escapedHtml = JSON.stringify(transpileHtml);
+          const viteConfig = `import { defineConfig } from 'vite';
+import { juntos } from 'juntos-dev/vite';
+import path from 'node:path';
+
+const TRANSPILE_HTML = ${escapedHtml};
+
+const transpileEndpoint = {
+  name: 'editor-transpile-endpoint',
+  enforce: 'pre',
+  configureServer(server) {
+    server.middlewares.use(async (req, res, next) => {
+      if (!req.url) return next();
+
+      // Serve the iframe host page same-origin to the WC.
+      if (req.url === '/transpile.html' || req.url.startsWith('/transpile.html?')) {
+        res.setHeader('Cache-Control', 'no-store');
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(TRANSPILE_HTML);
+        return;
+      }
+
+      // Transpile endpoint: returns Vite's transform output for a Ruby file.
+      if (req.url.startsWith('/api/transpile.js')) {
+        const url = new URL(req.url, 'http://x');
+        const filePath = url.searchParams.get('path');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'no-store');
+        if (!filePath) {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('missing path query');
+          return;
+        }
+        try {
+          const abs = path.resolve(process.cwd(), filePath);
+          const result = await server.transformRequest(abs);
+          if (!result) {
+            res.writeHead(404, { 'Content-Type': 'application/javascript' });
+            res.end('// no transform output for ' + filePath);
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/javascript' });
+          res.end(result.code);
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/javascript' });
+          res.end('// transform error: ' + (err && err.message ? err.message : String(err)));
+        }
+        return;
+      }
+
+      next();
+    });
+  }
+};
+
+export default defineConfig({
+  plugins: [transpileEndpoint, ...juntos()],
+  server: { cors: true, allowedHosts: true }
+});
+`;
+          await container.fs.writeFile('vite.config.js', viteConfig);
+          xterm.writeln(`\x1b[35m━━━ TRANSPILE: vite.config.js with /transpile.html and /api/transpile.js injected ━━━\x1b[0m`);
+        }
+
+        // Launch long-running process based on mode.
+        // Transpile mode reuses juntos dev: we don't display the iframe,
+        // we just fetch transformed modules from the running Vite server.
+        const cmdArgs = isTestMode
+          ? ['juntos', 'test', '-d', 'dexie', '--preview']
+          : ['juntos', 'dev', '-d', 'dexie', '--host'];
+        const cmdLabel = isTestMode ? 'test runner' : isTranspileMode ? 'transpiler' : 'dev server';
+
+        setTerminalStatus(`Starting ${cmdLabel}...`);
+        xterm.writeln(`\x1b[36m$ npx ${cmdArgs.join(' ')}\x1b[0m`);
+
+        const serverProcess = await container.spawn('npx', cmdArgs, {
+          terminal: { cols: xterm.cols, rows: xterm.rows },
+          env: { JUNTOS_DATABASE: 'dexie' },
+        });
+
+        serverProcess.output.pipeTo(new WritableStream({
+          write(data) { xterm.write(data); }
+        }));
+
+        const serverInput = serverProcess.input.getWriter();
+        xterm.onData(data => serverInput.write(data));
+        xterm.onResize(({ cols, rows }) => serverProcess.resize({ cols, rows }));
+
+        serverProcess.exit.then(code => {
+          const exitedLabel = isTestMode ? 'Test runner' : isTranspileMode ? 'Transpiler' : 'Dev server';
+          xterm.writeln(`\r\n\x1b[33m${exitedLabel} exited (code ${code}). Refresh to restart.\x1b[0m`);
+          setTerminalStatus(`${isTestMode ? 'Tests' : isTranspileMode ? 'Transpiler' : 'Server'} stopped`);
+        });
+
+        window.container = container;
+
+      } catch (err) {
+        loadingStatus.textContent = `Error: ${err.message}`;
+        console.error(err);
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
