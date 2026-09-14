@@ -105,8 +105,17 @@ module Ruby2JS
               modname.children[2..-1].all? {|child| nonprop.call(child)}
 
               s(:begin, *modname.children[2..-1].map {|pair|
-                  s(:send, target, :[]=, s(:sym, pair.children.first),
-                  pair.updated(:defm, [nil, *pair.children[1..-1]]))
+                  if %i(class module).include? pair.type
+                    # A reopened module whose body is (partly) a nested class/module
+                    # declaration rather than just methods - e.g. `module A; class B;
+                    # ...; end; end` reopening `module A`. `pair.children.first` here is
+                    # the class/module's own name node, not a method symbol; attach it
+                    # as a named property instead of wrapping that node inside `:sym`.
+                    s(:send, target, "#{pair.children.first.children.last}=", pair)
+                  else
+                    s(:send, target, :[]=, s(:sym, pair.children.first),
+                    pair.updated(:defm, [nil, *pair.children[1..-1]]))
+                  end
                 })
 
             else

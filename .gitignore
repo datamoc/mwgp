@@ -4,4 +4,10 @@
 /RPGM_versions/
 /MWGP_versions/
 /transpilers/opal-master/
-/transpilers/ruby2js-master/**/node_modules/
+# ruby2js-master's own nested .gitignore excludes demo/selfhost/{ruby2js.js,filters/} as
+# regeneratable build output, and its own node_modules as an installable dependency - but our
+# tools/*.mjs import demo/selfhost/ruby2js.js and demo/selfhost/filters/functions.js directly
+# at runtime, and demo/selfhost/node_modules/@ruby/prism (~1.2M) is the Ruby parser ruby2js.js
+# loads at runtime. A root-level `!negation` here can't override a NESTED .gitignore (the
+# deeper file wins), so those specific paths are `git add -f`orced instead, to keep this repo
+# runnable from a fresh clone without a Ruby toolchain.
