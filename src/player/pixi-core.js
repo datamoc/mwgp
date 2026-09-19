@@ -89,11 +89,20 @@ export async function startMwgPixi(canvas, project) {
       this.tileMap = new mwg.TileMap({ width: map.width, height: map.height, sheet: sheets, tileWidth: tileSize, tileHeight: tileSize });
       this.panorama = initialPanoramaUrl && loadedUrls.has(initialPanoramaUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialPanoramaUrl), width: game.width, height: game.height }) : null;
       if (this.panorama) this.stage.addChild(this.panorama);
+      // MWG's Camera applies the world transform on whole screen pixels. This
+      // avoids fractional camera translations (and the resulting seams or
+      // shimmer) when a tile map is displayed at a browser/device scale.
+      this.camera = mwg.Camera ? new mwg.Camera({ zoom: 1, pixelPerfectTileSize: tileSize }) : null;
+      if (this.camera) {
+        this.camera.setViewport(game.width, game.height);
+        this.stage.addChild(this.camera.world);
+      }
+      const world = this.camera?.world || this.stage;
       layers.forEach((data, index) => {
         this.tileMap.addLayer(`rpgm-${index}`, data);
         if (isXp && xpAutotileSheets.length) this.tileMap.addAutotileLayer(`rpgm-xp-${index}`, xpAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
       });
-      this.stage.addChild(this.tileMap);
+      world.addChild(this.tileMap);
       this.fog = initialFogUrl && loadedUrls.has(initialFogUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialFogUrl), width: game.width, height: game.height }) : null;
       if (this.fog) { this.fog.alpha = Math.max(0, Math.min(1, Number(mapSettings.fogOpacity ?? 0) / 255)); this.stage.addChild(this.fog); }
       // Placed directly above the map, below every sprite/window layer added further down,
@@ -139,7 +148,7 @@ export async function startMwgPixi(canvas, project) {
       // grid), feet-anchored like the engine: Sprite_Character centers x on
       // the tile and puts the sprite bottom at the tile bottom minus shiftY
       // (6px, or 0 for `!` object characters).
-      for (const event of mapEntry?.mwgEvents || []) { const page = mwg.Rpg.activePage(event, this.gameState); const image = page?.image; const sheet = image && eventSheets.get(image.name); if (!sheet) continue; const geom = eventGeoms.get(image.name); const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, image.direction, image.pattern)) }); const size = characterPixelSize(geom, tileSize); sprite.width = size.w; sprite.height = size.h; this.stage.addChild(sprite); this.eventSprites.push({ event, sprite, ...size }); }
+      for (const event of mapEntry?.mwgEvents || []) { const page = mwg.Rpg.activePage(event, this.gameState); const image = page?.image; const sheet = image && eventSheets.get(image.name); if (!sheet) continue; const geom = eventGeoms.get(image.name); const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, image.direction, image.pattern)) }); const size = characterPixelSize(geom, tileSize); sprite.width = size.w; sprite.height = size.h; world.addChild(sprite); this.eventSprites.push({ event, sprite, ...size }); }
       this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } };
       window.addEventListener('keydown', this.saveKey);
       this.dialogue = null;
@@ -153,13 +162,13 @@ export async function startMwgPixi(canvas, project) {
       if (playerSheet) (isXp ? addXpCharacterAnimations : addCharacterAnimations)(this.player, playerSheet, project.playerSprite.index || 0, playerGeom.big);
       this.playerSize = playerSheet ? characterPixelSize(playerGeom, tileSize) : { w: tileSize, h: tileSize, shift: 0 };
       this.player.width = this.playerSize.w; this.player.height = this.playerSize.h; this.player.tint = 0xffffff;
-      this.stage.addChild(this.player);
+      world.addChild(this.player);
       this.pictureLayer = new mwg.Container2D();
       this.stage.addChild(this.pictureLayer);
       this.pictureSprites = new Map();
       this.pictureTweens = new Map();
       this.overlayLayer = new mwg.Container2D();
-      this.stage.addChild(this.overlayLayer);
+      world.addChild(this.overlayLayer);
       this.overlayAnims = [];
       this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
       this.pendingStep = null;
@@ -204,7 +213,15 @@ export async function startMwgPixi(canvas, project) {
       // mwg sprites anchor at (0,0) (see TileMap's cellOrigin: top-left of the
       // cell), so the player sits exactly on its tile like event sprites do —
       // no half-tile or full-tile offset.
-      const scale = tileSize; const x = this.mover?.isMoving ? this.renderPosition.x : (this.mover?.x ?? position.x), y = this.mover?.isMoving ? this.renderPosition.y : (this.mover?.y ?? position.y); this.tileMap.x = game.width / 2 - x * scale - scale / 2 + panX; this.tileMap.y = game.height / 2 - y * scale - scale / 2 + panY;
+      const scale = tileSize; const x = this.mover?.isMoving ? this.renderPosition.x : (this.mover?.x ?? position.x), y = this.mover?.isMoving ? this.renderPosition.y : (this.mover?.y ?? position.y);
+      if (this.camera) {
+        this.tileMap.x = 0;
+        this.tileMap.y = 0;
+        this.camera.snapTo((x + 0.5) * scale - panX, (y + 0.5) * scale - panY);
+      } else {
+        this.tileMap.x = game.width / 2 - x * scale - scale / 2 + panX;
+        this.tileMap.y = game.height / 2 - y * scale - scale / 2 + panY;
+      }
       // this.renderPosition reads the mover's map-space sprite pos (tile
       // top-left units), so fractional movement positions anchor correctly here.
       this.player.x = x * scale + (scale - this.playerSize.w) / 2 + this.tileMap.x; this.player.y = y * scale + scale - this.playerSize.h - this.playerSize.shift + this.tileMap.y;
@@ -219,7 +236,7 @@ export async function startMwgPixi(canvas, project) {
       this.cameraPan.y = tween.from.y + (tween.to.y - tween.from.y) * t;
       if (t >= 1) this.panTween = null;
     }
-    resize(width, height) { this.windows.setViewport(width, height); this.screenEffects?.setViewport(width, height); this.updateCamera(); }
+    resize(width, height) { this.camera?.setViewport(width, height); this.windows.setViewport(width, height); this.screenEffects?.setViewport(width, height); this.updateCamera(); }
     targetCell() { const offsets = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const [dx, dy] = offsets[this.facing]; return [position.x + dx, position.y + dy, 'action']; }
     canStep(x, y, dx, dy) {
       if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
