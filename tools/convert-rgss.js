@@ -281,6 +281,11 @@ function convertCommand(command, context = {}) {
   // in order, so XP matches that shape instead of introducing a joined form.
   if (command.code === 101 || command.code === 401) return [{ say: String(p[0] || '') }];
   if (command.code === 102 || command.code === 105 || command.code === 111 || command.code === 112 || command.code === 209 || command.code === 355) return [];
+  // Essentials' 103/104 commands are stateful message interactions rather
+  // than MV's same-numbered commands. Keep their verified XP parameters in
+  // the manifest so the player can reproduce them without guessing.
+  if (command.code === 103) return [{ inputNumber: { variable: String(p[0] ?? 0), digits: Number(p[1] ?? 1) } }];
+  if (command.code === 104) return [{ messageOptions: { position: Number(p[0] ?? 2), frame: Number(p[1] ?? 0) } }];
   // Essentials measures waits in real seconds as frames/20 (command_106), not
   // the /60 MV's 60fps engine implies.
   if (command.code === 106) return [{ wait: Number(p[0] || 0) / 20 }];
@@ -348,13 +353,11 @@ function convertCommand(command, context = {}) {
     const [direction, distance, speed] = p;
     return [{ scrollMap: { direction: Number(direction || 2), distance: Number(distance || 0), speed: Number(speed ?? 4) } }];
   }
-  // 103 (number input into a variable) and 104 (message position/frame) are
-  // real effects with verified shapes but no MWGP vocabulary entry; dropped
-  // and reported rather than smuggled into a wrong-shaped command.
-  // 204 is Change Map Settings (panorama/fog/battleback), not MV's Scroll Map;
-  // the player renders no fog or panorama layers, so it is dropped. 205 is the
-  // fog tone change and goes with it. 233 (Rotate Picture) has no vocabulary
-  // entry either. 212/213 (animation/balloon) and 214-216 have no handler in
+  // 103 and 104 are handled above. 204 is Change Map Settings
+  // (panorama/fog/battleback), not MV's Scroll Map; the player renders no fog
+  // or panorama layers, so it is dropped. 205 is the fog tone change and goes
+  // with it. 233 (Rotate Picture) has no vocabulary entry either.
+  // 212/213 (animation/balloon) and 214-216 have no handler in
   // the shipped Interpreter at all, so dropping them matches the engine.
   // 126/127/128/129 (items/weapons/armor/party) are command_dummy no-ops in
   // the shipped engine itself — Pokémon tracks those elsewhere — so doing
@@ -451,7 +454,7 @@ function convertCommand(command, context = {}) {
 
 function buildCompatibilityReport(counts) {
   const supported = new Set([
-    0, 101, 102, 105, 106, 108, 112, 113, 115, 116, 117, 118, 119, 121,
+    0, 101, 102, 103, 104, 105, 106, 108, 112, 113, 115, 116, 117, 118, 119, 121,
     126, 127, 128, 129, 201, 203, 208, 209, 210, 221, 222, 223, 224, 225, 231, 232,
     234, 235, 241, 242, 247, 248, 249, 250, 251, 313, 314, 315, 316, 317, 318, 319, 355,
     401, 402, 403, 404, 405, 408,

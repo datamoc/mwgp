@@ -111,7 +111,7 @@ for (const dir of convertedDirs) {
   const converter = readFileSync(join(root, 'tools', 'convert-rgss.js'), 'utf8');
   const setOf = name => new Set([...converter.match(new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\);`))[1].matchAll(/\d+/g)].map(m => m[0]));
   const classified = new Set([...setOf('supported'), ...setOf('partial')]);
-  const translated = ['0', '101', '102', '105', '106', '108', '111', '112', '113', '115', '116', '117', '118', '119',
+  const translated = ['0', '101', '102', '103', '104', '105', '106', '108', '111', '112', '113', '115', '116', '117', '118', '119',
     '121', '122', '123', '125', '126', '127', '128', '129', '201', '202', '203', '208', '209', '210', '221', '222',
     '223', '224', '225', '231', '232', '234', '235', '241', '242', '247', '248', '249', '250', '251', '313', '314',
     '315', '316', '317', '318', '319', '355', '401', '402', '403', '404', '405', '408', '411', '412', '413', '509', '655'];
@@ -174,6 +174,8 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ pluginCommand: { raw: 'A b', name: 'A', args: ['b'] } }, 'unsupportedCommand'],
     [{ turn: 'up' }, 'turnPlayer'],
     [{ copyVariable: '1', variable: '2' }, 'copyVariable'],
+    [{ inputNumber: { variable: '1', digits: 3 } }, 'inputNumber'],
+    [{ messageOptions: { position: 0, frame: 0 } }, 'setMessageOptions'],
     [{ loop: [{ wait: 1 }] }, 'runLoop'],
     [{ ask: '', choices: [{ text: 'A', value: 0 }], branches: [[{ wait: 1 }]] }, 'presentChoice'],
     [{ say: 'hi', portrait: { name: 'P', index: 0 } }, 'presentPortrait'],

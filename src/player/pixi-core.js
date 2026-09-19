@@ -91,6 +91,7 @@ export async function startMwgPixi(canvas, project) {
       if (this.screenEffects) this.stage.addChild(this.screenEffects);
       mwg.Input.attach();
       this.cooldown = 0;
+      this.messageOptions = { position: 2, frame: 0 };
       this.music = music;
       this.ambience = ambience;
       // MV Scroll Map pans belong to the map: a transfer rebuilds the scene
@@ -308,10 +309,28 @@ export async function startMwgPixi(canvas, project) {
         .replace(/\\\$/g, '');
       return resolved.replace(/\0/g, '\\');
     }
+    messageAnchor() {
+      return ['top', 'center', 'bottom'][Number(this.messageOptions?.position)] || 'bottom';
+    }
+    setMessageOptions(options) {
+      this.messageOptions = {
+        position: Math.max(0, Math.min(2, Number(options?.position ?? 2))),
+        frame: Number(options?.frame ?? 0)
+      };
+    }
+    inputNumber(state, command) {
+      const variable = String(command.inputNumber.variable);
+      const digits = Math.max(1, Math.min(9, Number(command.inputNumber.digits) || 1));
+      const current = Number(state.game.variable(variable) || 0);
+      const entered = globalThis.prompt?.(`Enter a number (${digits} digit${digits === 1 ? '' : 's'})`, String(current));
+      if (entered === null || entered === undefined || entered === '') return;
+      const value = Math.max(0, Math.min(10 ** digits - 1, Math.trunc(Number(entered))));
+      if (Number.isFinite(value)) state.game.setVariable(variable, value);
+    }
     presentDialogue(request) {
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 126, pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: true, anchor: 'bottom', onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
+        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 126, pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -323,7 +342,7 @@ export async function startMwgPixi(canvas, project) {
       const sheet = command.portrait ? portraitSheets.get(command.portrait.name) : null;
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: sheet ? 150 : 126, pages: [{ text: this.resolveEscapeCodes(command.ask || ''), portrait: sheet ? sheet.get(command.portrait.index) : undefined }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: true, anchor: 'bottom', onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
+        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: sheet ? 150 : 126, pages: [{ text: this.resolveEscapeCodes(command.ask || ''), portrait: sheet ? sheet.get(command.portrait.index) : undefined }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
         this.windows.push(box);
       }).then(chosen => this.runBranch((command.branches || [])[Number(chosen)]));
     }
@@ -396,7 +415,7 @@ export async function startMwgPixi(canvas, project) {
       const hold = scroll.text.length / speed + 2;
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 180, pages: [{ text: this.resolveEscapeCodes(scroll.text) }], speed, autoAdvance: hold, dims: false, anchor: 'center', onDone: () => { this.windows.pop(); this.dialogue = null; resolve(); } });
+        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 180, pages: [{ text: this.resolveEscapeCodes(scroll.text) }], speed, autoAdvance: hold, dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: () => { this.windows.pop(); this.dialogue = null; resolve(); } });
         this.windows.push(box);
       });
     }
@@ -405,7 +424,7 @@ export async function startMwgPixi(canvas, project) {
       if (!sheet) return Promise.resolve();
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 150, pages: [{ text: this.resolveEscapeCodes(command.say || command.ask || ''), portrait: sheet.get(command.portrait.index), }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: true, anchor: 'bottom', onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
+        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 150, pages: [{ text: this.resolveEscapeCodes(command.say || command.ask || ''), portrait: sheet.get(command.portrait.index), }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -1067,6 +1086,8 @@ export function prepareEventCommands(commands, scene) {
     if (command.exitEvent) return { call: () => { throw new ExitEventSignal(); } };
     if (command.goto !== undefined) return { call: () => { throw new JumpSignal(command.goto); } };
     if (command.copyVariable !== undefined) return { call: state => scene.copyVariable(state, command) };
+    if (command.inputNumber) return { call: state => scene.inputNumber(state, command) };
+    if (command.messageOptions) return { call: () => scene.setMessageOptions(command.messageOptions) };
     if (command.branches) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: () => scene.transfer(command.transfer) };
     if (command.picture) return { call: () => scene.showPicture(command.picture) };

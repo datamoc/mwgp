@@ -44,7 +44,7 @@ if (project.source?.engine === 'rpg-maker-xp') {
 }
 
 const allowed = new Set([
-  'say', 'ask', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
+  'say', 'ask', 'inputNumber', 'messageOptions', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
   'breakLoop', 'exitEvent', 'move', 'transfer', 'picture', 'erasePicture', 'movePicture', 'tintPicture',
   'balloon', 'animation', 'scroll', 'scrollMap', 'relocate', 'saveBgm', 'resumeBgm', 'me', 'menu', 'goto',
   'changeState', 'recoverAll', 'changeSkill', 'changeEquipment', 'changeProfile',
