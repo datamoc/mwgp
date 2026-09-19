@@ -82,8 +82,17 @@ export async function startMwgPixi(canvas, project) {
   // as translucent quads, not tile frames) and layer 5 is region IDs
   // (Game_Map.regionId reads tileId(x, y, 5)); mapping either through
   // tileToFrame would render tileset-B frames in their place.
-  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
-  const xpAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase ? tile : mwg.EMPTY)) : [];
+  // RPG Maker's star tiles are drawn in the upper tilemap layer, above the
+  // player and events. XP stores the same notion as a numeric priority table.
+  // Keep the base map intact and build a second, sparse MWG TileMap for the
+  // occluding pieces so bridges, roofs, and tree canopies retain their depth.
+  const isAboveTile = tile => isXp
+    ? Number(tileset?.priorities?.[tile] ?? 0) >= 2
+    : (Number(tilesetFlags[tile] ?? 0) & 0x10) !== 0;
+  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) ? mwg.EMPTY : tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
+  const xpAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && !isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
+  const aboveLayers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) ? tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY));
+  const xpAboveAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
   const PlayerScene = class extends mwg.Scene2D {
     create() {
       this.tileMap = new mwg.TileMap({ width: map.width, height: map.height, sheet: sheets, tileWidth: tileSize, tileHeight: tileSize });
@@ -103,6 +112,11 @@ export async function startMwgPixi(canvas, project) {
         if (isXp && xpAutotileSheets.length) this.tileMap.addAutotileLayer(`rpgm-xp-${index}`, xpAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
       });
       world.addChild(this.tileMap);
+      this.aboveMap = new mwg.TileMap({ width: map.width, height: map.height, sheet: sheets, tileWidth: tileSize, tileHeight: tileSize });
+      aboveLayers.forEach((data, index) => {
+        this.aboveMap.addLayer(`rpgm-above-${index}`, data);
+        if (isXp && xpAutotileSheets.length) this.aboveMap.addAutotileLayer(`rpgm-xp-above-${index}`, xpAboveAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
+      });
       this.fog = initialFogUrl && loadedUrls.has(initialFogUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialFogUrl), width: game.width, height: game.height }) : null;
       if (this.fog) { this.fog.alpha = Math.max(0, Math.min(1, Number(mapSettings.fogOpacity ?? 0) / 255)); this.stage.addChild(this.fog); }
       // Placed directly above the map, below every sprite/window layer added further down,
@@ -163,6 +177,7 @@ export async function startMwgPixi(canvas, project) {
       this.playerSize = playerSheet ? characterPixelSize(playerGeom, tileSize) : { w: tileSize, h: tileSize, shift: 0 };
       this.player.width = this.playerSize.w; this.player.height = this.playerSize.h; this.player.tint = 0xffffff;
       world.addChild(this.player);
+      world.addChild(this.aboveMap);
       this.pictureLayer = new mwg.Container2D();
       this.stage.addChild(this.pictureLayer);
       this.pictureSprites = new Map();
