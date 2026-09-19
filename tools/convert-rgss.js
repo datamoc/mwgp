@@ -576,6 +576,13 @@ function resolvePlayerSprite(metadata) {
 const playerSprite = resolvePlayerSprite(firstPlayer);
 const startMapId = Number(field(system, 'start_map_id', 0));
 const initialMap = maps.find(map => map.id === startMapId) || maps.find(map => map.data.data.some(tile => tile >= XP_STATIC_TILE_BASE)) || maps[0];
+const assetAvailability = {
+  tilesets: existsSync(join(source, 'Graphics', 'Tilesets')),
+  autotiles: existsSync(join(source, 'Graphics', 'Autotiles')),
+  characters: existsSync(join(source, 'Graphics', 'Characters')),
+  pictures: existsSync(join(source, 'Graphics', 'Pictures')),
+  audio: existsSync(join(source, 'Audio'))
+};
 const manifest = {
   format: 'MWGP', version: 1,
   source: { engine: 'rpg-maker-xp', projectName: output.split(/[\\/]/).pop(), convertedAt: new Date().toISOString() },
@@ -583,7 +590,7 @@ const manifest = {
   initialMapId: initialMap?.id || null,
   player: initialMap ? { mapId: initialMap.id, x: Number(field(system, 'start_x', 0)), y: Number(field(system, 'start_y', 0)) } : null,
   tilesetFormat: { engine: 'rpg-maker-xp', autotilePatternCount: XP_AUTOTILE_PATTERNS, autotileImageCount: XP_AUTOTILE_IMAGES, staticTileBase: XP_STATIC_TILE_BASE },
-  assets: { root: 'assets', kind: 'decoded', tilesets: true, autotiles: true, characters: true, faces: false, pictures: true, audio: true, encryption: 'rgssad-extracted' },
+  assets: { root: 'assets', kind: 'decoded', ...assetAvailability, faces: false, encryption: 'rgssad-extracted' },
   tilesets, playerSprite, characterFrames, playerMetadata: playerMetadataValues.map(value => ({
     id: Number(field(value, 'id', 0)), trainerType: field(value, 'trainer_type', ''), walkCharset: field(value, 'walk_charset', ''), runCharset: field(value, 'run_charset', ''), cycleCharset: field(value, 'cycle_charset', ''), surfCharset: field(value, 'surf_charset', '')
   })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts) }, maps, database: {}

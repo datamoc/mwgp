@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 const file = process.argv[2];
 if (!file) {
@@ -8,12 +9,39 @@ if (!file) {
 }
 
 const project = JSON.parse(await readFile(resolve(file), 'utf8'));
+const manifestDir = dirname(resolve(file));
 const errors = [];
 const check = (condition, message) => { if (!condition) errors.push(message); };
 check(project.format === 'MWGP', 'format must be MWGP');
 check(Number.isInteger(project.version) && project.version >= 1, 'version must be a positive integer');
 check(Array.isArray(project.maps) && project.maps.length > 0, 'maps must be a non-empty array');
 check(project.initialMapId == null || project.maps.some(map => map.id === project.initialMapId), 'initialMapId must refer to a map');
+check(project.assets && typeof project.assets === 'object', 'assets metadata is required');
+
+// A structurally valid manifest is not playable if its decoded resources were
+// never copied. Resolve relative asset roots from the manifest itself so this
+// check remains valid when a project is moved as a folder.
+if (project.assets?.kind === 'decoded') {
+  const assetRoot = resolve(manifestDir, project.assets.root || 'assets');
+  check(existsSync(assetRoot), `decoded asset root does not exist: ${project.assets.root || 'assets'}`);
+  const requiredAssetDirs = [
+    ['tilesets', 'img/tilesets'], ['characters', 'img/characters'], ['faces', 'img/faces'],
+    ['pictures', 'img/pictures'], ['audio', 'audio'], ['autotiles', 'graphics/Autotiles']
+  ];
+  for (const [flag, relative] of requiredAssetDirs) {
+    if (project.assets[flag]) check(existsSync(join(assetRoot, relative)), `decoded ${flag} assets are missing: ${relative}`);
+  }
+}
+if (project.source?.engine === 'rpg-maker-xp') {
+  const format = project.tilesetFormat;
+  check(Number.isInteger(format?.autotilePatternCount) && format.autotilePatternCount > 0,
+    'XP autotilePatternCount must be a positive integer');
+  check(Number.isInteger(format?.autotileImageCount) && format.autotileImageCount > 0,
+    'XP autotileImageCount must be a positive integer');
+  check(Number.isInteger(format?.staticTileBase) && format.staticTileBase ===
+    format.autotilePatternCount * format.autotileImageCount,
+    'XP staticTileBase must equal autotilePatternCount * autotileImageCount');
+}
 
 const allowed = new Set([
   'say', 'ask', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
@@ -41,9 +69,15 @@ for (const map of project.maps || []) {
   const data = map.data;
   check(Number.isInteger(data?.width) && Number.isInteger(data?.height), `map ${map.id} has invalid dimensions`);
   check(Array.isArray(data?.data) && data.data.length === data.width * data.height * 6, `map ${map.id} must contain six MV layers`);
+  check(Number.isInteger(map.tilesetId ?? data?.tilesetId), `map ${map.id} has no tileset id`);
+  const tilesetId = Number(map.tilesetId ?? data?.tilesetId);
+  if (Array.isArray(project.tilesets)) check(tilesetId >= 0 && tilesetId < project.tilesets.length && project.tilesets[tilesetId], `map ${map.id} references missing tileset ${tilesetId}`);
+  for (const tile of data?.data || []) check(Number.isInteger(tile) && tile >= 0, `map ${map.id} contains an invalid tile id`);
   for (const event of map.mwgEvents || []) {
     eventCount++;
     check(Array.isArray(event.pages), `event ${event.id} on map ${map.id} has no pages`);
+    check(Number.isInteger(event.x) && Number.isInteger(event.y) && event.x >= 0 && event.x < data.width && event.y >= 0 && event.y < data.height,
+      `event ${event.id} on map ${map.id} is outside map bounds`);
     for (const page of event.pages || []) {
       validateCommands(page.commands || [], event.id, map.id);
       for (const passage of Object.values(page.story?.passages || {})) validateCommands(passage, event.id, map.id);
