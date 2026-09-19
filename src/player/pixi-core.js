@@ -259,7 +259,10 @@ export async function startMwgPixi(canvas, project) {
     canStep(x, y, dx, dy) {
       if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
       const size = map.width * map.height, bit = directionBit(dx, dy);
-      for (let layer = 0; layer < 4; layer++) { const tile = map.data?.[layer * size + y * map.width + x] || 0; const flag = tilesetFlags[tile] ?? 0; if ((flag & 0x10) !== 0) continue; if ((flag & bit) === 0) return this.eventAllowsStep(x, y); }
+      // Game_Map#layeredTiles checks the visible top layer first (3 -> 0).
+      // Reading bottom-up lets a decorative lower tile override the actual
+      // collision tile and makes movement diverge from RPG Maker.
+      for (let layer = 3; layer >= 0; layer--) { const tile = map.data?.[layer * size + y * map.width + x] || 0; const flag = tilesetFlags[tile] ?? 0; if ((flag & 0x10) !== 0) continue; if ((flag & bit) === 0) return this.eventAllowsStep(x, y); }
       return false;
     }
     eventAllowsStep(x, y) {
