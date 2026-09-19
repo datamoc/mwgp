@@ -236,6 +236,27 @@ module Ruby2JS
       JS_RESERVED.include?(name) ? "$#{name}" : name
     end
 
+    # Ruby operator-overload method names (`def ^(other)`, `def [](i)`, `def []=(i, v)`,
+    # `def ==(other)`, ...). These are never subject to Ruby's foo=/foo!/foo? getter/setter
+    # naming convention - despite some (==, !=, <=, >=, []=) happening to end in those same
+    # characters - and, unlike a plain identifier, are never valid unquoted JS property names.
+    OPERATOR_METHODS = %i[
+      + - * / % ** == != === !== < > <= >= <=> =~ !~
+      << >> & | ^ ~ ! [] []= +@ -@
+    ].freeze
+
+    # A JS class/object method name must be a valid identifier or a quoted string literal.
+    # `prop` may carry a "static "/"get "/"set "/"async " prefix (built up in class2.rb); only
+    # the trailing base name needs quoting.
+    def quote_prop_name(prop)
+      prop = prop.to_s
+      m = prop.match(/\A((?:static |get |set |async )+)(.+)\z/)
+      prefix = m ? m[1] : ''
+      base = m ? m[2] : prop
+      base = base.inspect unless base =~ /\A[A-Za-z_$][A-Za-z0-9_$]*\z/
+      "#{prefix}#{base}"
+    end
+
     attr_accessor :strict, :eslevel, :module_type, :comparison, :or, :truthy, :underscored_private, :nullish_to_s, :loose_break
 
     def es2020

@@ -8,13 +8,15 @@
     "start": "node src/server.js",
     "scan": "node src/server.js --scan",
     "convert:mv": "node tools/convert-mv.js",
+    "convert:auto": "node tools/convert-auto.js",
     "validate:mwgp": "node tools/validate-mwgp.js",
     "transpile:ruby": "node tools/transpile-ruby.mjs",
     "extract:rgssad": "node tools/extract-rgssad.js",
     "transpile:rgss": "node tools/transpile-rgss-scripts.mjs",
-    "bundle:rgss": "node tools/bundle-rgss-scripts.mjs"
+    "bundle:rgss": "node tools/bundle-rgss-scripts.mjs",
+    "test": "node tools/test-smoke.mjs"
   },
   "dependencies": {
-    "@datamoc/mw_games": "^0.9.1"
+    "@datamoc/mw_games": "^0.16.0"
   }
 }

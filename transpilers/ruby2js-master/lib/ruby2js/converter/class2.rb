@@ -311,6 +311,9 @@ module Ruby2JS
               @prop = "get #{@prop}"
               m = m.updated(m.type, [*m.children[0..1],
                 s(:autoreturn, m.children[2])])
+            elsif OPERATOR_METHODS.include? @prop
+              # leave operator-overload names (^, [], []=, ==, ...) untouched here;
+              # quote_prop_name quotes them for output once @prop reaches def.rb
             elsif @prop.to_s.end_with? '='
               @prop = @prop.to_s.sub('=', '').to_sym
               m = m.updated(m.type, [@prop, *m.children[1..2]])
@@ -352,6 +355,9 @@ module Ruby2JS
               @prop = "static get #{m.children[1]}"
               m = m.updated(m.type, [*m.children[0..2], 
                 s(:autoreturn, m.children[3])])
+            elsif OPERATOR_METHODS.include? m.children[1]
+              # leave operator-overload names (^, [], []=, ==, ...) untouched here;
+              # quote_prop_name quotes them for output once @prop reaches def.rb
             elsif @prop.to_s.end_with? '='
               @prop = "static set #{m.children[1].to_s.sub('=', '')}"
             elsif @prop.to_s.end_with? '!'
@@ -450,6 +456,9 @@ module Ruby2JS
                   @prop = "static get #{smethod.children.first}"
                   static_method = static_method.updated(:defs, [s(:self), smethod.children[0], smethod.children[1],
                     s(:autoreturn, smethod.children[2])])
+                elsif OPERATOR_METHODS.include? smethod.children.first
+                  # leave operator-overload names (^, [], []=, ==, ...) untouched here;
+                  # quote_prop_name quotes them for output once @prop reaches def.rb
                 elsif @prop.to_s.end_with? '!'
                   method_name = smethod.children.first.to_s.sub('!', '')
                   static_method = static_method.updated(:defs, [s(:self), method_name, *smethod.children[1..2]])

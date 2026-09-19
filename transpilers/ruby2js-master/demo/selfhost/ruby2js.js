@@ -2992,6 +2992,7 @@ const Ruby2JS = (() => {
         return this._line
       } else if (split && split[0] < this._width - 10) {
         if (slice[split[2]].indent < parseInt(slice[split[2] + 1]?.indent)) {
+          // collapse all but the last argument (typically a hash or function)
           close = slice.pop();
           slice.at(-1).push(...close.to_ary);
           this._lines[mark.first] = new Line(...work.slice(0, split[1] - 1 + 1));
@@ -3007,7 +3008,6 @@ const Ruby2JS = (() => {
       }
     };
 
-    // return the output as a string
     get to_s() {
       if (this._str) return this._str;
       this.respace;
@@ -3026,7 +3026,6 @@ const Ruby2JS = (() => {
       return this._str
     };
 
-    // Returns the translated position, or nil if the position is not in a mapped range.
     translate_ruby_to_erb_position(ruby_pos) {
       if (!this._erb_position_map) return null;
 
@@ -3061,7 +3060,6 @@ const Ruby2JS = (() => {
           if (this._mappings !== "") this._mappings += ","
         };
 
-        // Compute differences between mark and @mark
         diffs = [];
 
         for (let i = 0; i < mark.length; i++) {
@@ -3537,6 +3535,46 @@ const Ruby2JS = (() => {
       return Converter.JS_RESERVED.includes(name) ? `$${name ?? ""}` : name
     };
 
+    static OPERATOR_METHODS = Object.freeze([
+      "+",
+      "-",
+      "*",
+      "/",
+      "%",
+      "**",
+      "==",
+      "!=",
+      "===",
+      "!==",
+      "<",
+      ">",
+      "<=",
+      ">=",
+      "<=>",
+      "=~",
+      "!~",
+      "<<",
+      ">>",
+      "&",
+      "|",
+      "^",
+      "~",
+      "!",
+      "[]",
+      "[]=",
+      "+@",
+      "-@"
+    ]);
+
+    quote_prop_name(prop) {
+      prop = (prop ?? "").toString();
+      let m = prop.match(/^((?:static |get |set |async )+)(.+)$/);
+      let prefix = m ? m[1] : "";
+      let base = m ? m[2] : prop;
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(base)) base = JSON.stringify(base);
+      return `${prefix ?? ""}${base ?? ""}`
+    };
+
     get strict() {
       return this._strict
     };
@@ -3694,6 +3732,7 @@ const Ruby2JS = (() => {
       }).compact
     };
 
+    // Returns [comment_list, comment_key] where comment_key is used for removal
     find_comment_entry(ast) {
       let comment_list = this._comments.get(ast);
       if (Array.isArray(comment_list)) return [comment_list, ast];
@@ -3722,6 +3761,7 @@ const Ruby2JS = (() => {
       }
     };
 
+    // Get begin_pos from a node's location (safe for both Ruby and JS)
     node_begin_pos(node) {
       if (typeof node !== "object" || node == null || !("loc" in node) || !node.loc) {
         return null
@@ -3766,7 +3806,6 @@ const Ruby2JS = (() => {
     };
 
     parse_all(...args) {
-      // Use explicit empty check to avoid transpilation issues with nil/undefined
       if (args.length === 0) {
         this._options = {}
       } else {
@@ -3837,6 +3876,7 @@ const Ruby2JS = (() => {
     };
 
     timestamp(file) {
+      // (super transpiles to _parent.timestamp which doesn't work for class inheritance)
       if (file) if (File.exist(file)) this._timestamps[file] = File.mtime(file);
       if (!file) return;
 
@@ -7380,6 +7420,8 @@ const Ruby2JS = (() => {
 
           if (this._ast.type === "prop") {
             obj = args[0];
+
+            // Ruby Hash has .to_a, JS Object needs Object.entries()
             props_array = args[1].to_a;
 
             if (props_array.length === 1) {
@@ -7958,16 +8000,18 @@ const Ruby2JS = (() => {
                   m.type,
                   [...m.children.slice(0, 2), this.s("autoreturn", m.children[2])]
                 )
-              } else if ((this._prop ?? "").toString().endsWith("=")) {
-                this._prop = (this._prop ?? "").toString().replace("=", "");
-                m = m.updated(m.type, [this._prop, ...m.children.slice(1, 3)]);
-                this._prop = `set ${this._prop ?? ""}`
-              } else if ((this._prop ?? "").toString().endsWith("!")) {
-                this._prop = (this._prop ?? "").toString().replace("!", "");
-                m = m.updated(m.type, [this._prop, ...m.children.slice(1, 3)])
-              } else if ((this._prop ?? "").toString().endsWith("?")) {
-                this._prop = (this._prop ?? "").toString().replace("?", "");
-                m = m.updated(m.type, [this._prop, ...m.children.slice(1, 3)])
+              } else if (!Converter.OPERATOR_METHODS.includes(this._prop)) {
+                if ((this._prop ?? "").toString().endsWith("=")) {
+                  this._prop = (this._prop ?? "").toString().replace("=", "");
+                  m = m.updated(m.type, [this._prop, ...m.children.slice(1, 3)]);
+                  this._prop = `set ${this._prop ?? ""}`
+                } else if ((this._prop ?? "").toString().endsWith("!")) {
+                  this._prop = (this._prop ?? "").toString().replace("!", "");
+                  m = m.updated(m.type, [this._prop, ...m.children.slice(1, 3)])
+                } else if ((this._prop ?? "").toString().endsWith("?")) {
+                  this._prop = (this._prop ?? "").toString().replace("?", "");
+                  m = m.updated(m.type, [this._prop, ...m.children.slice(1, 3)])
+                }
               };
 
               if (visibility === "private" && this._prop !== "constructor") {
@@ -7998,27 +8042,29 @@ const Ruby2JS = (() => {
                   m.type,
                   [...m.children.slice(0, 3), this.s("autoreturn", m.children[3])]
                 )
-              } else if ((this._prop ?? "").toString().endsWith("=")) {
-                this._prop = `static set ${(m.children[1] ?? "").toString().replace(
-                  "=",
-                  ""
-                ) ?? ""}`
-              } else if ((this._prop ?? "").toString().endsWith("!")) {
-                m = m.updated(m.type, [
-                  m.children[0],
-                  (m.children[1] ?? "").toString().replace("!", ""),
-                  ...m.children.slice(2, 4)
-                ]);
+              } else if (!Converter.OPERATOR_METHODS.includes(m.children[1])) {
+                if ((this._prop ?? "").toString().endsWith("=")) {
+                  this._prop = `static set ${(m.children[1] ?? "").toString().replace(
+                    "=",
+                    ""
+                  ) ?? ""}`
+                } else if ((this._prop ?? "").toString().endsWith("!")) {
+                  m = m.updated(m.type, [
+                    m.children[0],
+                    (m.children[1] ?? "").toString().replace("!", ""),
+                    ...m.children.slice(2, 4)
+                  ]);
 
-                this._prop = `static ${m.children[1] ?? ""}`
-              } else if ((this._prop ?? "").toString().endsWith("?")) {
-                m = m.updated(m.type, [
-                  m.children[0],
-                  (m.children[1] ?? "").toString().replace("?", ""),
-                  ...m.children.slice(2, 4)
-                ]);
+                  this._prop = `static ${m.children[1] ?? ""}`
+                } else if ((this._prop ?? "").toString().endsWith("?")) {
+                  m = m.updated(m.type, [
+                    m.children[0],
+                    (m.children[1] ?? "").toString().replace("?", ""),
+                    ...m.children.slice(2, 4)
+                  ]);
 
-                this._prop = `static ${m.children[1] ?? ""}`
+                  this._prop = `static ${m.children[1] ?? ""}`
+                }
               };
 
               if (m.type === "asyncs") {
@@ -8119,30 +8165,32 @@ const Ruby2JS = (() => {
                       smethod.children[1],
                       this.s("autoreturn", smethod.children[2])
                     ])
-                  } else if ((this._prop ?? "").toString().endsWith("!")) {
-                    let method_name = (smethod.children.first ?? "").toString().replace(
-                      "!",
-                      ""
-                    );
+                  } else if (!Converter.OPERATOR_METHODS.includes(smethod.children.first)) {
+                    if ((this._prop ?? "").toString().endsWith("!")) {
+                      let method_name = (smethod.children.first ?? "").toString().replace(
+                        "!",
+                        ""
+                      );
 
-                    static_method = static_method.updated(
-                      "defs",
-                      [this.s("self"), method_name, ...smethod.children.slice(1, 3)]
-                    );
+                      static_method = static_method.updated(
+                        "defs",
+                        [this.s("self"), method_name, ...smethod.children.slice(1, 3)]
+                      );
 
-                    this._prop = `static ${method_name ?? ""}`
-                  } else if ((this._prop ?? "").toString().endsWith("?")) {
-                    let method_name = (smethod.children.first ?? "").toString().replace(
-                      "?",
-                      ""
-                    );
+                      this._prop = `static ${method_name ?? ""}`
+                    } else if ((this._prop ?? "").toString().endsWith("?")) {
+                      let method_name = (smethod.children.first ?? "").toString().replace(
+                        "?",
+                        ""
+                      );
 
-                    static_method = static_method.updated(
-                      "defs",
-                      [this.s("self"), method_name, ...smethod.children.slice(1, 3)]
-                    );
+                      static_method = static_method.updated(
+                        "defs",
+                        [this.s("self"), method_name, ...smethod.children.slice(1, 3)]
+                      );
 
-                    this._prop = `static ${method_name ?? ""}`
+                      this._prop = `static ${method_name ?? ""}`
+                    }
                   };
 
                   try {
@@ -8190,6 +8238,7 @@ const Ruby2JS = (() => {
             };
 
             if (skipped) {
+              // Don't add visibility keywords or defineProps to post
               if (m.type !== "defineProps" && !(m.type === "send" && m.children.first == null && [
                 "private",
                 "protected",
@@ -8258,6 +8307,7 @@ const Ruby2JS = (() => {
                 ))
               }
             } else if (m.type === "block" && m.children.first.children.first == null) {
+              // class method calls passing a block
               this.parse(this.s(
                 "block",
                 this.s("send", name, ...m.children.first.children.slice(1)),
@@ -8277,7 +8327,6 @@ const Ruby2JS = (() => {
             );
 
             if (proxied.children[1].children.length === 1) {
-              // method_missing to return instance attributes (getters) as well
               // as bound functions (methods).
               forward = this.s(
                 "send",
@@ -8742,7 +8791,7 @@ const Ruby2JS = (() => {
 
         try {
           if (this._prop) {
-            this.put(this._prop);
+            this.put(this.quote_prop_name(this._prop));
             this._prop = null
           } else if (name) {
             this.put(`function ${this.jsvar((name ?? "").toString().replace(
@@ -9104,7 +9153,7 @@ const Ruby2JS = (() => {
 
         try {
           if (this._prop) {
-            this.put(this._prop);
+            this.put(this.quote_prop_name(this._prop));
             this._prop = null
           } else if (name) {
             this.put(`function ${this.jsvar((name ?? "").toString().replace(
@@ -9466,7 +9515,7 @@ const Ruby2JS = (() => {
 
         try {
           if (this._prop) {
-            this.put(this._prop);
+            this.put(this.quote_prop_name(this._prop));
             this._prop = null
           } else if (name) {
             this.put(`function ${this.jsvar((name ?? "").toString().replace(
@@ -9828,7 +9877,7 @@ const Ruby2JS = (() => {
 
         try {
           if (this._prop) {
-            this.put(this._prop);
+            this.put(this.quote_prop_name(this._prop));
             this._prop = null
           } else if (name) {
             this.put(`function ${this.jsvar((name ?? "").toString().replace(
@@ -10190,7 +10239,7 @@ const Ruby2JS = (() => {
 
         try {
           if (this._prop) {
-            this.put(this._prop);
+            this.put(this.quote_prop_name(this._prop));
             this._prop = null
           } else if (name) {
             this.put(`function ${this.jsvar((name ?? "").toString().replace(
@@ -17939,7 +17988,6 @@ const Ruby2JS = (() => {
         this.parse_all(...args, {join: ", "});
         return this.put(")")
       } else {
-        // Fallback for pre-ES2020: receiver && receiver(args)
         this.parse(receiver);
         this.put(" && ");
         this.parse(receiver);
@@ -17964,11 +18012,11 @@ const Ruby2JS = (() => {
         left = this.collapse_strings(left)
       };
 
+      // recursively evaluate right hand side
       if (right.type === "send" && right.children.length === 3 && right.children[1] === "+") {
         right = this.collapse_strings(right)
       };
 
-      // if left and right are both strings, perform concatenation
       if (["dstr", "str"].includes(left.type) && ["dstr", "str"].includes(right.type)) {
         if (left.type === "str" && right.type === "str") {
           return left.updated(
@@ -18001,6 +18049,7 @@ const Ruby2JS = (() => {
           length = finish.children.first + (node.type === "irange" ? 1 : 0);
           return this.put(`[...Array(${length ?? ""}).keys()]`)
         } else {
+          // If this is variable/expression we need to parse it properly
           this.put("[...Array(");
           this.parse(finish);
           this.put(node.type === "irange" ? "+1" : "");
@@ -18021,7 +18070,6 @@ const Ruby2JS = (() => {
           finish_value = finish.type === "int" ? finish.children.first : null
         };
 
-        // Avoid of using same variables in the map as used in the irange or elsewhere in this code
         // Ruby2js only allows dollar sign in beginning of variable so i$ is safe
         if ("idx" in this._vars || start_value === "idx" || finish_value === "idx") {
           index_var = "i$"
@@ -19094,6 +19142,7 @@ const Ruby2JS = (() => {
       }
     };
 
+    // Output a pnode as an expression (returns string)
     output_pnode_inline_as_expression(tag, attrs, children) {
       let first, tag_str;
 
@@ -20307,8 +20356,6 @@ const Ruby2JS = (() => {
     get handle_prepend_list() {
       if (!this._filter_instance) return;
       if (this._filter_instance.prepend_list.length === 0) return;
-
-      // Deduplicate imports (same node object added multiple times, e.g., from require filter)
       let prepend = this._filter_instance.prepend_list.uniq;
 
       prepend = prepend.slice().sort((node_a, node_b) => {

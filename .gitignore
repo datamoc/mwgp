@@ -11,3 +11,4 @@
 # loads at runtime. A root-level `!negation` here can't override a NESTED .gitignore (the
 # deeper file wins), so those specific paths are `git add -f`orced instead, to keep this repo
 # runnable from a fresh clone without a Ruby toolchain.
+.aider*

@@ -270,7 +270,7 @@ module Ruby2JS
       nl = @nl unless body == s(:begin)
       begin
         if @prop
-          put @prop
+          put quote_prop_name(@prop)
           @prop = nil
         elsif name
           put "function #{jsvar(name.to_s.sub(/[?!=]$/, ''))}"

@@ -17,9 +17,25 @@ check(project.initialMapId == null || project.maps.some(map => map.id === projec
 
 const allowed = new Set([
   'say', 'ask', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
-  'breakLoop', 'exitEvent', 'move', 'transfer', 'picture', 'erasePicture', 'sound', 'turn',
-  'screenFade', 'screenFlash'
+  'breakLoop', 'exitEvent', 'move', 'transfer', 'picture', 'erasePicture', 'movePicture', 'tintPicture',
+  'balloon', 'animation', 'scroll', 'scrollMap', 'relocate', 'saveBgm', 'resumeBgm', 'me', 'menu', 'goto',
+  'changeState', 'recoverAll', 'changeSkill', 'changeEquipment', 'changeProfile',
+  'sound', 'turn',
+  'screenFade', 'screenFlash', 'changeGold', 'changeItem', 'changeWeapon', 'changeArmor', 'changeParty',
+  'setTransparent', 'eraseEvent', 'screenTint', 'screenShake', 'playBgm', 'fadeoutBgm', 'playBgs', 'fadeoutBgs',
+  'stopSound', 'script', 'pluginCommand'
 ]);
+// Frame geometry the converter measured from the original character sheets
+// ($-prefix grid rule + PNG dimensions). Optional for older manifests; when
+// present every entry must carry positive cell dimensions.
+if (project.characterFrames !== undefined) {
+  check(typeof project.characterFrames === 'object' && project.characterFrames !== null, 'characterFrames must be an object');
+  for (const [name, frame] of Object.entries(project.characterFrames || {})) {
+    check(typeof frame?.big === 'boolean' && typeof frame?.object === 'boolean' &&
+      Number.isFinite(frame?.fw) && frame.fw > 0 && Number.isFinite(frame?.fh) && frame.fh > 0,
+      `characterFrames entry ${name} has invalid geometry`);
+  }
+}
 let eventCount = 0, commandCount = 0;
 for (const map of project.maps || []) {
   const data = map.data;
@@ -28,7 +44,10 @@ for (const map of project.maps || []) {
   for (const event of map.mwgEvents || []) {
     eventCount++;
     check(Array.isArray(event.pages), `event ${event.id} on map ${map.id} has no pages`);
-    for (const page of event.pages || []) validateCommands(page.commands || [], event.id, map.id);
+    for (const page of event.pages || []) {
+      validateCommands(page.commands || [], event.id, map.id);
+      for (const passage of Object.values(page.story?.passages || {})) validateCommands(passage, event.id, map.id);
+    }
   }
 }
 
