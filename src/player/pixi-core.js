@@ -104,6 +104,9 @@ export async function startMwgPixi(canvas, project) {
       this.camera = mwg.Camera ? new mwg.Camera({ zoom: 1, pixelPerfectTileSize: tileSize }) : null;
       if (this.camera) {
         this.camera.setViewport(game.width, game.height);
+        // Match RPG Maker's edge-clamped display position: a player near the
+        // map edge must not reveal empty space outside the map rectangle.
+        this.camera.setBounds({ minX: 0, minY: 0, maxX: map.width * tileSize, maxY: map.height * tileSize });
         this.stage.addChild(this.camera.world);
       }
       const world = this.camera?.world || this.stage;
