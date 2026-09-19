@@ -346,6 +346,15 @@ function convertCommand(command, context = {}) {
     const facing = { 2: 'down', 4: 'left', 6: 'right', 8: 'up' }[Number(p[4])] || null;
     return [{ relocate: { target: resolved, x: Number(p[2] || 0), y: Number(p[3] || 0), ...(facing ? { facing } : {}) } }];
   }
+  // 204 changes map-wide panorama, fog, or battleback settings. Panorama and
+  // fog are retained as explicit runtime settings; battlebacks remain a
+  // partial visual feature outside the map scene.
+  if (command.code === 204) {
+    if (Number(p[0] || 0) === 0) return [{ mapSettings: { kind: 'panorama', name: String(p[1] || ''), hue: Number(p[2] || 0) } }];
+    if (Number(p[0] || 0) === 1) return [{ mapSettings: { kind: 'fog', name: String(p[1] || ''), hue: Number(p[2] || 0), opacity: Number(p[3] || 0), blendType: Number(p[4] || 0), zoom: Number(p[5] || 100), sx: Number(p[6] || 0), sy: Number(p[7] || 0) } }];
+    if (Number(p[0] || 0) === 2) return [{ mapSettings: { kind: 'battleback', name: String(p[1] || '') } }];
+    return [];
+  }
   // 203 is Scroll Map with MV's own [direction, distance, speed] parameter
   // order (verified: start_scroll(@parameters[0..2])), so it maps onto the
   // same scrollMap shape MV's 204 produces.
@@ -353,10 +362,9 @@ function convertCommand(command, context = {}) {
     const [direction, distance, speed] = p;
     return [{ scrollMap: { direction: Number(direction || 2), distance: Number(distance || 0), speed: Number(speed ?? 4) } }];
   }
-  // 103 and 104 are handled above. 204 is Change Map Settings
-  // (panorama/fog/battleback), not MV's Scroll Map; the player renders no fog
-  // or panorama layers, so it is dropped. 205 is the fog tone change and goes
-  // with it. 233 (Rotate Picture) has no vocabulary entry either.
+  // 103 and 104 are handled above. 205 is the fog tone change and remains
+  // partial until the fog filter can accept an XP tone object. 233 (Rotate
+  // Picture) has no vocabulary entry either.
   // 212/213 (animation/balloon) and 214-216 have no handler in
   // the shipped Interpreter at all, so dropping them matches the engine.
   // 126/127/128/129 (items/weapons/armor/party) are command_dummy no-ops in
@@ -471,15 +479,15 @@ function buildCompatibilityReport(counts) {
   // character/game-data operands are dropped), 123 partial (needs
   // map/event context), 125 partial (variable gold reuses MV's amount shape),
   // 201 partial (direct designation only), 202 partial (direct x/y only;
-  // variable and exchange designations are dropped), 204 dropped (map
-  // panorama/fog/battleback settings the player doesn't render), 205 dropped
-  // (fog tone), 208 supported (player transparency via setTransparent),
+  // variable and exchange designations are dropped), 204 partial (panorama
+  // and fog render; battleback is retained as metadata), 205 dropped (fog
+  // tone), 208 supported (player transparency via setTransparent),
   // 210 supported no-op (sequential execution satisfies the wait),
   // 231/232 partial (direct appointments only; blend mode unmapped),
   // 233 dropped (no vocabulary entry), 236 dropped (weather, not rendered),
-  // 103/104 dropped (verified shapes but no vocabulary entry), 212/213/214/
+  // 103/104 supported (number input and message options), 212/213/214/
   // 215/216 dropped (no handler in the shipped Interpreter at all).
-  const partial = new Set([111, 122, 123, 125, 201, 202, 231, 232, 234]);
+  const partial = new Set([111, 122, 123, 125, 201, 202, 204, 231, 232, 234]);
   return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
     count,
     status: supported.has(code) ? 'supported' : partial.has(code) ? 'partial' : 'unsupported'
@@ -520,7 +528,16 @@ for (const name of (await readdir(dataDir)).filter(item => /^Map\d+\.rxdata$/i.t
   const id = Number(name.match(/\d+/)[0]);
   const mwgEvents = [...events.values()].map(event => convertEvent(event, id));
   const bgm = field(sourceMap, 'bgm', null);
-  maps.push({ id, info: unwrap(mapInfoHash.get(id)) || null, data: { width, height, data: layers.flat(), tilesetId: Number(field(sourceMap, 'tileset_id', 0)), autoplayBgm: Boolean(field(sourceMap, 'autoplay_bgm', false)), bgm: bgm ? { name: field(bgm, 'name', ''), volume: Number(field(bgm, 'volume', 100)), pitch: Number(field(bgm, 'pitch', 100)) } : null }, mwgEvents });
+  maps.push({ id, info: unwrap(mapInfoHash.get(id)) || null, data: {
+    width, height, data: layers.flat(), tilesetId: Number(field(sourceMap, 'tileset_id', 0)),
+    autoplayBgm: Boolean(field(sourceMap, 'autoplay_bgm', false)),
+    bgm: bgm ? { name: field(bgm, 'name', ''), volume: Number(field(bgm, 'volume', 100)), pitch: Number(field(bgm, 'pitch', 100)) } : null,
+    settings: {
+      panoramaName: String(field(sourceMap, 'panorama_name', '') || ''), panoramaHue: Number(field(sourceMap, 'panorama_hue', 0) || 0),
+      fogName: String(field(sourceMap, 'fog_name', '') || ''), fogHue: Number(field(sourceMap, 'fog_hue', 0) || 0), fogOpacity: Number(field(sourceMap, 'fog_opacity', 0) || 0),
+      fogBlendType: Number(field(sourceMap, 'fog_blend_type', 0) || 0), fogZoom: Number(field(sourceMap, 'fog_zoom', 100) || 100), fogSx: Number(field(sourceMap, 'fog_sx', 0) || 0), fogSy: Number(field(sourceMap, 'fog_sy', 0) || 0)
+    }
+  }, mwgEvents });
 }
 
 async function copyTree(input, destination) {

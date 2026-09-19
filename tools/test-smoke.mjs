@@ -143,6 +143,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ animation: { target: -1, animation: 1, wait: false } }, 'playAnimation'],
     [{ scroll: { text: 'Far away…', speed: 2, noFast: false } }, 'presentScroll'],
     [{ scrollMap: { direction: 2, distance: 5, speed: 4 } }, 'scrollMap'],
+    [{ mapSettings: { kind: 'fog', name: 'Fog', opacity: 128, zoom: 100, sx: 0, sy: 0 } }, 'setMapSettings'],
     [{ relocate: { target: 'player', x: 3, y: 4, facing: 'down' } }, 'relocate'],
     [{ saveBgm: true }, 'saveBgm'],
     [{ resumeBgm: true }, 'resumeBgm'],

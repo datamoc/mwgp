@@ -20,6 +20,11 @@ export async function startMwgPixi(canvas, project) {
   const sheetEntries = assetRoot && realSheets.length ? realSheets : [{ slot: 5, url: placeholderSheet() }];
   const xpAutotileEntries = isXp && assetRoot ? (tileset?.autotileNames || []).map((name, index) => name ? { index, url: `${assetRoot}/graphics/Autotiles/${encodeURIComponent(name)}.png` } : null).filter(Boolean) : [];
   const sheetUrls = sheetEntries.map(entry => entry.url);
+  // Construct Game before creating/loading any textures. MWG's pixelArt option
+  // sets Pixi's default atlas sampling to nearest-neighbour; doing this after
+  // Resources.load() leaves already-created frames with linear filtering and
+  // can expose one-pixel seams at tile boundaries.
+  const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
   await mwg.Resources.load(sheetUrls);
   const sheets = await Promise.all(sheetEntries.map(entry => entry.slot < 4
     ? buildAutotileSheet(entry.url, entry.slot, mwg, tilesetFlags)
@@ -38,12 +43,15 @@ export async function startMwgPixi(canvas, project) {
   const soundUrls = project.assets?.audio ? soundNames.map(name => `${project.assets.root}/audio/se/${encodeURIComponent(name)}.ogg`) : [];
   const musicNames = [...new Map((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectMusicNames(page.commands))).map(entry => [`${entry.dir}/${entry.name}`, entry])).values()];
   const musicUrls = project.assets?.audio ? musicNames.map(({ dir, name }) => `${project.assets.root}/audio/${dir}/${encodeURIComponent(name)}.ogg`) : [];
+  const mapSettings = map.settings || {};
+  const initialPanoramaUrl = isXp && assetRoot && mapSettings.panoramaName ? `${assetRoot}/graphics/Panoramas/${encodeURIComponent(mapSettings.panoramaName)}.png` : null;
+  const initialFogUrl = isXp && assetRoot && mapSettings.fogName ? `${assetRoot}/graphics/Fogs/${encodeURIComponent(mapSettings.fogName)}.png` : null;
   const balloonUrl = project.assets?.system ? `${project.assets.root}/img/system/Balloon.png` : null;
   const animationSheetNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectAnimationSheetNames(page.commands, project.database?.animations))))];
   const animationUrls = project.assets?.animations ? animationSheetNames.map(name => `${project.assets.root}/img/animations/${encodeURIComponent(name)}.png`) : [];
   const meNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectMeNames(page.commands))))];
   const meUrls = project.assets?.audio ? meNames.map(name => `${project.assets.root}/audio/me/${encodeURIComponent(name)}.ogg`) : [];
-  const optionalUrls = [...new Set([...(playerUrl ? [playerUrl] : []), ...eventUrls, ...portraitUrls, ...pictureUrls, ...soundUrls, ...musicUrls, ...meUrls, ...(balloonUrl ? [balloonUrl] : []), ...animationUrls])];
+  const optionalUrls = [...new Set([...(playerUrl ? [playerUrl] : []), ...eventUrls, ...portraitUrls, ...pictureUrls, ...soundUrls, ...musicUrls, ...meUrls, ...(balloonUrl ? [balloonUrl] : []), ...animationUrls, ...(initialPanoramaUrl ? [initialPanoramaUrl] : []), ...(initialFogUrl ? [initialFogUrl] : [])])];
   // A project can reference an optional/plugin-generated image that is absent
   // from the distributed archive. Load each asset independently so one stale
   // reference does not discard the complete Pixi renderer.
@@ -76,15 +84,18 @@ export async function startMwgPixi(canvas, project) {
   // tileToFrame would render tileset-B frames in their place.
   const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
   const xpAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase ? tile : mwg.EMPTY)) : [];
-  const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
   const PlayerScene = class extends mwg.Scene2D {
     create() {
       this.tileMap = new mwg.TileMap({ width: map.width, height: map.height, sheet: sheets, tileWidth: tileSize, tileHeight: tileSize });
+      this.panorama = initialPanoramaUrl && loadedUrls.has(initialPanoramaUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialPanoramaUrl), width: game.width, height: game.height }) : null;
+      if (this.panorama) this.stage.addChild(this.panorama);
       layers.forEach((data, index) => {
         this.tileMap.addLayer(`rpgm-${index}`, data);
         if (isXp && xpAutotileSheets.length) this.tileMap.addAutotileLayer(`rpgm-xp-${index}`, xpAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
       });
       this.stage.addChild(this.tileMap);
+      this.fog = initialFogUrl && loadedUrls.has(initialFogUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialFogUrl), width: game.width, height: game.height }) : null;
+      if (this.fog) { this.fog.alpha = Math.max(0, Math.min(1, Number(mapSettings.fogOpacity ?? 0) / 255)); this.stage.addChild(this.fog); }
       // Placed directly above the map, below every sprite/window layer added further down,
       // so a fade or flash washes the world without obscuring dialogue text on top of it.
       this.screenEffects = mwg.ScreenEffects ? new mwg.ScreenEffects({ width: game.width, height: game.height }) : null;
@@ -317,6 +328,22 @@ export async function startMwgPixi(canvas, project) {
         position: Math.max(0, Math.min(2, Number(options?.position ?? 2))),
         frame: Number(options?.frame ?? 0)
       };
+    }
+    async setMapSettings(settings) {
+      if (!settings?.kind || !isXp || !assetRoot || !mwg.TiledSprite) return;
+      if (settings.kind === 'battleback') {
+        console.warn(`MWGP XP map battleback is not rendered: ${settings.name || '(none)'}`);
+        return;
+      }
+      const directory = settings.kind === 'panorama' ? 'Panoramas' : 'Fogs';
+      const url = settings.name ? `${assetRoot}/graphics/${directory}/${encodeURIComponent(settings.name)}.png` : null;
+      const previous = settings.kind === 'panorama' ? this.panorama : this.fog;
+      if (previous) { this.stage.removeChild(previous); previous.destroy?.(); }
+      if (!url) { if (settings.kind === 'panorama') this.panorama = null; else this.fog = null; return; }
+      try { await mwg.Resources.load([url]); } catch { console.warn(`MWGP XP map ${settings.kind} asset is missing: ${settings.name}`); return; }
+      const visual = new mwg.TiledSprite({ texture: mwg.Resources.texture(url), width: game.width, height: game.height });
+      if (settings.kind === 'panorama') { this.panorama = visual; if (this.stage.addChildAt) this.stage.addChildAt(visual, 0); else this.stage.addChild(visual); }
+      else { visual.alpha = Math.max(0, Math.min(1, Number(settings.opacity ?? 0) / 255)); this.fog = visual; if (this.stage.addChildAt) this.stage.addChildAt(visual, 2); else this.stage.addChild(visual); }
     }
     inputNumber(state, command) {
       const variable = String(command.inputNumber.variable);
@@ -1088,6 +1115,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.copyVariable !== undefined) return { call: state => scene.copyVariable(state, command) };
     if (command.inputNumber) return { call: state => scene.inputNumber(state, command) };
     if (command.messageOptions) return { call: () => scene.setMessageOptions(command.messageOptions) };
+    if (command.mapSettings) return { call: () => scene.setMapSettings(command.mapSettings) };
     if (command.branches) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: () => scene.transfer(command.transfer) };
     if (command.picture) return { call: () => scene.showPicture(command.picture) };
