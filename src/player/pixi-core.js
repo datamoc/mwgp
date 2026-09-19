@@ -1261,7 +1261,9 @@ function addXpCharacterAnimations(sprite, sheet) {
 
 function addCharacterAnimations(sprite, sheet, characterIndex, big) {
   const stride = big ? 3 : 12;
-  const base = big ? 0 : characterIndex * 3;
+  // MV packs four 3x4 character blocks per row pair, not one long row:
+  // characterBlockX = (index % 4) * 3 and characterBlockY = floor(index / 4) * 4.
+  const base = big ? 0 : (Math.floor((Number(characterIndex) || 0) / 4) * 4 * 12) + ((Number(characterIndex) || 0) % 4) * 3;
   const rows = { down: 0, left: 1, right: 2, up: 3 };
   for (const [direction, row] of Object.entries(rows)) {
     const first = base + row * stride;
@@ -1291,7 +1293,8 @@ export function characterCellIndex(geom, index, direction, pattern) {
     return row * 4 + Math.min(3, pattern ?? 1);
   }
   const stride = geom.big ? 3 : 12;
-  const base = geom.big ? 0 : (Number(index) || 0) * 3;
+  const characterIndex = Number(index) || 0;
+  const base = geom.big ? 0 : (Math.floor(characterIndex / 4) * 4 * 12) + (characterIndex % 4) * 3;
   const row = { 2: 0, 4: 1, 6: 2, 8: 3 }[direction] ?? 0;
   return base + row * stride + Math.min(2, pattern ?? 1);
 }

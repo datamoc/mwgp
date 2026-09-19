@@ -269,6 +269,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
   expect(characterGeometry('$Gate', undefined), { big: true, object: false, fw: 48, fh: 48 }, 'characterGeometry $ fallback');
   expect(characterGeometry('!$Door', undefined), { big: true, object: true, fw: 48, fh: 48 }, 'characterGeometry !$ fallback');
   expect(characterCellIndex({ big: false }, 1, 4, 1), 16, 'characterCellIndex standard block');
+  expect(characterCellIndex({ big: false }, 5, 8, 1), 88, 'characterCellIndex second MV block row');
   expect(characterCellIndex({ big: true }, 5, 8, 2), 11, 'characterCellIndex big sheet ignores index');
   expect(characterPixelSize({ fw: 60, fh: 60, object: false }, 48), { w: 60, h: 60, shift: 6 }, 'characterPixelSize shift');
   expect(characterPixelSize({ fw: 60, fh: 80, object: true }, 48), { w: 60, h: 80, shift: 0 }, 'characterPixelSize object');
