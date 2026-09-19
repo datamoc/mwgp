@@ -84,14 +84,26 @@ export async function startMwgPixi(canvas, project) {
   // tileToFrame would render tileset-B frames in their place.
   // RPG Maker's star tiles are drawn in the upper tilemap layer, above the
   // player and events. XP stores the same notion as a numeric priority table.
-  // Keep the base map intact and build a second, sparse MWG TileMap for the
-  // occluding pieces so bridges, roofs, and tree canopies retain their depth.
+  // Keep every source layer in the base map: a star tile can still be part of
+  // the composed ground image, and removing it per-layer loses the lower half
+  // of some roofs/trees when another layer occupies the same cell. The upper
+  // pass is a second, sparse map containing only the effective (top-most)
+  // tile at each cell, matching RPG Maker's priority resolution.
   const isAboveTile = tile => isXp
     ? Number(tileset?.priorities?.[tile] ?? 0) >= 2
     : (Number(tilesetFlags[tile] ?? 0) & 0x10) !== 0;
-  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) ? mwg.EMPTY : tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
+  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) ? mwg.EMPTY : tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
   const xpAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && !isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
-  const aboveLayers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) ? tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY));
+  const effectiveTiles = Array.from({ length: map.width * map.height }, (_, cell) => {
+    for (let layer = 3; layer >= 0; layer--) {
+      const tile = Number(map.data?.[layer * map.width * map.height + cell] || 0);
+      if (tile) return tile;
+    }
+    return 0;
+  });
+  const aboveLayers = isXp
+    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) ? tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY))
+    : [effectiveTiles.map(tile => isAboveTile(tile) ? tileToFrame(tile, sheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY)];
   const xpAboveAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
   const PlayerScene = class extends mwg.Scene2D {
     create() {
