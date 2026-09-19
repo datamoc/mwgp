@@ -217,14 +217,23 @@ export async function startMwgPixi(canvas, project) {
       this.parallelTimer -= dt;
       if (this.parallelTimer <= 0 && !this.eventRunning) { this.runParallelEvents(); this.parallelTimer = 0.25; }
       this.mover.update(dt);
+      // Advance the repeat timer during a step. Freezing it until the mover is
+      // idle creates a visible pause between consecutive held-key steps.
+      this.cooldown -= dt;
       this.renderPosition = { x: this.player.x / tileSize, y: this.player.y / tileSize };
       this.updateCamera();
       if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.runEventAt(x, y, 'touch'); }
       if (this.mover.isMoving) return;
-      this.cooldown -= dt;
       if (this.cooldown <= 0) {
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
-        if (direction) { const [dx, dy, facing] = direction; this.facing = facing; const x = this.mover.x + dx, y = this.mover.y + dy; if (this.canStep(x, y, dx, dy) && this.mover.moveBy(dx, dy)) this.pendingStep = [x, y]; else this.mover.turnTo(dx, dy); this.cooldown = 0.12; }
+        if (direction) {
+          const [dx, dy, facing] = direction;
+          this.facing = facing;
+          const x = this.mover.x + dx, y = this.mover.y + dy;
+          const moved = this.canStep(x, y, dx, dy) && this.mover.moveBy(dx, dy);
+          if (moved) { this.pendingStep = [x, y]; this.cooldown = 0; }
+          else { this.mover.turnTo(dx, dy); this.cooldown = 0.12; }
+        }
         if (mwg.Input.justPressed('confirm')) this.runEventAt(...this.targetCell(), 'action');
       }
     }
@@ -422,6 +431,64 @@ export async function startMwgPixi(canvas, project) {
         const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: sheet ? 150 : 126, pages: [{ text: this.resolveEscapeCodes(command.ask || ''), portrait: sheet ? sheet.get(command.portrait.index) : undefined }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
         this.windows.push(box);
       }).then(chosen => this.runBranch((command.branches || [])[Number(chosen)]));
+    }
+    async startBattle(spec) {
+      const database = project.database || {};
+      const troopId = spec.troopVariable
+        ? Number(this.gameState.variable(String(spec.troopVariable)) || 0)
+        : Number(spec.troopId || 0);
+      const troop = database.troops?.[troopId];
+      const enemies = (troop?.members || [])
+        .filter(member => !member.hidden)
+        .map(member => database.enemies?.[Number(member.enemyId)])
+        .filter(Boolean)
+        .map(enemy => makeBattleEnemy(enemy));
+      if (!enemies.length) {
+        await this.presentDialogue({ text: `Combat ${troopId} impossible : le groupe d'ennemis est introuvable.` });
+        this.unsupportedCommand('battle', spec);
+        return 'lose';
+      }
+      const actorId = Number(this.rpgExtra.party?.[0]) || findPlayerActor(project);
+      const actor = database.actors?.[actorId];
+      const klass = database.classes?.[Number(actor?.classId)];
+      const level = Math.max(1, Number(actor?.initialLevel || 1));
+      const params = klass?.params?.[level] || klass?.params?.[0] || [];
+      const hero = {
+        name: actor?.name || 'Héros',
+        hp: Number(params[0] || 100),
+        maxHp: Number(params[0] || 100),
+        atk: Number(params[2] || 20),
+        def: Number(params[3] || 10)
+      };
+      await this.presentDialogue({ text: `Un combat commence contre ${enemies.map(enemy => enemy.name).join(', ')}.` });
+      for (const enemy of enemies) {
+        while (hero.hp > 0 && enemy.hp > 0) {
+          const choice = await this.presentDialogue({
+            text: `${hero.name} (${hero.hp}/${hero.maxHp}) — ${enemy.name} (${enemy.hp}/${enemy.maxHp})`,
+            choices: [{ text: 'Attaquer', value: 0 }, ...(spec.canEscape ? [{ text: 'Fuir', value: 1 }] : [])]
+          });
+          if (Number(choice) === 1) {
+            await this.presentDialogue({ text: `${hero.name} s'enfuit.` });
+            return 'escape';
+          }
+          const damage = Math.max(1, hero.atk - Math.floor(enemy.def / 2));
+          enemy.hp = Math.max(0, enemy.hp - damage);
+          await this.presentDialogue({ text: `${hero.name} inflige ${damage} dégâts à ${enemy.name}.` });
+          if (enemy.hp <= 0) {
+            await this.presentDialogue({ text: `${enemy.name} est vaincu.` });
+            break;
+          }
+          const retaliation = Math.max(1, enemy.atk - Math.floor(hero.def / 2));
+          hero.hp = Math.max(0, hero.hp - retaliation);
+          await this.presentDialogue({ text: `${enemy.name} inflige ${retaliation} dégâts à ${hero.name}.` });
+        }
+        if (hero.hp <= 0) {
+          await this.presentDialogue({ text: `${hero.name} est vaincu.` });
+          return 'lose';
+        }
+      }
+      await this.presentDialogue({ text: 'Victoire !' });
+      return 'win';
     }
     async runLoop(body) {
       // MV loops are unbounded unless a Break Loop fires; the cap only guards against a
@@ -1039,7 +1106,8 @@ function autotileTable(name) {
 // or a Show Choices command's per-choice/cancel branches — so asset collectors and
 // prepareEventCommands only need to know this shape once.
 function childBlocks(command) {
-  return [command.then, command.else, command.loop, ...(command.branches || []), command.cancelBranch].filter(Boolean);
+  return [command.then, command.else, command.loop, ...(command.branches || []), command.cancelBranch,
+    ...Object.values(command.battle?.branches || {})].filter(Boolean);
 }
 
 function collectPortraitNames(commands) {
@@ -1107,6 +1175,23 @@ function freshExtraState() {
   return { gold: 0, items: {}, weapons: {}, armors: {}, party: [], actors: {} };
 }
 
+function findPlayerActor(project) {
+  const sprite = project.playerSprite || {};
+  const actors = Object.values(project.database?.actors || {});
+  return Number(actors.find(actor => actor?.characterName === sprite.name && Number(actor.characterIndex) === Number(sprite.index))?.id || 1);
+}
+
+function makeBattleEnemy(enemy) {
+  const params = enemy.params || [];
+  return {
+    name: enemy.name || 'Ennemi',
+    hp: Math.max(1, Number(params[0] || 1)),
+    maxHp: Math.max(1, Number(params[0] || 1)),
+    atk: Number(params[2] || 1),
+    def: Number(params[3] || 0)
+  };
+}
+
 // Maps an MV picture tone ([r, g, b, gray] offsets plus desaturation) onto a
 // single multiply color, the same approximation as the screen tint: per-sprite
 // alpha is already owned by opacity, so only the color travels here.
@@ -1166,6 +1251,11 @@ export function prepareEventCommands(commands, scene) {
     if (command.inputNumber) return { call: state => scene.inputNumber(state, command) };
     if (command.messageOptions) return { call: () => scene.setMessageOptions(command.messageOptions) };
     if (command.mapSettings) return { call: () => scene.setMapSettings(command.mapSettings) };
+    if (command.battle) return { call: async () => {
+      const outcome = await scene.startBattle(command.battle);
+      const branch = command.battle.branches?.[outcome];
+      if (branch) await scene.runBranch(prepareEventCommands(branch, scene));
+    } };
     if (command.branches) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: () => scene.transfer(command.transfer) };
     if (command.picture) return { call: () => scene.showPicture(command.picture) };

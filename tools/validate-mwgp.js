@@ -44,7 +44,7 @@ if (project.source?.engine === 'rpg-maker-xp') {
 }
 
 const allowed = new Set([
-  'say', 'ask', 'inputNumber', 'messageOptions', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
+  'say', 'ask', 'inputNumber', 'messageOptions', 'battle', 'wait', 'setSwitch', 'setVariable', 'addVariable', 'copyVariable', 'if', 'loop',
   'breakLoop', 'exitEvent', 'move', 'transfer', 'picture', 'erasePicture', 'movePicture', 'tintPicture',
   'balloon', 'animation', 'scroll', 'scrollMap', 'mapSettings', 'relocate', 'saveBgm', 'resumeBgm', 'me', 'menu', 'goto',
   'changeState', 'recoverAll', 'changeSkill', 'changeEquipment', 'changeProfile',
@@ -98,6 +98,10 @@ function validateCommands(commands, eventId, mapId) {
     if (command.branches) {
       for (const branch of command.branches) validateCommands(branch || [], eventId, mapId);
       if (command.cancelBranch) validateCommands(command.cancelBranch, eventId, mapId);
+    }
+    if (command.battle) {
+      check(Number.isInteger(command.battle.troopId) || command.battle.troopVariable, `battle command in event ${eventId} on map ${mapId} has no troop`);
+      for (const branch of Object.values(command.battle.branches || {})) validateCommands(branch || [], eventId, mapId);
     }
   }
 }

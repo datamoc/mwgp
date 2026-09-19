@@ -165,7 +165,7 @@ function convertCommands(list, context = {}) {
     let portrait;
     while (index < list.length) {
       const command = list[index];
-      if ([402, 403, 404, 411, 412, 413].includes(command.code) && command.indent === parentIndent) {
+      if ([402, 403, 404, 411, 412, 413, 601, 602, 603, 604].includes(command.code) && command.indent === parentIndent) {
         return { commands: result, index, marker: command.code };
       }
       if (command.code === 118) {
@@ -237,6 +237,25 @@ function convertCommands(list, context = {}) {
         });
         continue;
       }
+      if (command.code === 301) {
+        const battle = convertCommand(command, { portrait, depth, mapId, eventId })?.[0]?.battle;
+        const branches = {};
+        index++;
+        while (index < list.length) {
+          const marker = list[index];
+          const name = { 601: 'win', 602: 'escape', 603: 'lose' }[marker.code];
+          if (name && marker.indent === command.indent) {
+            const block = parseBlock(index + 1, command.indent);
+            branches[name] = block.commands;
+            index = block.index;
+            continue;
+          }
+          if (marker.code === 604 && marker.indent === command.indent) { index++; break; }
+          break;
+        }
+        if (battle) result.push({ battle: { ...battle, ...(Object.keys(branches).length ? { branches } : {}) } });
+        continue;
+      }
       if (command.code === 355) {
         let script = command.parameters?.[0] || '';
         while (index + 1 < list.length && list[index + 1].code === 655) {
@@ -273,6 +292,14 @@ function convertCommands(list, context = {}) {
 
 function convertCommand(command, context = {}) {
   const portrait = context.portrait ? { portrait: context.portrait } : {};
+  if (command.code === 301) {
+    const [designation, troop, canEscape, canLose] = command.parameters || [];
+    return [{ battle: {
+      ...(Number(designation) === 1 ? { troopVariable: String(troop) } : { troopId: Number(troop || 0) }),
+      canEscape: canEscape === true,
+      canLose: canLose === true
+    } }];
+  }
   if (command.code === 401) return [{ say: resolveTextTables(command.parameters?.[0] || ''), ...portrait }];
   if (command.code === 113) return [{ breakLoop: true }];
   if (command.code === 115) return [{ exitEvent: true }];
@@ -671,7 +698,7 @@ function buildCompatibilityReport(counts) {
     0, 101, 102, 105, 108, 111, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129,
     135, 201, 203, 204, 211, 212, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
     244, 245, 246, 249, 250, 251, 313, 314, 318, 319, 322, 351, 352,
-    355, 356, 401, 402, 403, 404, 405, 408, 411, 412, 413, 505, 655
+    355, 356, 401, 402, 403, 404, 405, 408, 411, 412, 413, 505, 601, 602, 603, 604, 655
   ]);
   // 108 (Comment) and 505 (a Set Movement Route step's editor-only sibling entry, already
   // folded into code 205's own parameters.list) are correctly handled by doing nothing.
@@ -683,7 +710,7 @@ function buildCompatibilityReport(counts) {
   // 405s are plugin data lines and stay dropped.
   // 135 (menu access) has nothing to act on — the player has no menu scene —
   // so doing nothing is the correct conversion.
-  const partial = new Set([122, 205]);
+  const partial = new Set([122, 205, 301]);
   return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
     count,
     status: supported.has(code) ? 'supported' : partial.has(code) ? 'partial' : 'unsupported'

@@ -97,8 +97,8 @@ for (const dir of convertedDirs) {
   const translated = ['0', '101', '102', '105', '108', '111', '112', '113', '115', '117', '118', '119', '121', '122', '123',
     '125', '126', '127', '128', '129', '135', '201', '203', '204', '205', '211', '212', '213', '214', '221', '222',
     '223', '224', '225', '230', '231', '232', '234', '235', '241', '242', '243', '244', '245', '246', '249', '250', '251',
-    '313', '314', '318', '319', '322', '351', '352', '355', '356', '401', '402', '403', '404', '405', '408', '411',
-    '412', '413', '505', '655'];
+    '301', '313', '314', '318', '319', '322', '351', '352', '355', '356', '401', '402', '403', '404', '405', '408', '411',
+    '412', '413', '505', '601', '602', '603', '604', '655'];
   const lying = translated.filter(code => !classified.has(code));
   if (lying.length) fail(`convert-mv.js translates but misreports as unsupported: ${lying.join(', ')}`);
   else notes.push('converter report classification ok (all translated codes supported/partial)');
@@ -180,6 +180,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ loop: [{ wait: 1 }] }, 'runLoop'],
     [{ ask: '', choices: [{ text: 'A', value: 0 }], branches: [[{ wait: 1 }]] }, 'presentChoice'],
     [{ say: 'hi', portrait: { name: 'P', index: 0 } }, 'presentPortrait'],
+    [{ battle: { troopId: 1, canEscape: true, canLose: false, branches: { win: [{ wait: 1 }] } } }, 'startBattle'],
   ];
   for (const [command, expected] of routed) {
     calls.length = 0;
