@@ -182,6 +182,9 @@ export async function startMwgPixi(canvas, project) {
       // them through the same transfer/save payloads below.
       this.rpgExtra = freshExtraState();
       this.erasedEvents = new Set();
+      this.eventAlpha = new Map();
+      this.mapRuntime = {};
+      this.pendingRuntimeState = null;
       this.currentEvent = null;
       this.shake = null;
       this.saves = new mwg.SaveSystem({ namespace: `mwgp:${project.source?.projectName || 'project'}`, version: 1 });
@@ -192,6 +195,7 @@ export async function startMwgPixi(canvas, project) {
         this.facing = transition.state.facing || 'down';
         this.gameState = mwg.Rpg.GameState.fromJSON(transition.state.rpg);
         if (transition.state.extra) this.rpgExtra = { ...freshExtraState(), ...transition.state.extra };
+        this.pendingRuntimeState = transition.state;
         this.saves.delete('runtime-transition');
       }
       this.eventSprites = [];
@@ -205,6 +209,8 @@ export async function startMwgPixi(canvas, project) {
       this.eventQueue = Promise.resolve();
       this.backgroundRoutes = new Map();
       this.routeThrough = new Map();
+      this.restoreRuntimeState(this.pendingRuntimeState);
+      this.pendingRuntimeState = null;
       this.eventRunning = false;
       this.parallelTimer = 0;
       this.windows = new mwg.WindowStack();
@@ -257,12 +263,43 @@ export async function startMwgPixi(canvas, project) {
         const geom = eventGeoms.get(image.name);
         const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, direction, image.pattern)) });
         const size = characterPixelSize(geom, tileSize);
-        sprite.width = size.w; sprite.height = size.h; sprite.zIndex = characterDepth(event.y);
+        sprite.width = size.w; sprite.height = size.h; sprite.alpha = this.eventAlpha.get(String(event.id)) ?? 1; sprite.zIndex = characterDepth(event.y);
         this.world.addChild(sprite);
         next.push({ event, sprite, visualKey: key, ...size });
       }
       this.eventSprites = next;
       this.updateCamera();
+    }
+    restoreRuntimeState(state) {
+      this.mapRuntime = state?.mapRuntime && typeof state.mapRuntime === 'object' ? state.mapRuntime : {};
+      const current = this.mapRuntime[String(mapEntry.id)] || {};
+      for (const saved of current.events || []) {
+        const event = (mapEntry.mwgEvents || []).find(candidate => String(candidate.id) === String(saved.id));
+        if (!event) continue;
+        if (Number.isFinite(saved.x)) event.x = saved.x;
+        if (Number.isFinite(saved.y)) event.y = saved.y;
+        if (saved.facing) event.facing = saved.facing;
+        if (saved.erased) this.erasedEvents.add(event.id);
+      }
+      this.eventAlpha = new Map((current.alpha || []).map(entry => [String(entry[0]), Number(entry[1])]).filter(entry => Number.isFinite(entry[1])));
+      this.routeThrough = new Map(Object.entries(state?.routeThrough || {}).map(([target, value]) => [target, value === true]));
+    }
+    captureRuntimeState() {
+      const events = (mapEntry.mwgEvents || []).map(event => ({
+        id: String(event.id), x: Number(event.x), y: Number(event.y),
+        ...(event.facing ? { facing: event.facing } : {}),
+        ...(this.erasedEvents.has(event.id) ? { erased: true } : {})
+      }));
+      const alpha = [...this.eventAlpha.entries()];
+      this.mapRuntime[String(mapEntry.id)] = { events, alpha };
+      return this.mapRuntime;
+    }
+    runtimeState(extra = {}) {
+      return {
+        ...extra,
+        mapRuntime: this.captureRuntimeState(),
+        routeThrough: Object.fromEntries(this.routeThrough)
+      };
     }
     update(dt) {
       this.windows.update(dt);
@@ -927,6 +964,7 @@ export async function startMwgPixi(canvas, project) {
       if (target === 'player') { if (this.player) this.player.alpha = alpha; return; }
       const eventId = target.startsWith('event:') ? target.slice(6) : '';
       const item = (this.eventSprites || []).find(entry => String(entry.event.id) === eventId);
+      this.eventAlpha.set(eventId, alpha);
       if (item) item.sprite.alpha = alpha;
     }
     eraseEvent() {
@@ -1093,7 +1131,7 @@ export async function startMwgPixi(canvas, project) {
       const mapId = value(target.mapVar, target.mapId);
       const x = value(target.xVar, target.x);
       const y = value(target.yVar, target.y);
-      this.saves.save('runtime-transition', { mapId, x, y, facing: this.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }, { mapId, x, y });
+      this.saves.save('runtime-transition', this.runtimeState({ mapId, x, y, facing: this.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }), { mapId, x, y });
       const params = new URLSearchParams(location.search);
       params.set('map', String(mapId)); params.set('x', String(x)); params.set('y', String(y));
       location.href = `${location.pathname}?${params}`;
@@ -1110,7 +1148,7 @@ export async function startMwgPixi(canvas, project) {
     }
     saveGame() {
       try {
-        this.saves.save('slot-1', { mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, facing: this.mover.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }, { mapId: mapEntry.id, x: this.mover.x, y: this.mover.y });
+        this.saves.save('slot-1', this.runtimeState({ mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, facing: this.mover.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }), { mapId: mapEntry.id, x: this.mover.x, y: this.mover.y });
         console.info(`MWGP saved slot-1 on map ${mapEntry.id} at (${this.mover.x}, ${this.mover.y})`);
         this.flashTitle('✓ Saved (slot 1)');
       } catch (error) { console.error('MWGP save failed', error); this.flashTitle('✗ Save failed — see console (F12)'); }
@@ -1121,7 +1159,8 @@ export async function startMwgPixi(canvas, project) {
       if (this.mover.isMoving) return false;
       if (saved.state.extra) this.rpgExtra = { ...freshExtraState(), ...saved.state.extra };
       if (Number(saved.state.mapId) !== Number(mapEntry.id)) {
-        this.saves.save('runtime-transition', { ...saved.state, extra: this.rpgExtra }, { mapId: saved.state.mapId, x: saved.state.x, y: saved.state.y });
+        this.mapRuntime = { ...(saved.state.mapRuntime || {}), ...this.mapRuntime };
+        this.saves.save('runtime-transition', { ...saved.state, ...this.runtimeState({}), extra: this.rpgExtra }, { mapId: saved.state.mapId, x: saved.state.x, y: saved.state.y });
         const params = new URLSearchParams(location.search);
         params.set('map', String(saved.state.mapId)); params.set('x', String(saved.state.x)); params.set('y', String(saved.state.y));
         location.href = `${location.pathname}?${params}`;
@@ -1129,7 +1168,9 @@ export async function startMwgPixi(canvas, project) {
       }
       position.x = saved.state.x; position.y = saved.state.y; this.facing = saved.state.facing || 'down';
       this.gameState = mwg.Rpg.GameState.fromJSON(saved.state.rpg);
+      this.restoreRuntimeState(saved.state);
       this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
+      this.refreshEventSprites();
       this.updateCamera();
       console.info(`MWGP loaded slot-1 on map ${saved.state.mapId} at (${saved.state.x}, ${saved.state.y})`);
       this.flashTitle('✓ Loaded (slot 1)');
