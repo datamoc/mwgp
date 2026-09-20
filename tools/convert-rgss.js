@@ -334,17 +334,22 @@ function convertCommand(command, context = {}) {
     const amount = kind === 0 ? (op === 1 ? -Number(val || 0) : Number(val || 0)) : { variable: String(val), op: op === 1 ? 'sub' : 'add' };
     return [{ changeGold: amount }];
   }
-  if (command.code === 201 && p[0] === 0) return [{ transfer: { mapId: p[1], x: p[2], y: p[3] } }];
-  // 201 with a variable designation reads map/x/y from variables at runtime,
-  // which the static transfer shape can't express; dropped and reported.
+  if (command.code === 201) {
+    if (Number(p[0] || 0) === 0) return [{ transfer: { mapId: p[1], x: p[2], y: p[3] } }];
+    if (Number(p[0] || 0) === 1) return [{ transfer: { mapVar: p[1], xVar: p[2], yVar: p[3] } }];
+  }
   // 202 params are [target, designation, x, y, direction]: designation 0 is
-  // direct, 1 reads x/y from variables (dropped), anything else swaps two
-  // events (no player equivalent, dropped). The facing table is the standard
-  // 2/4/6/8 keypad, which MWGP relocate already carries as facing.
-  if (command.code === 202 && Number(p[1] || 0) === 0) {
+  // direct and 1 reads x/y from variables; anything else swaps two events (no
+  // player equivalent, dropped). The facing table is the standard 2/4/6/8
+  // keypad, which MWGP relocate already carries as facing.
+  if (command.code === 202 && [0, 1].includes(Number(p[1] || 0))) {
     const resolved = Number(p[0] ?? -1) === -1 ? 'player' : Number(p[0]) === 0 ? 'self' : String(p[0]);
     const facing = { 2: 'down', 4: 'left', 6: 'right', 8: 'up' }[Number(p[4])] || null;
-    return [{ relocate: { target: resolved, x: Number(p[2] || 0), y: Number(p[3] || 0), ...(facing ? { facing } : {}) } }];
+    return [{ relocate: {
+      target: resolved,
+      ...(Number(p[1] || 0) === 1 ? { varX: String(p[2]), varY: String(p[3]) } : { x: Number(p[2] || 0), y: Number(p[3] || 0) }),
+      ...(facing ? { facing } : {})
+    } }];
   }
   // 204 changes map-wide panorama, fog, or battleback settings. Panorama and
   // fog are retained as explicit runtime settings; battlebacks remain a
@@ -478,8 +483,8 @@ function buildCompatibilityReport(counts) {
   // operands with set only; multiply/divide, variable add/subtract, and
   // character/game-data operands are dropped), 123 partial (needs
   // map/event context), 125 partial (variable gold reuses MV's amount shape),
-  // 201 partial (direct designation only), 202 partial (direct x/y only;
-  // variable and exchange designations are dropped), 204 partial (panorama
+  // 201/202 support direct and variable designations; event-exchange 202
+  // designations remain unsupported. 204 partial (panorama
   // and fog render; battleback is retained as metadata), 205 dropped (fog
   // tone), 208 supported (player transparency via setTransparent),
   // 210 supported no-op (sequential execution satisfies the wait),
@@ -487,7 +492,7 @@ function buildCompatibilityReport(counts) {
   // 233 dropped (no vocabulary entry), 236 dropped (weather, not rendered),
   // 103/104 supported (number input and message options), 212/213/214/
   // 215/216 dropped (no handler in the shipped Interpreter at all).
-  const partial = new Set([111, 122, 123, 125, 201, 202, 204, 231, 232, 234]);
+  const partial = new Set([111, 122, 123, 125, 202, 204, 231, 232, 234]);
   return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
     count,
     status: supported.has(code) ? 'supported' : partial.has(code) ? 'partial' : 'unsupported'

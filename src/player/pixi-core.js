@@ -967,10 +967,14 @@ export async function startMwgPixi(canvas, project) {
       this.screenEffects.flash(duration, color, peak);
       return wait ? new Promise(resolve => setTimeout(resolve, duration * 1000)) : Promise.resolve();
     }
-    transfer(target) {
-      this.saves.save('runtime-transition', { mapId: target.mapId, x: target.x, y: target.y, facing: this.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }, { mapId: target.mapId, x: target.x, y: target.y });
+    transfer(target, state) {
+      const value = (variable, fallback) => variable === undefined ? fallback : state?.game.variable(String(variable));
+      const mapId = value(target.mapVar, target.mapId);
+      const x = value(target.xVar, target.x);
+      const y = value(target.yVar, target.y);
+      this.saves.save('runtime-transition', { mapId, x, y, facing: this.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }, { mapId, x, y });
       const params = new URLSearchParams(location.search);
-      params.set('map', String(target.mapId)); params.set('x', String(target.x)); params.set('y', String(target.y));
+      params.set('map', String(mapId)); params.set('x', String(x)); params.set('y', String(y));
       location.href = `${location.pathname}?${params}`;
     }
     // Save/load feedback is a title flash plus a console line: loud enough to
@@ -1257,7 +1261,7 @@ export function prepareEventCommands(commands, scene) {
       if (branch) await scene.runBranch(prepareEventCommands(branch, scene));
     } };
     if (command.branches) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
-    if (command.transfer) return { call: () => scene.transfer(command.transfer) };
+    if (command.transfer) return { call: state => scene.transfer(command.transfer, state) };
     if (command.picture) return { call: () => scene.showPicture(command.picture) };
     if (command.erasePicture !== undefined) return { call: () => scene.erasePicture(command.erasePicture) };
     if (command.movePicture) return { call: () => scene.movePicture(command.movePicture) };
