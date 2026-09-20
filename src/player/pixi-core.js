@@ -190,7 +190,6 @@ export async function startMwgPixi(canvas, project) {
       // grid), feet-anchored like the engine: Sprite_Character centers x on
       // the tile and puts the sprite bottom at the tile bottom minus shiftY
       // (6px, or 0 for `!` object characters).
-      for (const event of mapEntry?.mwgEvents || []) { const page = mwg.Rpg.activePage(event, this.gameState); const image = page?.image; const sheet = image && eventSheets.get(image.name); if (!sheet) continue; const geom = eventGeoms.get(image.name); const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, image.direction, image.pattern)) }); const size = characterPixelSize(geom, tileSize); sprite.width = size.w; sprite.height = size.h; sprite.zIndex = characterDepth(event.y); world.addChild(sprite); this.eventSprites.push({ event, sprite, ...size }); }
       this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } };
       window.addEventListener('keydown', this.saveKey);
       this.dialogue = null;
@@ -219,8 +218,42 @@ export async function startMwgPixi(canvas, project) {
       this.overlayAnims = [];
       this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
       this.pendingStep = null;
+      this.refreshEventSprites();
       this.updateCamera();
       this.runAutorunEvents();
+    }
+    refreshEventSprites() {
+      const previous = new Map((this.eventSprites || []).map(entry => [String(entry.event.id), entry]));
+      const next = [];
+      for (const event of mapEntry?.mwgEvents || []) {
+        const old = previous.get(String(event.id));
+        if (this.erasedEvents?.has(event.id)) {
+          if (old) { old.sprite.removeFromParent?.(); old.sprite.destroy?.(); }
+          continue;
+        }
+        const page = mwg.Rpg.activePage(event, this.gameState);
+        const image = page?.image;
+        const sheet = image && eventSheets.get(image.name);
+        if (!image || !sheet) {
+          if (old) { old.sprite.removeFromParent?.(); old.sprite.destroy?.(); }
+          continue;
+        }
+        const direction = event.facing ? ({ down: 2, left: 4, right: 6, up: 8 }[event.facing] || image.direction) : image.direction;
+        const key = `${image.name}|${image.index}|${direction}|${image.pattern}`;
+        if (old?.visualKey === key) {
+          next.push(old);
+          continue;
+        }
+        if (old) { old.sprite.removeFromParent?.(); old.sprite.destroy?.(); }
+        const geom = eventGeoms.get(image.name);
+        const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, direction, image.pattern)) });
+        const size = characterPixelSize(geom, tileSize);
+        sprite.width = size.w; sprite.height = size.h; sprite.zIndex = characterDepth(event.y);
+        this.world.addChild(sprite);
+        next.push({ event, sprite, visualKey: key, ...size });
+      }
+      this.eventSprites = next;
+      this.updateCamera();
     }
     update(dt) {
       this.windows.update(dt);
@@ -344,7 +377,7 @@ export async function startMwgPixi(canvas, project) {
         const passages = Object.fromEntries(Object.entries(page.story.passages || {}).map(([name, body]) => [name, prepareEventCommands(body, this)]));
         this.eventQueue = this.eventQueue.then(() => { this.eventRunning = true; this.currentEvent = event; return this.runStoryLoop(passages, page.story.start || 'main'); })
           .catch(error => { if (!(error instanceof ExitEventSignal) && !(error instanceof BreakLoopSignal)) console.error('MWGP event failed', error); })
-          .finally(() => { this.eventRunning = false; this.currentEvent = null; });
+          .finally(() => { this.eventRunning = false; this.currentEvent = null; this.refreshEventSprites(); });
         return this.eventQueue;
       }
       const commands = prepareEventCommands(page.commands, this);
@@ -355,7 +388,7 @@ export async function startMwgPixi(canvas, project) {
         // return value, since EventRunner.run() offers no other way to stop mid-list; that
         // is expected control flow, not a failure, so only a genuine error is logged.
         .catch(error => { if (!(error instanceof ExitEventSignal) && !(error instanceof BreakLoopSignal)) console.error('MWGP event failed', error); })
-        .finally(() => { this.eventRunning = false; this.currentEvent = null; });
+        .finally(() => { this.eventRunning = false; this.currentEvent = null; this.refreshEventSprites(); });
       return this.eventQueue;
     }
     async runStoryLoop(passages, start) {
@@ -567,14 +600,14 @@ export async function startMwgPixi(canvas, project) {
         const resolved = resolveRouteStep(step, facing, coordinate(), isPlayer ? null : { x: this.mover.x, y: this.mover.y });
         if (!resolved) continue;
         if (resolved.dx === undefined && resolved.dy === undefined && !resolved.jump) continue;
-        if (resolved.turn) { facing = resolved.turn === 'random' ? ['up', 'right', 'down', 'left'][Math.floor(Math.random() * 4)] : resolved.turn; if (!isPlayer) event.facing = facing; else this.turnPlayer(facing); continue; }
+        if (resolved.turn) { facing = resolved.turn === 'random' ? ['up', 'right', 'down', 'left'][Math.floor(Math.random() * 4)] : resolved.turn; if (!isPlayer) { event.facing = facing; this.refreshEventSprites(); } else this.turnPlayer(facing); continue; }
         // MV jumps arc over intervening tiles, ignoring passability; without a
         // jump animation the honest equivalent is an instant relocation.
         if (resolved.jump) {
           const current = coordinate();
           const next = { x: current.x + resolved.jump.dx, y: current.y + resolved.jump.dy };
           if (isPlayer) { this.mover.x = next.x; this.mover.y = next.y; position.x = next.x; position.y = next.y; this.updateCamera(); }
-          else { event.x = next.x; event.y = next.y; }
+          else { event.x = next.x; event.y = next.y; this.refreshEventSprites(); }
           continue;
         }
         const current = coordinate();
@@ -590,7 +623,7 @@ export async function startMwgPixi(canvas, project) {
           });
           position.x = this.mover.x;
           position.y = this.mover.y;
-        } else { event.x = next.x; event.y = next.y; event.facing = facing; }
+        } else { event.x = next.x; event.y = next.y; event.facing = facing; this.refreshEventSprites(); }
       } };
       do { await execute(); if (options.repeat) await new Promise(resolve => setTimeout(resolve, 16)); } while (options.repeat);
     }
