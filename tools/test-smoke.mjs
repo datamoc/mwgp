@@ -178,6 +178,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ pluginCommand: { raw: 'A b', name: 'A', args: ['b'] } }, 'unsupportedCommand'],
     [{ turn: 'up' }, 'turnPlayer'],
     [{ copyVariable: '1', variable: '2' }, 'copyVariable'],
+    [{ modifyVariable: { target: '1', operation: 'multiply', operand: { variable: '2' } } }, 'modifyVariable'],
     [{ inputNumber: { variable: '1', digits: 3 } }, 'inputNumber'],
     [{ messageOptions: { position: 0, frame: 0 } }, 'setMessageOptions'],
     [{ loop: [{ wait: 1 }] }, 'runLoop'],

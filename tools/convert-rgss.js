@@ -310,10 +310,9 @@ function convertCommand(command, context = {}) {
   }
   if (command.code === 121) return Array.from({ length: p[1] - p[0] + 1 }, (_, offset) => ({ setSwitch: String(p[0] + offset), value: p[2] === 0 }));
   // 122 params are [first, last, op, kind, operand]: kind 0 constant, 1 another
-  // variable, 2 a random range; op 0 set, 1 add, 2 subtract. Variable operands
-  // only support set (copyVariable); variable add/subtract has no MWGP shape.
-  // Game-data/script operands would need runtime evaluation this static
-  // manifest can't express.
+  // variable, 2 a random range; op 0 set, 1 add, 2 subtract, 3 multiply,
+  // 4 divide, 5 modulo. Game-data/script operands would need runtime
+  // evaluation this static manifest can't express.
   if (command.code === 122) {
     const first = Number(p[0]);
     const last = Number(p[1] ?? first);
@@ -329,6 +328,7 @@ function convertCommand(command, context = {}) {
       if (operation === 0) return operandType === 0 ? { setVariable: id, value: amount.value } : { copyVariable: id, ...amount };
       if (operation === 1 && operandType === 0) return { addVariable: id, amount: amount.value };
       if (operation === 2 && operandType === 0) return { addVariable: id, amount: -amount.value };
+      if (operation >= 1 && operation <= 5) return { modifyVariable: { target: id, operation: ['add', 'subtract', 'multiply', 'divide', 'modulo'][operation - 1], operand: operandType === 1 ? { variable: String(p[4]) } : amount } };
       return null;
     }).filter(Boolean);
   }
@@ -489,9 +489,9 @@ function buildCompatibilityReport(counts) {
   // 116/126-129/313/315-319 are
   // supported no-ops-or-erase (116 erases the running event; the rest are
   // command_dummy in the engine itself, as is 314 with a nonzero target),
-  // 122 partial (constant/random operands with set/add/subtract, variable
-  // operands with set only; multiply/divide, variable add/subtract, and
-  // character/game-data operands are dropped), 123 partial (needs
+  // 122 partial (constant/variable/random operands with set/add/subtract/
+  // multiply/divide/modulo map; character/game-data operands are dropped),
+  // 123 partial (needs
   // map/event context), 125 partial (variable gold reuses MV's amount shape),
   // 201/202 support direct and variable designations; event-exchange 202
   // designations remain unsupported. 204 partial (panorama

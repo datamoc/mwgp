@@ -509,6 +509,22 @@ export async function startMwgPixi(canvas, project) {
         : state.game.variable(command.variable);
       state.game.setVariable(command.copyVariable, value);
     }
+    modifyVariable(state, command) {
+      const spec = command.modifyVariable || {};
+      const current = Number(state.game.variable(String(spec.target)) || 0);
+      const operandSpec = spec.operand;
+      const operand = operandSpec?.variable !== undefined
+        ? Number(state.game.variable(String(operandSpec.variable)) || 0)
+        : operandSpec?.random
+          ? Math.floor(Math.random() * (Number(operandSpec.random[1]) - Number(operandSpec.random[0]) + 1)) + Number(operandSpec.random[0])
+          : Number(operandSpec?.value ?? operandSpec ?? 0);
+      const value = spec.operation === 'add' ? current + operand
+        : spec.operation === 'subtract' ? current - operand
+          : spec.operation === 'multiply' ? current * operand
+            : spec.operation === 'divide' ? (operand === 0 ? 0 : current / operand)
+              : spec.operation === 'modulo' ? (operand === 0 ? 0 : current % operand) : current;
+      state.game.setVariable(String(spec.target), value);
+    }
     async runMoveRoute(target, steps) {
       const isPlayer = target === 'player';
       const eventId = String(target || '').startsWith('event:') ? String(target).slice(6) : null;
@@ -1278,6 +1294,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.exitEvent) return { call: () => { throw new ExitEventSignal(); } };
     if (command.goto !== undefined) return { call: () => { throw new JumpSignal(command.goto); } };
     if (command.copyVariable !== undefined) return { call: state => scene.copyVariable(state, command) };
+    if (command.modifyVariable) return { call: state => scene.modifyVariable(state, command) };
     if (command.inputNumber) return { call: state => scene.inputNumber(state, command) };
     if (command.messageOptions) return { call: () => scene.setMessageOptions(command.messageOptions) };
     if (command.mapSettings) return { call: () => scene.setMapSettings(command.mapSettings) };

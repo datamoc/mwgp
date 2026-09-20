@@ -313,9 +313,8 @@ function convertCommand(command, context = {}) {
     const last = Number(command.parameters[1] ?? first);
     const operation = Number(command.parameters[2] || 0);
     const operandType = Number(command.parameters[3] || 0);
-    // Constant (0), a copy from another variable (1), and a random range (2) all resolve to
-    // a fixed or computable-at-convert-time number; game-data (3) and script (4) operands
-    // would need runtime evaluation this static manifest can't express, so those are skipped.
+    // Constant (0), a copy from another variable (1), and a random range (2) all resolve at
+    // runtime; game-data (3) and script (4) operands need engine evaluation, so those are skipped.
     if (operandType > 2) return [];
     return Array.from({ length: last - first + 1 }, (_, offset) => {
       const id = String(first + offset);
@@ -326,6 +325,7 @@ function convertCommand(command, context = {}) {
       if (operation === 0) return operandType === 0 ? { setVariable: id, value: operand.value } : { copyVariable: id, ...operand };
       if (operation === 1 && operandType === 0) return { addVariable: id, amount: operand.value };
       if (operation === 2 && operandType === 0) return { addVariable: id, amount: -operand.value };
+      if (operation >= 1 && operation <= 5) return { modifyVariable: { target: id, operation: ['add', 'subtract', 'multiply', 'divide', 'modulo'][operation - 1], operand } };
       return null;
     }).filter(Boolean);
   }
