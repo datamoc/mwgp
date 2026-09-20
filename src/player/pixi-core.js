@@ -188,6 +188,7 @@ export async function startMwgPixi(canvas, project) {
       this.dialogue = null;
       this.eventQueue = Promise.resolve();
       this.backgroundRoutes = new Map();
+      this.routeThrough = new Map();
       this.eventRunning = false;
       this.parallelTimer = 0;
       this.windows = new mwg.WindowStack();
@@ -289,6 +290,7 @@ export async function startMwgPixi(canvas, project) {
       // Game_Map#layeredTiles checks the visible top layer first (3 -> 0).
       // Reading bottom-up lets a decorative lower tile override the actual
       // collision tile and makes movement diverge from RPG Maker.
+      if (this.routeThrough.get('player') === true) return true;
       for (let layer = 3; layer >= 0; layer--) { const tile = map.data?.[layer * size + y * map.width + x] || 0; const flag = tilesetFlags[tile] ?? 0; if ((flag & 0x10) !== 0) continue; if ((flag & bit) === 0) return this.eventAllowsStep(x, y); }
       return false;
     }
@@ -540,6 +542,9 @@ export async function startMwgPixi(canvas, project) {
       this.backgroundRoutes.set(key, task);
       return undefined;
     }
+    setRouteThrough(route) {
+      this.routeThrough.set(String(route.target || 'player'), route.value === true);
+    }
     async runMoveRoute(target, steps, options = {}) {
       const isPlayer = target === 'player';
       const eventId = String(target || '').startsWith('event:') ? String(target).slice(6) : null;
@@ -564,7 +569,7 @@ export async function startMwgPixi(canvas, project) {
         }
         const current = coordinate();
         const next = { x: current.x + resolved.dx, y: current.y + resolved.dy };
-        if (!this.canStep(next.x, next.y, resolved.dx, resolved.dy)) continue;
+        if (this.routeThrough.get(String(target)) !== true && !this.canStep(next.x, next.y, resolved.dx, resolved.dy)) continue;
         facing = resolved.dy > 0 ? 'down' : resolved.dy < 0 ? 'up' : resolved.dx < 0 ? 'left' : 'right';
         if (isPlayer) {
           this.facing = facing;
@@ -1330,6 +1335,7 @@ export function prepareEventCommands(commands, scene) {
     } };
     if (command.branches) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: state => scene.transfer(command.transfer, state) };
+    if (command.routeThrough) return { call: () => scene.setRouteThrough(command.routeThrough) };
     if (command.move?.repeat) return { call: () => command.move.wait ? scene.runMoveRoute(command.move.target, command.move.steps, command.move) : scene.startMoveRoute(command.move) };
     if (command.picture) return { call: () => scene.showPicture(command.picture) };
     if (command.erasePicture !== undefined) return { call: () => scene.erasePicture(command.erasePicture) };

@@ -336,9 +336,9 @@ function convertCommand(command, context = {}) {
   // Step codes are MV's Game_Character.ROUTE_* constants (see rpg_objects.js in
   // any MV project). Steps needing runtime state (facing/position) are emitted
   // as descriptors ({ random, forward, backward, jump }) that the player's
-  // resolveRouteStep interprets; speed/frequency/anim/fix/through/image/blend
-  // steps (29-38, 41, 43) have no player-side equivalent and stay dropped,
-  // keeping code 205 partial.
+  // resolveRouteStep interprets; speed/frequency/animation/fix/image/blend
+  // steps (29-36, 41, 43) have no player-side equivalent and stay dropped,
+  // while through (37/38), transparency and SE retain their side effects.
   if (command.code === 205) {
     const rawTarget = Number(command.parameters?.[0]);
     const routeTarget = rawTarget === -1 ? 'player'
@@ -367,6 +367,7 @@ function convertCommand(command, context = {}) {
       else if (turn) { commands.push(routeTarget === 'player' ? { turn } : { turn: { target: routeTarget, direction: turn } }); repeatableSteps.push({ turn }); }
       else if (step.code === 15) { const wait = { wait: Number(step.parameters?.[0] || 0) / 60 }; commands.push(wait); repeatableSteps.push(wait); }
       else if (step.code === 27 || step.code === 28) { routeOnly = false; commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 }); }
+      else if (step.code === 37 || step.code === 38) { routeOnly = false; commands.push({ routeThrough: { target: routeTarget, value: step.code === 37 } }); }
       else if (step.code === 39) { routeOnly = false; commands.push({ setTransparent: true }); }
       else if (step.code === 40) { routeOnly = false; commands.push({ setTransparent: false }); }
       else if (step.code === 42) { routeOnly = false; commands.push({ setTransparent: Math.max(0, Math.min(1, Number(step.parameters?.[0] ?? 255) / 255)) }); }

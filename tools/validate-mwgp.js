@@ -50,7 +50,7 @@ const allowed = new Set([
   'changeState', 'recoverAll', 'changeSkill', 'changeEquipment', 'changeProfile',
   'sound', 'turn',
   'screenFade', 'screenFlash', 'changeGold', 'changeItem', 'changeWeapon', 'changeArmor', 'changeParty',
-  'setTransparent', 'eraseEvent', 'screenTint', 'screenShake', 'playBgm', 'fadeoutBgm', 'playBgs', 'fadeoutBgs',
+  'setTransparent', 'routeThrough', 'eraseEvent', 'screenTint', 'screenShake', 'playBgm', 'fadeoutBgm', 'playBgs', 'fadeoutBgs',
   'stopSound', 'script', 'pluginCommand'
 ]);
 // Frame geometry the converter measured from the original character sheets
