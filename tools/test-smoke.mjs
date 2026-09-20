@@ -99,7 +99,10 @@ for (const dir of convertedDirs) {
     '223', '224', '225', '230', '231', '232', '234', '235', '241', '242', '243', '244', '245', '246', '249', '250', '251',
     '301', '313', '314', '318', '319', '322', '351', '352', '355', '356', '401', '402', '403', '404', '405', '408', '411',
     '412', '413', '505', '601', '602', '603', '604', '655'];
-  const lying = translated.filter(code => !classified.has(code));
+  // Script/plugin commands are intentionally translated into loud warning
+  // descriptors, but remain unsupported without RPG Maker's JS/plugin host.
+  const intentionallyUnsupported = new Set(['355', '356']);
+  const lying = translated.filter(code => !classified.has(code) && !intentionallyUnsupported.has(code));
   if (lying.length) fail(`convert-mv.js translates but misreports as unsupported: ${lying.join(', ')}`);
   else notes.push('converter report classification ok (all translated codes supported/partial)');
 }
