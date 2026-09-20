@@ -179,7 +179,8 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ eraseEvent: true }, 'eraseEvent'],
     [{ script: 'x' }, 'unsupportedCommand'],
     [{ script: 'x', js: 'y' }, 'runScript'],
-    [{ if: { script: { ruby: 'x', js: 'return 1;' } }, then: [], else: [] }, 'evalScriptCondition'],
+    [{ script: 'x', mv: true }, 'runScript'],
+    [{ if: { script: { source: 'x', js: 'return 1;' } }, then: [], else: [] }, 'evalScriptCondition'],
     [{ pluginCommand: { raw: 'A b', name: 'A', args: ['b'] } }, 'unsupportedCommand'],
     [{ turn: 'up' }, 'turnPlayer'],
     [{ copyVariable: '1', variable: '2' }, 'copyVariable'],
@@ -199,40 +200,66 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     await prepared[0].call(state);
     if (calls[0]?.[0] !== expected) fail(`${Object.keys(command)[0]} routed to ${calls[0]?.[0] || 'nothing'}, expected ${expected}`);
   }
-  // RGSS event-script runtime: real Ruby snippets from XP events, transpiled by
-  // tools/rgss-snippet.mjs and executed against the shim with a fake scene.
+  // Event-script runtime, end to end on a made-up game (no real game data): a Scripts.rxdata
+  // stand-in defines an Interpreter class, a Game_Event class, a module and a helper def;
+  // the library builder transpiles what the snippets reach and the runtime runs it.
   {
-    const { transpileSnippet } = await import(pathToFileURL(join(root, 'tools', 'rgss-snippet.mjs')).href);
+    const { setInterpreterMethods, transpileSnippet } = await import(pathToFileURL(join(root, 'tools', 'rgss-snippet.mjs')).href);
+    const { indexScripts, buildRgssLibrary } = await import(pathToFileURL(join(root, 'tools', 'rgss-library.mjs')).href);
+    const { setKnownMethods } = await import(pathToFileURL(join(root, 'tools', 'rgss-call-filter.mjs')).href);
     const { createRgssRuntime } = await import(pathToFileURL(join(root, 'src', 'player', 'rgss-script.js')).href);
+    const scripts = [
+      { name: 'Game_Event', source: 'class Game_Event\n  def setTempSwitchOn(ch)\n    $game_self_switches[[@map_id, @id, ch]] = true\n  end\nend\n' },
+      { name: 'Interpreter', source: 'class Interpreter\n  def get_self\n    $game_map.events[@event_id]\n  end\n  def on_event?\n    get_self.x == $game_player.x\n  end\nend\n' },
+      { name: 'Shop', source: 'module Shop\n  def self.price(id)\n    id * 10\n  end\nend\n\ndef give_potion(n)\n  $game_party.gain_item(1, n)\n  $game_party.gain_gold(-Shop.price(n))\nend\n' }
+    ];
+    const snippets = ['get_self.setTempSwitchOn("A")', 'give_potion(2)', 'on_event?', 'Unknown.thing(1)'];
+    const index = indexScripts(scripts);
+    setKnownMethods(index.allDefNames);
+    setInterpreterMethods(index.interpreterMethods);
+    const library = await buildRgssLibrary(scripts, snippets, { index, maxDepth: 3, log: () => {} });
     const switches = new Map(), variables = new Map(), played = [];
     const game = { switch: k => switches.get(k) === true, setSwitch: (k, v) => switches.set(k, v), variable: k => variables.get(k) || 0, setVariable: (k, v) => variables.set(k, v) };
-    const scene = { rpgExtra: { items: {} }, mover: { x: 2, y: 2 }, facing: 'down',
-      showBalloon: b => played.push(['balloon', b.target, b.balloon]), presentDialogue: r => played.push(['say', r.text]),
-      runMoveRoute: (t, steps) => played.push(['walk', t, steps.length]) };
+    const scene = { rpgExtra: { items: {}, party: [], gold: 100 }, mover: { x: 2, y: 2 }, facing: 'down',
+      showBalloon: b => played.push(['balloon', b.target, b.balloon]), presentDialogue: r => played.push(['say', r.text]), runMoveRoute() {} };
     const events = [{ id: 5, x: 2, y: 2 }, { id: 7, x: 4, y: 2 }];
-    const rgss = createRgssRuntime(scene, { mapId: 3, mapEvents: events });
-    const run = async (ruby, event = events[0]) => rgss.run({ ruby, ...transpileSnippet(ruby, 'call') }, { game }, event);
-    const test = (ruby, event = events[0]) => rgss.evaluate({ ruby, ...transpileSnippet(ruby, 'cond') }, { game }, event);
+    const rgss = createRgssRuntime(scene, { mapId: 3, mapEvents: events, mapSize: { width: 10, height: 10 }, library });
+    const run = async (source, event = events[0]) => rgss.run({ source, ...transpileSnippet(source, 'call') }, { game }, event);
+    const test = (source, event = events[0]) => rgss.evaluate({ source, ...transpileSnippet(source, 'cond') }, { game }, event);
     const originalWarn = console.warn; const warnings = []; console.warn = (...a) => warnings.push(a[0]);
     try {
-      await run(['$game_switches[7] = true', '$game_variables[2] += 3', 'setTempSwitchOn("A")'].join('\n'));
-      await run(['$bag.add(:POTION)', '$stats.drinks_bought += 1', 'pbExclaim($game_map.events[7])', 'pbMessage("hi")', 'pbWalkCharacterTo(7, 4, 4, true)'].join('\n'));
-      await run('TrainerBattle.start(:LASS, "Amy")');
+      await run(['$game_switches[7] = true', '$game_variables[2] += 3'].join('\n'));
+      await run('get_self.setTempSwitchOn("A")');
+      await run('give_potion(2)');
+      await run('$game_party.gain_gold(5)\n$game_temp.message_text = "hi"\n$game_map.events[7].balloon_id = 1');
+      await run('Unknown.thing(1)');
       const checks = [
-        [switches.get('7') === true, '$game_switches[7] = true'],
-        [variables.get('2') === 3, '$game_variables[2] += 3'],
-        [switches.get('self:3:5:A') === true, 'setTempSwitchOn writes the self:map:event:ch switch'],
-        [scene.rpgExtra.items.POTION === 1, '$bag.add'],
-        [scene.rpgExtra.rgss?.stats?.drinks_bought === 1, '$stats counter'],
-        [JSON.stringify(played) === JSON.stringify([['balloon', 7, 1], ['say', 'hi'], ['walk', 'event:7', 2]]), 'queued waits play in call order'],
-        [warnings.some(w => String(w).includes('TrainerBattle.start')), 'an unimplemented call warns loudly'],
-        [test('$bag.has?(:POTION)') === true && test('$bag.has?(:ETHER)') === false, 'cond over $bag.has?'],
-        [test('get_self.onEvent?') === true && test('get_self.onEvent?', events[1]) === false, 'get_self.onEvent?'],
+        [Object.keys(library.units).sort().join() === 'Game_Event,Interpreter,Shop,give_potion', 'library holds exactly the units the snippets reach'],
+        [switches.get('7') === true && variables.get('2') === 3, 'built-in $game_switches / $game_variables'],
+        [switches.get('self:3:5:A') === true, "the game's own Interpreter#get_self + Game_Event#setTempSwitchOn run on the shim"],
+        [scene.rpgExtra.items['1'] === 2 && scene.rpgExtra.gold === 85, "a game-defined top-level def and module method run (gold 100 - 20 + 5)"],
+        [JSON.stringify(played) === JSON.stringify([['say', 'hi'], ['balloon', 7, 1]]), 'queued waits play in call order'],
+        [warnings.some(w => String(w).includes('Unknown.thing')), 'an unknown call warns loudly'],
+        [test('on_event?') === true && test('on_event?', events[1]) === false, "a game-defined Interpreter predicate in a condition"],
         [test('$game_variables[2] >= 3 && $game_switches[7]') === true, 'cond over switches/variables']
       ];
       for (const [ok, label] of checks) if (!ok) fail(`rgss runtime: ${label}`);
       if (checks.every(([ok]) => ok)) notes.push(`rgss script runtime ok (${checks.length} checks)`);
     } finally { console.warn = originalWarn; }
+    setInterpreterMethods(null);
+    setKnownMethods([]);
+  }
+  // MV/MZ scripts are JavaScript: same runtime, MV globals.
+  {
+    const { createRgssRuntime } = await import(pathToFileURL(join(root, 'src', 'player', 'rgss-script.js')).href);
+    const switches = new Map(), variables = new Map();
+    const game = { switch: k => switches.get(k) === true, setSwitch: (k, v) => switches.set(k, v), variable: k => variables.get(k) || 0, setVariable: (k, v) => variables.set(k, v) };
+    const scene = { rpgExtra: { items: {}, party: [], gold: 10 }, mover: { x: 1, y: 1 }, facing: 'down' };
+    const mv = createRgssRuntime(scene, { mapId: 4, mapEvents: [{ id: 2, x: 1, y: 1 }], dialect: 'mv' });
+    await mv.run({ source: 's', js: "$gameSwitches.setValue(3, true); $gameVariables.setValue(1, $gameVariables.value(1) + 5); $gameParty.gainGold(7); $gameSelfSwitches.setValue([$gameMap.mapId(), this.eventId(), 'A'], true); $gameParty.gainItem($dataItems[9], 2);" }, { game }, { id: 2 });
+    const truthy = mv.evaluate({ source: 'c', js: 'return ($gameSwitches.value(3) && $gameParty.gold() === 17);' }, { game }, { id: 2 });
+    const okMv = switches.get('3') === true && variables.get('1') === 5 && switches.get('self:4:2:A') === true && scene.rpgExtra.items['9'] === 2 && truthy === true;
+    if (okMv) notes.push('mv script runtime ok'); else fail('mv script runtime: $gameSwitches/$gameVariables/$gameParty/$gameSelfSwitches/this.eventId');
   }
   // Control-flow sentinels and native passthrough.
   for (const command of [[{ breakLoop: true }], [{ exitEvent: true }]]) {

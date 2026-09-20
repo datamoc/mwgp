@@ -167,21 +167,47 @@ manifest for `?id=`, then tries the real player and falls back on failure:
   It duplicates a small, simplified slice of MV command interpretation directly rather than
   sharing code with the converter or the Pixi player.
 
-### XP/VX/Ace event scripts (Ruby in events)
+### Event scripts (Ruby in XP/VX/Ace events, JavaScript in MV/MZ events)
 
-The Ruby that RGSS events embed (Call Script 355/655, Conditional Branch > Script)
-is a small subset, transpiled per snippet — separate from the whole-corpus
-`Scripts.rxdata` bundling effort. `tools/rgss-snippet.mjs` runs each unique snippet through
-the vendored Ruby2JS self-host build; `convert-rgss.js` emits `{ script, js }` commands and
-`{ if: { script: { ruby, js } } }` conditions (a failed snippet keeps `error` and stays a loud
-warning). `src/player/rgss-script.js` (served at `/rgss-script.js`, dynamically imported by
-`startMwgPixi`) runs the JS in a `with` scope shimming `$game_switches`, `$game_variables`,
-`$game_self_switches`, `get_self`/`get_character`, `setTempSwitchOn`, `$bag`, `$stats`,
-`pbMessage`/`pbExclaim`/`pbWalk*`/dialogue portraits; every other name is a stub that warns
-once and returns undefined. Ruby2JS strips `?`/`!` suffixes and turns paren-less zero-arg
-receiver calls into property reads, so the shim names predicates without the suffix and uses
-getters. Both Pokémon Void games transpile 100% of their event scripts; `npm test` runs real
-snippets through the shim.
+Game-agnostic: nothing in the converter or player names a particular game. One runtime,
+`src/player/rgss-script.js` (served at `/rgss-script.js`, dynamically imported by
+`startMwgPixi` so `prepareEventCommands` stays importable from Node), runs both dialects.
+
+- **XP (`tools/convert-rgss.js`)** — Call Script (355/655) and Conditional Branch > Script
+  (111 type 12) are transpiled per unique snippet by `tools/rgss-snippet.mjs` (vendored Ruby2JS
+  self-host) into `{ script, js }` commands / `{ if: { script: { source, js } } }` conditions.
+  A snippet that fails keeps `error` and stays a loud warning. The game's **own** Ruby library
+  (`Data/Scripts.rxdata` + `PluginScripts.rxdata`, read in pure Node by `tools/rgss-scripts.mjs`)
+  is handled by `tools/rgss-library.mjs`: each script is parsed alone, top-level definitions
+  (`def`, `class`/`module` incl. all reopenings, constants, and `def`s inside `module Kernel`)
+  become *units*; the units reachable from the event snippets (breadth-first, `--library-depth`,
+  default 3; `--no-library` skips) plus RGSS's engine classes (`Game_Map`, `Game_Event`, ...) are
+  transpiled **one unit at a time** and stored as `manifest.rubyLibrary` (`units`, `methods` =
+  every `def` name, `interpreter`, `failed`). A unit that will not convert costs only itself.
+  Whole-library bundling (`tools/bundle-rgss-scripts.mjs`) does not scale and is not used here.
+- **MV/MZ (`tools/convert-mv.js`)** — scripts are already JS: `{ script, mv: true }` and
+  `{ if: { script: { source } } }`; only a syntax `error` is recorded. The manifest is written
+  compact (pretty-printing exceeded V8's string limit on the biggest project).
+- **Runtime** — free identifiers resolve through a `with` Proxy: built-ins (`$game_switches`,
+  `$game_variables`, `$game_self_switches`, `$game_map/player/party/temp/system/screen`,
+  `Graphics`, `Audio`, `rand`; the MV globals in `dialect: 'mv'`), then library units loaded
+  lazily on first use, then a stub that warns once and returns undefined. Built-in objects
+  borrow methods the shim lacks from the game's own class (`Game_Event#setTempSwitchOn` runs on
+  the shim). Snippets run as bodies of the game's `Interpreter`/`Game_Interpreter`, so bare
+  calls to its methods compile to `this.<name>()` (`selfCallsFilter`).
+- **Ruby2JS quirks that shape the shim** — `?`/`!` are stripped from names (`can_add?` →
+  `can_add`); a paren-less zero-arg call on a receiver is a *call* iff the game `def`s that name
+  (`RgssCalls`, fed by `setKnownMethods`) and a *property read* otherwise, so built-in readers use
+  `reader(name, fn)` to expose the same shape; filter order matters (`RgssCalls` ends a node's
+  chain, so it goes last; `Return` adds implicit returns); `.call(x)` compiles to `f(x)`.
+- **Timing** — snippets are synchronous; dialogue/balloons/animations are queued and awaited in
+  order after the snippet. Library code that needs a real blocking wait (`Graphics.update`
+  loops, message windows) cannot run and falls onto the warning path — a Web Worker with
+  `Atomics.wait` would be the way to lift that. Not covered: VX/Ace *converters* (only XP
+  `.rxdata` exists), move-route script steps.
+- `npm test` runs a made-up game (Interpreter + Game_Event + module + helper `def`) through the
+  whole pipeline, plus an MV script; both real Pokémon Void games transpile 100% of event
+  scripts and ~96% of library units (`compatibility.scripts`, `rubyLibrary.failed`).
 
 ### Why `4MWG/` exists
 

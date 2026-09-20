@@ -93,8 +93,8 @@ function validateCommands(commands, eventId, mapId) {
       check(command.if.switch || command.if.variable || command.if.script, `if command in event ${eventId} on map ${mapId} has no supported condition`);
       if (command.if.operator) check(['eq', 'neq', 'gte', 'lte', 'gt', 'lt'].includes(command.if.operator),
         `if command in event ${eventId} on map ${mapId} has an invalid variable operator`);
-      if (command.if.script) check(typeof command.if.script.ruby === 'string' && (typeof command.if.script.js === 'string' || typeof command.if.script.error === 'string'),
-        `script condition in event ${eventId} on map ${mapId} needs ruby plus js or error`);
+      if (command.if.script) check(typeof command.if.script.source === 'string' && (command.if.script.js === undefined || typeof command.if.script.js === 'string'),
+        `script condition in event ${eventId} on map ${mapId} needs a source string`);
       validateCommands(command.then || [], eventId, mapId);
       validateCommands(command.else || [], eventId, mapId);
     }

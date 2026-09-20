@@ -132,6 +132,16 @@ function selfSwitchKey(mapId, eventId, ch) {
   return `self:${mapId}:${eventId}:${ch}`;
 }
 
+// The JS is stored once, as `source` (the player wraps a condition in `return (...)`); only a
+// syntax error is recorded here, so a broken script is reported at conversion time and stays
+// a loud warning instead of throwing inside an event.
+function syntaxError(body) {
+  try { new Function(body); return {}; }
+  catch (error) { return { error: String(error.message).slice(0, 160) }; }
+}
+function scriptBody(source) { return syntaxError(source); }
+function conditionBody(source) { return syntaxError(`return (${source}\n);`); }
+
 function convertConditions(conditions = {}, mapId, eventId) {
   const result = [];
   if (conditions.switch1Valid) result.push({ switch: String(conditions.switch1Id), equals: true });
@@ -186,7 +196,9 @@ function convertCommands(list, context = {}) {
         continue;
       }
       if (command.code === 111) {
-        const condition = convertBranchCondition(command.parameters || []);
+        const condition = command.parameters?.[0] === 12
+          ? { script: { source: String(command.parameters[1] ?? ''), ...conditionBody(String(command.parameters[1] ?? '')) } }
+          : convertBranchCondition(command.parameters || []);
         const thenBlock = parseBlock(index + 1, command.indent);
         index = thenBlock.index;
         let elseCommands;
@@ -262,7 +274,8 @@ function convertCommands(list, context = {}) {
           index++;
           script += '\n' + (list[index].parameters?.[0] || '');
         }
-        result.push({ script });
+        // MV/MZ scripts are JavaScript already; the player runs them against its MV-globals shim.
+        result.push({ script, mv: true, ...scriptBody(script) });
         index++;
         continue;
       }
@@ -654,7 +667,8 @@ const manifest = {
   maps,
   database
 };
-await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest, null, 2));
+// Compact: pretty-printing pushes the largest projects past V8's maximum string length.
+await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest));
 if (copyAssets) {
   await decodeTree(join(gameRoot, 'img'), join(output, 'assets', 'img'), system.encryptionKey);
   await decodeTree(join(gameRoot, 'audio'), join(output, 'assets', 'audio'), system.encryptionKey);

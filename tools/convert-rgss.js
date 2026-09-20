@@ -2,13 +2,19 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { decodeMarshal } from '@datamoc/mw_games/rpg';
-import { transpileSnippet } from './rgss-snippet.mjs';
+import { transpileSnippet, setInterpreterMethods } from './rgss-snippet.mjs';
+import { readRgssScripts } from './rgss-scripts.mjs';
+import { indexScripts, buildRgssLibrary } from './rgss-library.mjs';
+import { setKnownMethods } from './rgss-call-filter.mjs';
 
-const [, , extractedArg, outputArg] = process.argv;
+const [, , extractedArg, outputArg, ...flags] = process.argv;
 if (!extractedArg || !outputArg) {
   console.error('Usage: node tools/convert-rgss.js <extracted RGSS project> <MWGP output>');
   process.exit(1);
 }
+// --library-depth N: how many reference hops from the event scripts into the game's own Ruby
+// library get transpiled (default 3); --no-library skips the library (event scripts only).
+const libraryDepth = flags.includes('--no-library') ? 0 : Number(flags[flags.indexOf('--library-depth') + 1]) || 3;
 const source = resolve(extractedArg), output = resolve(outputArg), dataDir = join(source, 'Data');
 const XP_AUTOTILE_PATTERNS = 48;
 const XP_AUTOTILE_IMAGES = 8;
@@ -47,7 +53,7 @@ const commandCounts = new Map();
 // Ruby embedded in events (355/655 Call Script, 111 branch type 12) is
 // transpiled to JS once per unique source; the manifest keeps the Ruby text
 // next to the JS so a failed snippet stays diagnosable and loud at run time.
-const scriptStats = { total: 0, transpiled: 0, failed: new Map() };
+const scriptStats = { total: 0, transpiled: 0, failed: new Map(), sources: new Set() };
 const snippetCache = new Map();
 function convertScript(ruby, kind) {
   const key = `${kind}:${ruby}`;
@@ -57,9 +63,10 @@ function convertScript(ruby, kind) {
     if (result.error) scriptStats.failed.set(ruby, result.error);
   }
   scriptStats.total++;
+  scriptStats.sources.add(ruby);
   const result = snippetCache.get(key);
   if (!result.error) scriptStats.transpiled++;
-  return result.error ? { ruby, error: result.error } : { ruby, js: result.js };
+  return result.error ? { source: ruby, error: result.error } : { source: ruby, js: result.js };
 }
 const commonEvents = new Map();
 
@@ -563,6 +570,12 @@ const tilesets = tilesetData.map((value, index) => value ? {
   priorities: tableData(field(value, 'priorities', null)),
   terrainTags: tableData(field(value, 'terrain_tags', null))
 } : null);
+// The game's own Ruby library is indexed before events convert: its Interpreter methods
+// decide how bare calls in event snippets are compiled (as `this.<name>()`).
+const rubyScripts = libraryDepth ? await readRgssScripts(dataDir).catch(error => { console.warn(`MWGP convert: cannot read Scripts.rxdata (${error.message}); event scripts run without the game library`); return []; }) : [];
+const libraryIndex = rubyScripts.length ? indexScripts(rubyScripts, message => console.warn(`MWGP convert: ${message}`)) : null;
+setInterpreterMethods(libraryIndex?.interpreterMethods);
+if (libraryIndex) setKnownMethods(libraryIndex.allDefNames);
 const maps = [];
 for (const name of (await readdir(dataDir)).filter(item => /^Map\d+\.rxdata$/i.test(item)).sort()) {
   const sourceMap = decodeMarshal(await readFile(join(dataDir, name)));
@@ -648,6 +661,9 @@ const assetAvailability = {
   pictures: existsSync(join(source, 'Graphics', 'Pictures')),
   audio: existsSync(join(source, 'Audio'))
 };
+const rubyLibrary = libraryIndex
+  ? await buildRgssLibrary(rubyScripts, [...scriptStats.sources], { index: libraryIndex, maxDepth: libraryDepth, log: message => console.log(`MWGP convert: ${message}`) })
+  : null;
 const manifest = {
   format: 'MWGP', version: 1,
   source: { engine: 'rpg-maker-xp', projectName: output.split(/[\\/]/).pop(), convertedAt: new Date().toISOString() },
@@ -658,7 +674,8 @@ const manifest = {
   assets: { root: 'assets', kind: 'decoded', ...assetAvailability, faces: false, encryption: 'rgssad-extracted' },
   tilesets, playerSprite, characterFrames, playerMetadata: playerMetadataValues.map(value => ({
     id: Number(field(value, 'id', 0)), trainerType: field(value, 'trainer_type', ''), walkCharset: field(value, 'walk_charset', ''), runCharset: field(value, 'run_charset', ''), cycleCharset: field(value, 'cycle_charset', ''), surfCharset: field(value, 'surf_charset', '')
-  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })) } }, maps, database: {}
+  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })) } }, maps, database: {},
+  ...(rubyLibrary ? { rubyLibrary } : {})
 };
 await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest, null, 2));
 console.log(`Event scripts: ${scriptStats.transpiled}/${scriptStats.total} transpiled to JS${scriptStats.failed.size ? `, ${scriptStats.failed.size} unique failed (see compatibility.scripts.failed)` : ''}`);
