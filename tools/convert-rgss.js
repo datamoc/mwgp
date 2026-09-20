@@ -245,8 +245,9 @@ function convertCommands(list, context = {}) {
 // visibly moves the player instead — an approximation. Other targets are
 // dropped. Step codes are RGSS's Game_Character ROUTE_* constants, the same
 // numbering MV kept (turns 16-19, wait 15, jump 14 all confirmed in the XP
-// corpus); speed/frequency/through steps (29-38, 41, 43) have no player-side
-// equivalent and stay dropped, keeping routes partial.
+// corpus). Through and transparency steps are retained; speed/frequency and
+// image/blend steps (29-36, 41, 43) have no player-side equivalent and stay
+// dropped, keeping routes partial.
 function convertRoute(target, route) {
   if (target !== -1 && target !== 0) return [];
   const commands = [];
@@ -268,6 +269,13 @@ function convertRoute(target, route) {
     else if (turn) commands.push({ turn });
     else if (step.code === 15) commands.push({ wait: Number(step.parameters?.[0] || 0) / 20 });
     else if (step.code === 27 || step.code === 28) commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 });
+    else if (step.code === 37 || step.code === 38) commands.push({ routeThrough: { target: 'player', value: step.code === 37 } });
+    else if (step.code === 39 || step.code === 40 || step.code === 42) {
+      const value = step.code === 42
+        ? Math.max(0, Math.min(1, Number(step.parameters?.[0] ?? 255) / 255))
+        : step.code === 39;
+      commands.push({ setTransparent: value });
+    }
     else if (step.code === 44) {
       const se = step.parameters?.[0];
       const audio = unwrap(se);
