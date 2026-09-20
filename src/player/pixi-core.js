@@ -25,6 +25,7 @@ export async function startMwgPixi(canvas, project) {
   // Resources.load() leaves already-created frames with linear filtering and
   // can expose one-pixel seams at tile boundaries.
   const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
+  const hasNativeAutotiles = typeof mwg.TileMap.prototype?.addAutotileLayer === 'function';
   const sheetResults = await Promise.allSettled(sheetUrls.map(url => mwg.Resources.load([url])));
   const missingSheets = sheetEntries.filter((_, index) => sheetResults[index]?.status !== 'fulfilled');
   const placeholderUrl = missingSheets.length ? placeholderSheet() : null;
@@ -37,6 +38,11 @@ export async function startMwgPixi(canvas, project) {
   const xpAutotileUrls = xpAutotileEntries.map(entry => entry.url);
   const xpAutotileResults = isXp ? await Promise.allSettled(xpAutotileUrls.map(url => mwg.Resources.load([url]))) : [];
   const xpAutotileSheets = isXp ? xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status === 'fulfilled').map(entry => ({ ...entry, sheet: mwg.SpriteSheet.grid(entry.url, 16) })) : [];
+  // XP's autotile layout is uniform per source image and maps directly to MWG.
+  // MV A4 mixes floor and wall tables by kind row, so it stays on the
+  // adapter's engine-faithful atlas path until MWG can express that per-kind
+  // table selection without duplicating a slot claim.
+  const nativeAutotilesReady = hasNativeAutotiles && isXp && xpAutotileSheets.length > 0;
   const playerUrl = project.assets?.characters && project.playerSprite?.name ? `${project.assets.root}/img/characters/${encodeURIComponent(project.playerSprite.name)}.png` : null;
   const eventNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.map(page => page.image?.name).filter(Boolean)))];
   const eventUrls = project.assets?.characters ? eventNames.map(name => `${project.assets.root}/img/characters/${encodeURIComponent(name)}.png`) : [];
@@ -97,7 +103,8 @@ export async function startMwgPixi(canvas, project) {
   const isAboveTile = tile => isXp
     ? Number(tileset?.priorities?.[tile] ?? 0) >= 2
     : (Number(tilesetFlags[tile] ?? 0) & 0x10) !== 0;
-  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
+  const isAutotile = tile => isXp ? tile > 0 && tile < xpStaticBase : tile >= 2048 && tile < 8192;
+  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) || (nativeAutotilesReady && isAutotile(tile)) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
   const xpAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && !isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
   const effectiveTiles = Array.from({ length: map.width * map.height }, (_, cell) => {
     for (let layer = 3; layer >= 0; layer--) {
@@ -107,8 +114,8 @@ export async function startMwgPixi(canvas, project) {
     return 0;
   });
   const aboveLayers = isXp
-    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY))
-    : [effectiveTiles.map(tile => isAboveTile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY)];
+    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) || (nativeAutotilesReady && isAutotile(tile)) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)))
+    : [effectiveTiles.map(tile => isAboveTile(tile) || (nativeAutotilesReady && isAutotile(tile)) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase))];
   const xpAboveAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
   const PlayerScene = class extends mwg.Scene2D {
     create() {
