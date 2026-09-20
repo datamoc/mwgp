@@ -174,6 +174,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ changeArmor: { id: 1, amount: 1 } }, 'applyInventory'],
     [{ changeParty: { actorId: 1, add: true } }, 'applyInventory'],
     [{ setTransparent: true }, 'setTransparent'],
+    [{ setTransparent: { target: 'event:1', value: true } }, 'setTransparent'],
     [{ routeThrough: { target: 'event:1', value: true } }, 'setRouteThrough'],
     [{ eraseEvent: true }, 'eraseEvent'],
     [{ script: 'x' }, 'unsupportedCommand'],

@@ -368,9 +368,13 @@ function convertCommand(command, context = {}) {
       else if (step.code === 15) { const wait = { wait: Number(step.parameters?.[0] || 0) / 60 }; commands.push(wait); repeatableSteps.push(wait); }
       else if (step.code === 27 || step.code === 28) { routeOnly = false; commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 }); }
       else if (step.code === 37 || step.code === 38) { routeOnly = false; commands.push({ routeThrough: { target: routeTarget, value: step.code === 37 } }); }
-      else if (step.code === 39) { routeOnly = false; commands.push({ setTransparent: true }); }
-      else if (step.code === 40) { routeOnly = false; commands.push({ setTransparent: false }); }
-      else if (step.code === 42) { routeOnly = false; commands.push({ setTransparent: Math.max(0, Math.min(1, Number(step.parameters?.[0] ?? 255) / 255)) }); }
+      else if (step.code === 39 || step.code === 40 || step.code === 42) {
+        routeOnly = false;
+        const value = step.code === 42
+          ? Math.max(0, Math.min(1, Number(step.parameters?.[0] ?? 255) / 255))
+          : step.code === 39;
+        commands.push({ setTransparent: routeTarget === 'player' ? value : { target: routeTarget, value } });
+      }
       else if (step.code === 44) {
         routeOnly = false;
         const se = step.parameters?.[0];

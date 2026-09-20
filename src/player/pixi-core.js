@@ -858,10 +858,13 @@ export async function startMwgPixi(canvas, project) {
     setTransparent(transparent) {
       // MV draws a transparent player at reduced opacity rather than hiding it.
       // Route opacity steps (code 42) carry an exact alpha instead of the flag.
-      if (!this.player) return;
-      this.player.alpha = typeof transparent === 'number'
-        ? Math.max(0, Math.min(1, transparent))
-        : (transparent ? 160 / 255 : 1);
+      const target = transparent && typeof transparent === 'object' ? String(transparent.target || 'player') : 'player';
+      const value = transparent && typeof transparent === 'object' ? transparent.value : transparent;
+      const alpha = typeof value === 'number' ? Math.max(0, Math.min(1, value)) : (value ? 160 / 255 : 1);
+      if (target === 'player') { if (this.player) this.player.alpha = alpha; return; }
+      const eventId = target.startsWith('event:') ? target.slice(6) : '';
+      const item = (this.eventSprites || []).find(entry => String(entry.event.id) === eventId);
+      if (item) item.sprite.alpha = alpha;
     }
     eraseEvent() {
       const event = this.currentEvent;
