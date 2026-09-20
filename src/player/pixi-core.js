@@ -34,7 +34,7 @@ export async function startMwgPixi(canvas, project) {
   const loadResource = url => {
     let timer;
     return Promise.race([
-      mwg.Resources.load([url]),
+      Promise.resolve().then(() => mwg.Resources.load([url])),
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`asset load timeout: ${url}`)), 12000); })
     ]).finally(() => clearTimeout(timer));
   };
@@ -200,7 +200,7 @@ export async function startMwgPixi(canvas, project) {
       this.mapRuntime = {};
       this.pendingRuntimeState = null;
       this.currentEvent = null;
-      this.rgss = createRgssRuntime(this, { mapId: mapEntry.id, mapEvents: mapEntry.mwgEvents || [] });
+      this.rgss = createRgssRuntime(this, { mapId: mapEntry.id, mapEvents: mapEntry.mwgEvents || [], mapSize: { width: map.width, height: map.height }, library: project.rubyLibrary, dialect: isXp ? 'rgss' : 'mv' });
       this.shake = null;
       this.saves = new mwg.SaveSystem({ namespace: `mwgp:${project.source?.projectName || 'project'}`, version: 1 });
       const transition = this.saves.load('runtime-transition');
@@ -541,7 +541,7 @@ export async function startMwgPixi(canvas, project) {
     presentDialogue(request) {
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 126, pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker ?? this.rgss?.speaker() }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
+        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 126, pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -1496,7 +1496,8 @@ export function prepareEventCommands(commands, scene) {
     if (command.changeState !== undefined || command.recoverAll !== undefined || command.changeSkill !== undefined || command.changeEquipment !== undefined || command.changeProfile !== undefined) return { call: state => scene.applyActor(state, command) };
     if (command.setTransparent !== undefined) return { call: () => scene.setTransparent(command.setTransparent) };
     if (command.eraseEvent) return { call: () => scene.eraseEvent() };
-    if (command.script !== undefined && (command.js !== undefined || command.error !== undefined)) return { call: state => scene.runScript({ ruby: command.script, js: command.js, error: command.error }, state) };
+    // XP scripts arrive transpiled (`js`); MV/MZ scripts are JavaScript in `script` itself.
+    if (command.script !== undefined && (command.js !== undefined || command.error !== undefined || command.mv === true)) return { call: state => scene.runScript({ source: command.script, js: command.js, error: command.error }, state) };
     if (command.script !== undefined) return { call: () => scene.unsupportedCommand('script', command.script) };
     if (command.pluginCommand) return { call: () => scene.unsupportedCommand('pluginCommand', command.pluginCommand.raw) };
     if (command.turn) return { call: () => typeof command.turn === 'object' ? scene.turnRoute(command.turn) : scene.turnPlayer(command.turn) };
