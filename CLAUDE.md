@@ -167,6 +167,22 @@ manifest for `?id=`, then tries the real player and falls back on failure:
   It duplicates a small, simplified slice of MV command interpretation directly rather than
   sharing code with the converter or the Pixi player.
 
+### XP/VX/Ace event scripts (Ruby in events)
+
+The Ruby that RGSS events embed (Call Script 355/655, Conditional Branch > Script)
+is a small subset, transpiled per snippet — separate from the whole-corpus
+`Scripts.rxdata` bundling effort. `tools/rgss-snippet.mjs` runs each unique snippet through
+the vendored Ruby2JS self-host build; `convert-rgss.js` emits `{ script, js }` commands and
+`{ if: { script: { ruby, js } } }` conditions (a failed snippet keeps `error` and stays a loud
+warning). `src/player/rgss-script.js` (served at `/rgss-script.js`, dynamically imported by
+`startMwgPixi`) runs the JS in a `with` scope shimming `$game_switches`, `$game_variables`,
+`$game_self_switches`, `get_self`/`get_character`, `setTempSwitchOn`, `$bag`, `$stats`,
+`pbMessage`/`pbExclaim`/`pbWalk*`/dialogue portraits; every other name is a stub that warns
+once and returns undefined. Ruby2JS strips `?`/`!` suffixes and turns paren-less zero-arg
+receiver calls into property reads, so the shim names predicates without the suffix and uses
+getters. Both Pokémon Void games transpile 100% of their event scripts; `npm test` runs real
+snippets through the shim.
+
 ### Why `4MWG/` exists
 
 `4MWG/` (gitignored) holds notes on gaps in `mw_games` that this player currently works around

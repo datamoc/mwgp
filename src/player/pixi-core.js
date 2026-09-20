@@ -1,4 +1,6 @@
 export async function startMwgPixi(canvas, project) {
+  // Loaded here rather than statically so prepareEventCommands stays importable from Node.
+  const { createRgssRuntime } = await import(`/rgss-script.js?v=${Date.now()}`);
   const mwg = globalThis.mw_games;
   if (!mwg?.Game || !mwg?.Scene2D || !mwg?.TileMap || !mwg?.SpriteSheet) throw new Error('mw_games 2D runtime is unavailable');
   const mapEntry = project.maps.find(map => map.id === Number(project.initialMapId)) || project.maps[0];
@@ -115,8 +117,8 @@ export async function startMwgPixi(canvas, project) {
     return 0;
   });
   const aboveLayers = isXp
-    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) || (nativeAutotilesReady && isAutotile(tile)) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)))
-    : [effectiveTiles.map(tile => isAboveTile(tile) || (nativeAutotilesReady && isAutotile(tile)) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase))];
+    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) && !(nativeAutotilesReady && isAutotile(tile)) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY))
+    : [effectiveTiles.map(tile => isAboveTile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY)];
   const xpAboveAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
   const PlayerScene = class extends mwg.Scene2D {
     create() {
@@ -187,6 +189,7 @@ export async function startMwgPixi(canvas, project) {
       this.mapRuntime = {};
       this.pendingRuntimeState = null;
       this.currentEvent = null;
+      this.rgss = createRgssRuntime(this, { mapId: mapEntry.id, mapEvents: mapEntry.mwgEvents || [] });
       this.shake = null;
       this.saves = new mwg.SaveSystem({ namespace: `mwgp:${project.source?.projectName || 'project'}`, version: 1 });
       const transition = this.saves.load('runtime-transition');
@@ -217,8 +220,10 @@ export async function startMwgPixi(canvas, project) {
       this.windows = new mwg.WindowStack();
       this.stage.addChild(this.windows);
       this.windows.setViewport(game.width, game.height);
-      this.player = playerSheet ? new mwg.AnimatedSprite() : new mwg.TintedSprite({ texture: mwg.Resources.texture(sheetUrls[0]) });
-      if (playerSheet) (isXp ? addXpCharacterAnimations : addCharacterAnimations)(this.player, playerSheet, project.playerSprite.index || 0, playerGeom.big);
+      const playerIndex = Number(project.playerSprite?.index) || 0;
+      const initialPlayerTexture = playerSheet?.get(characterCellIndex(playerGeom, playerIndex, 2, 1));
+      this.player = playerSheet ? new mwg.AnimatedSprite({ texture: initialPlayerTexture }) : new mwg.TintedSprite({ texture: mwg.Resources.texture(sheetUrls[0]) });
+      if (playerSheet) (isXp ? addXpCharacterAnimations : addCharacterAnimations)(this.player, playerSheet, playerIndex, playerGeom.big);
       this.playerSize = playerSheet ? characterPixelSize(playerGeom, tileSize) : { w: tileSize, h: tileSize, shift: 0 };
       this.player.width = this.playerSize.w; this.player.height = this.playerSize.h; this.player.tint = 0xffffff;
       this.player.zIndex = characterDepth(position.y, 1);
@@ -525,7 +530,7 @@ export async function startMwgPixi(canvas, project) {
     presentDialogue(request) {
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 126, pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
+        const box = new mwg.MessageBox({ width: Math.max(320, game.width - 48), height: 126, pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker ?? this.rgss?.speaker() }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -704,7 +709,7 @@ export async function startMwgPixi(canvas, project) {
       if (!route || route.target === 'player') { this.turnPlayer(route?.direction || route); return; }
       const eventId = String(route.target || '').startsWith('event:') ? String(route.target).slice(6) : '';
       const event = (mapEntry?.mwgEvents || []).find(candidate => String(candidate.id) === eventId);
-      if (event) event.facing = route.direction;
+      if (event) { event.facing = route.direction; this.refreshEventSprites(); }
     }
     presentScroll(scroll) {
       // MV scrolls lines upward full-screen; the widget has no scroller, so the
@@ -997,6 +1002,9 @@ export async function startMwgPixi(canvas, project) {
       this.shake = { power: Math.max(0, power), until: Date.now() + duration * 1000 };
       return wait ? new Promise(resolve => setTimeout(resolve, duration * 1000)) : Promise.resolve();
     }
+    // Event-script Ruby (XP/VX/Ace) that the converter transpiled to JS; see rgss-script.js.
+    runScript(script, state) { return this.rgss.run(script, state, this.currentEvent); }
+    evalScriptCondition(script, state) { return this.rgss.evaluate(script, state, this.currentEvent); }
     unsupportedCommand(kind, detail) {
       // MV script/plugin commands execute RPG Maker's own Ruby/JS context, which
       // a converted manifest cannot carry: warn loudly instead of pretending.
@@ -1417,6 +1425,10 @@ export class JumpSignal extends Error {
 // a stub scene. The browser entry point is unaffected (it uses startMwgPixi).
 export function prepareEventCommands(commands, scene) {
   return (commands || []).map(command => {
+    if (command.if?.script) return { call: async state => {
+      const matches = scene.evalScriptCondition(command.if.script, state);
+      await scene.runBranch(prepareEventCommands(matches ? command.then : command.else, scene));
+    } };
     if (command.if?.operator) return { call: async state => {
       const condition = command.if;
       const left = Number(state.game.variable(String(condition.variable)) || 0);
@@ -1473,6 +1485,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.changeState !== undefined || command.recoverAll !== undefined || command.changeSkill !== undefined || command.changeEquipment !== undefined || command.changeProfile !== undefined) return { call: state => scene.applyActor(state, command) };
     if (command.setTransparent !== undefined) return { call: () => scene.setTransparent(command.setTransparent) };
     if (command.eraseEvent) return { call: () => scene.eraseEvent() };
+    if (command.script !== undefined && (command.js !== undefined || command.error !== undefined)) return { call: state => scene.runScript({ ruby: command.script, js: command.js, error: command.error }, state) };
     if (command.script !== undefined) return { call: () => scene.unsupportedCommand('script', command.script) };
     if (command.pluginCommand) return { call: () => scene.unsupportedCommand('pluginCommand', command.pluginCommand.raw) };
     if (command.turn) return { call: () => typeof command.turn === 'object' ? scene.turnRoute(command.turn) : scene.turnPlayer(command.turn) };

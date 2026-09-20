@@ -178,6 +178,8 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ routeThrough: { target: 'event:1', value: true } }, 'setRouteThrough'],
     [{ eraseEvent: true }, 'eraseEvent'],
     [{ script: 'x' }, 'unsupportedCommand'],
+    [{ script: 'x', js: 'y' }, 'runScript'],
+    [{ if: { script: { ruby: 'x', js: 'return 1;' } }, then: [], else: [] }, 'evalScriptCondition'],
     [{ pluginCommand: { raw: 'A b', name: 'A', args: ['b'] } }, 'unsupportedCommand'],
     [{ turn: 'up' }, 'turnPlayer'],
     [{ copyVariable: '1', variable: '2' }, 'copyVariable'],
@@ -196,6 +198,41 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     if (typeof prepared[0]?.call !== 'function') { fail(`${Object.keys(command)[0]} did not prepare to a call`); continue; }
     await prepared[0].call(state);
     if (calls[0]?.[0] !== expected) fail(`${Object.keys(command)[0]} routed to ${calls[0]?.[0] || 'nothing'}, expected ${expected}`);
+  }
+  // RGSS event-script runtime: real Ruby snippets from XP events, transpiled by
+  // tools/rgss-snippet.mjs and executed against the shim with a fake scene.
+  {
+    const { transpileSnippet } = await import(pathToFileURL(join(root, 'tools', 'rgss-snippet.mjs')).href);
+    const { createRgssRuntime } = await import(pathToFileURL(join(root, 'src', 'player', 'rgss-script.js')).href);
+    const switches = new Map(), variables = new Map(), played = [];
+    const game = { switch: k => switches.get(k) === true, setSwitch: (k, v) => switches.set(k, v), variable: k => variables.get(k) || 0, setVariable: (k, v) => variables.set(k, v) };
+    const scene = { rpgExtra: { items: {} }, mover: { x: 2, y: 2 }, facing: 'down',
+      showBalloon: b => played.push(['balloon', b.target, b.balloon]), presentDialogue: r => played.push(['say', r.text]),
+      runMoveRoute: (t, steps) => played.push(['walk', t, steps.length]) };
+    const events = [{ id: 5, x: 2, y: 2 }, { id: 7, x: 4, y: 2 }];
+    const rgss = createRgssRuntime(scene, { mapId: 3, mapEvents: events });
+    const run = async (ruby, event = events[0]) => rgss.run({ ruby, ...transpileSnippet(ruby, 'call') }, { game }, event);
+    const test = (ruby, event = events[0]) => rgss.evaluate({ ruby, ...transpileSnippet(ruby, 'cond') }, { game }, event);
+    const originalWarn = console.warn; const warnings = []; console.warn = (...a) => warnings.push(a[0]);
+    try {
+      await run(['$game_switches[7] = true', '$game_variables[2] += 3', 'setTempSwitchOn("A")'].join('\n'));
+      await run(['$bag.add(:POTION)', '$stats.drinks_bought += 1', 'pbExclaim($game_map.events[7])', 'pbMessage("hi")', 'pbWalkCharacterTo(7, 4, 4, true)'].join('\n'));
+      await run('TrainerBattle.start(:LASS, "Amy")');
+      const checks = [
+        [switches.get('7') === true, '$game_switches[7] = true'],
+        [variables.get('2') === 3, '$game_variables[2] += 3'],
+        [switches.get('self:3:5:A') === true, 'setTempSwitchOn writes the self:map:event:ch switch'],
+        [scene.rpgExtra.items.POTION === 1, '$bag.add'],
+        [scene.rpgExtra.rgss?.stats?.drinks_bought === 1, '$stats counter'],
+        [JSON.stringify(played) === JSON.stringify([['balloon', 7, 1], ['say', 'hi'], ['walk', 'event:7', 2]]), 'queued waits play in call order'],
+        [warnings.some(w => String(w).includes('TrainerBattle.start')), 'an unimplemented call warns loudly'],
+        [test('$bag.has?(:POTION)') === true && test('$bag.has?(:ETHER)') === false, 'cond over $bag.has?'],
+        [test('get_self.onEvent?') === true && test('get_self.onEvent?', events[1]) === false, 'get_self.onEvent?'],
+        [test('$game_variables[2] >= 3 && $game_switches[7]') === true, 'cond over switches/variables']
+      ];
+      for (const [ok, label] of checks) if (!ok) fail(`rgss runtime: ${label}`);
+      if (checks.every(([ok]) => ok)) notes.push(`rgss script runtime ok (${checks.length} checks)`);
+    } finally { console.warn = originalWarn; }
   }
   // Control-flow sentinels and native passthrough.
   for (const command of [[{ breakLoop: true }], [{ exitEvent: true }]]) {

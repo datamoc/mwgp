@@ -106,6 +106,10 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
     return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'pixi-core.js'))));
   }
+  if (url.pathname === '/rgss-script.js') {
+    res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'rgss-script.js'))));
+  }
   if (url.pathname === '/mwg.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
     return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'node_modules', '@datamoc', 'mw_games', 'dist', 'mw_games.global.js'))));

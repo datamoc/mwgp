@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { decodeMarshal } from '@datamoc/mw_games/rpg';
+import { transpileSnippet } from './rgss-snippet.mjs';
 
 const [, , extractedArg, outputArg] = process.argv;
 if (!extractedArg || !outputArg) {
@@ -42,6 +43,24 @@ function tableData(value) {
 // cancel branch, and 118/119 are labels/jumps. The parser below mirrors
 // convert-mv.js's parseBlock, including its terminator-by-(code, indent) rule.
 const commandCounts = new Map();
+
+// Ruby embedded in events (355/655 Call Script, 111 branch type 12) is
+// transpiled to JS once per unique source; the manifest keeps the Ruby text
+// next to the JS so a failed snippet stays diagnosable and loud at run time.
+const scriptStats = { total: 0, transpiled: 0, failed: new Map() };
+const snippetCache = new Map();
+function convertScript(ruby, kind) {
+  const key = `${kind}:${ruby}`;
+  if (!snippetCache.has(key)) {
+    const result = transpileSnippet(ruby, kind);
+    snippetCache.set(key, result);
+    if (result.error) scriptStats.failed.set(ruby, result.error);
+  }
+  scriptStats.total++;
+  const result = snippetCache.get(key);
+  if (!result.error) scriptStats.transpiled++;
+  return result.error ? { ruby, error: result.error } : { ruby, js: result.js };
+}
 const commonEvents = new Map();
 
 function selfSwitchKey(mapId, eventId, ch) {
@@ -78,6 +97,9 @@ function convertBranchCondition(parameters, mapId, eventId) {
     return { variable: String(parameters[1]), operator, compareVariable: String(parameters[3]) };
   }
   if (parameters[0] === 2) return { switch: selfSwitchKey(mapId, eventId, parameters[1] || 'A'), equals: parameters[2] === 0 };
+  // Type 12 is a Ruby expression ("Script" in the branch dialog); it runs in
+  // the player's RGSS shim rather than mapping onto a fixed MWGP condition.
+  if (parameters[0] === 12) return { script: convertScript(String(parameters[1] ?? ''), 'cond') };
   return null;
 }
 
@@ -205,7 +227,7 @@ function convertCommands(list, context = {}) {
           index++;
           script += '\n' + (list[index].parameters?.[0] || '');
         }
-        result.push({ script });
+        result.push({ script, ...(({ js, error }) => js !== undefined ? { js } : { error })(convertScript(script, 'call')) });
         index++;
         continue;
       }
@@ -636,7 +658,8 @@ const manifest = {
   assets: { root: 'assets', kind: 'decoded', ...assetAvailability, faces: false, encryption: 'rgssad-extracted' },
   tilesets, playerSprite, characterFrames, playerMetadata: playerMetadataValues.map(value => ({
     id: Number(field(value, 'id', 0)), trainerType: field(value, 'trainer_type', ''), walkCharset: field(value, 'walk_charset', ''), runCharset: field(value, 'run_charset', ''), cycleCharset: field(value, 'cycle_charset', ''), surfCharset: field(value, 'surf_charset', '')
-  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts) }, maps, database: {}
+  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })) } }, maps, database: {}
 };
 await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest, null, 2));
+console.log(`Event scripts: ${scriptStats.transpiled}/${scriptStats.total} transpiled to JS${scriptStats.failed.size ? `, ${scriptStats.failed.size} unique failed (see compatibility.scripts.failed)` : ''}`);
 console.log(`Converted ${maps.length} XP maps to ${join(output, 'mwgp.json')}`);

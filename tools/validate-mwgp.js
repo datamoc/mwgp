@@ -90,12 +90,15 @@ function validateCommands(commands, eventId, mapId) {
     commandCount++;
     check(Object.keys(command).some(key => allowed.has(key)), `unsupported command in event ${eventId} on map ${mapId}`);
     if (command.if) {
-      check(command.if.switch || command.if.variable, `if command in event ${eventId} on map ${mapId} has no supported condition`);
+      check(command.if.switch || command.if.variable || command.if.script, `if command in event ${eventId} on map ${mapId} has no supported condition`);
       if (command.if.operator) check(['eq', 'neq', 'gte', 'lte', 'gt', 'lt'].includes(command.if.operator),
         `if command in event ${eventId} on map ${mapId} has an invalid variable operator`);
+      if (command.if.script) check(typeof command.if.script.ruby === 'string' && (typeof command.if.script.js === 'string' || typeof command.if.script.error === 'string'),
+        `script condition in event ${eventId} on map ${mapId} needs ruby plus js or error`);
       validateCommands(command.then || [], eventId, mapId);
       validateCommands(command.else || [], eventId, mapId);
     }
+    if (command.script !== undefined && command.js !== undefined) check(typeof command.js === 'string', `script in event ${eventId} on map ${mapId} has a non-string js`);
     if (command.loop) validateCommands(command.loop, eventId, mapId);
     if (command.branches) {
       for (const branch of command.branches) validateCommands(branch || [], eventId, mapId);
