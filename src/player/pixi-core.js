@@ -538,7 +538,7 @@ export async function startMwgPixi(canvas, project) {
       let facing = isPlayer ? this.facing : (event.facing || 'down');
       const coordinate = () => isPlayer ? { x: this.mover.x, y: this.mover.y } : { x: event.x, y: event.y };
       for (const step of steps || []) {
-        const resolved = resolveRouteStep(step, facing);
+        const resolved = resolveRouteStep(step, facing, coordinate(), isPlayer ? null : { x: this.mover.x, y: this.mover.y });
         if (!resolved) continue;
         if (resolved.dx === undefined && resolved.dy === undefined && !resolved.jump) continue;
         if (resolved.turn) { facing = resolved.turn; if (!isPlayer) event.facing = facing; else this.turnPlayer(facing); continue; }
@@ -1248,7 +1248,7 @@ function pictureToneColor(tone) {
 // scene) so tools/test-smoke.mjs can cover the descriptor table in Node.
 // Returns { dx, dy }, { jump } or null (degenerate/unknown: toward/away from
 // the player itself when the route target is the player).
-export function resolveRouteStep(step, facing) {
+export function resolveRouteStep(step, facing, origin = null, target = null) {
   if (!step || typeof step !== 'object') return null;
   if (Number.isFinite(step.dx) && Number.isFinite(step.dy)) return { dx: step.dx, dy: step.dy };
   if (step.jump && Number.isFinite(step.jump.dx) && Number.isFinite(step.jump.dy)) {
@@ -1264,6 +1264,13 @@ export function resolveRouteStep(step, facing) {
   const [fx, fy] = vectors[facing] || [0, 1];
   if (step.forward) return { dx: fx, dy: fy };
   if (step.backward) return { dx: -fx, dy: -fy };
+  if ((step.toward || step.away) && origin && target) {
+    const sign = step.toward ? 1 : -1;
+    const dx = target.x - origin.x, dy = target.y - origin.y;
+    return Math.abs(dx) >= Math.abs(dy)
+      ? { dx: sign * Math.sign(dx), dy: 0 }
+      : { dx: 0, dy: sign * Math.sign(dy) };
+  }
   return null;
 }
 

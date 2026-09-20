@@ -248,6 +248,8 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
       break;
     }
   }
+  const toward = resolveRouteStep({ toward: true }, 'down', { x: 2, y: 2 }, { x: 4, y: 2 });
+  if (JSON.stringify(toward) !== JSON.stringify({ dx: 1, dy: 0 })) { fail('resolveRouteStep toward did not close on the player'); stepFailures++; }
   if (!stepFailures) notes.push('resolveRouteStep descriptor table ok');
 
   // 5c: autotile source math and character frame geometry (engine rules the

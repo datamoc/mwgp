@@ -353,7 +353,7 @@ function convertCommand(command, context = {}) {
         5: { dx: -1, dy: 1 }, 6: { dx: 1, dy: 1 }, 7: { dx: -1, dy: -1 }, 8: { dx: 1, dy: -1 },
         9: { random: true }, 12: { forward: true }, 13: { backward: true }
       }[step.code];
-      // 10/11 (toward/away from player) are degenerate for a player target.
+      const relative = { 10: { toward: true }, 11: { away: true } }[step.code];
       const jump = step.code === 14 ? { jump: { dx: Number(step.parameters?.[0] || 0), dy: Number(step.parameters?.[1] || 0) } } : null;
       const turn = {
         16: 'down', 17: 'left', 18: 'right', 19: 'up', 20: 'right90', 21: 'left90',
@@ -361,6 +361,7 @@ function convertCommand(command, context = {}) {
       }[step.code];
       if (movement) commands.push({ move: { target: routeTarget, steps: [movement] } });
       else if (jump) commands.push({ move: { target: routeTarget, steps: [jump] } });
+      else if (relative) commands.push({ move: { target: routeTarget, steps: [relative] } });
       else if (turn) commands.push(routeTarget === 'player' ? { turn } : { turn: { target: routeTarget, direction: turn } });
       else if (step.code === 15) commands.push({ wait: Number(step.parameters?.[0] || 0) / 60 });
       else if (step.code === 27 || step.code === 28) commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 });
