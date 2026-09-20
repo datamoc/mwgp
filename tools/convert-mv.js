@@ -701,8 +701,8 @@ function decodeRpgmAsset(bytes, name, encryptionKey) {
 function buildCompatibilityReport(counts) {
   const supported = new Set([
     0, 101, 102, 105, 108, 111, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129,
-    135, 201, 203, 204, 211, 212, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
-    244, 245, 246, 249, 250, 251, 313, 314, 318, 319, 322, 351, 352,
+    201, 203, 204, 211, 212, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
+    244, 245, 246, 249, 250, 251, 313, 314, 318, 319, 322,
     401, 402, 403, 404, 405, 408, 411, 412, 413, 505, 601, 602, 603, 604, 655
   ]);
   // 108 (Comment) and 505 (a Set Movement Route step's editor-only sibling entry, already
@@ -717,6 +717,8 @@ function buildCompatibilityReport(counts) {
   // so doing nothing is the correct conversion.
   // 355/356 are preserved as loud runtime warnings, but arbitrary RPG Maker
   // JavaScript and plugin APIs cannot execute outside the original engine.
+  // 135/351/352 likewise request menu/save scenes that the browser player does
+  // not implement; they remain preserved as loud runtime warnings.
   const partial = new Set([122, 205, 301]);
   return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
     count,
