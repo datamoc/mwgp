@@ -258,7 +258,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
   // 5c: autotile source math and character frame geometry (engine rules the
   // converter measures and the player renders by; see rpg_core.js Tilemap
   // and rpg_sprites.js Sprite_Character).
-  const { autotileSource, autotileDrawOps, characterGeometry, characterCellIndex, characterPixelSize } =
+  const { autotileSource, autotileDrawOps, characterDepth, characterGeometry, characterCellIndex, characterPixelSize } =
     await import(pathToFileURL(join(root, 'src', 'player', 'pixi-core.js')).href);
   const expect = (actual, wanted, label) => {
     if (JSON.stringify(actual) !== JSON.stringify(wanted)) fail(`${label}: got ${JSON.stringify(actual)}, want ${JSON.stringify(wanted)}`);
@@ -290,6 +290,8 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
   expect(characterCellIndex({ big: true }, 5, 8, 2), 11, 'characterCellIndex big sheet ignores index');
   expect(characterPixelSize({ fw: 60, fh: 60, object: false }, 48), { w: 60, h: 60, shift: 6 }, 'characterPixelSize shift');
   expect(characterPixelSize({ fw: 60, fh: 80, object: true }, 48), { w: 60, h: 80, shift: 0 }, 'characterPixelSize object');
+  expect(characterDepth(4), 4000, 'characterDepth row');
+  expect(characterDepth(4, 1), 4001, 'characterDepth tie breaker');
   notes.push('autotile + character geometry helpers ok');
 }
 

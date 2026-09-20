@@ -127,16 +127,24 @@ export async function startMwgPixi(canvas, project) {
         this.stage.addChild(this.camera.world);
       }
       const world = this.camera?.world || this.stage;
+      // RPG Maker sorts character sprites by their feet position, not by the
+      // order in which events happen to appear in the JSON. Keep the map's
+      // priority layer above characters and let the character layer sort by
+      // depth as actors move.
+      this.world = world;
+      world.sortableChildren = true;
       layers.forEach((data, index) => {
         this.tileMap.addLayer(`rpgm-${index}`, data);
         if (isXp && xpAutotileSheets.length) this.tileMap.addAutotileLayer(`rpgm-xp-${index}`, xpAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
       });
       world.addChild(this.tileMap);
+      this.tileMap.zIndex = 0;
       this.aboveMap = new mwg.TileMap({ width: map.width, height: map.height, sheet: sheets, tileWidth: tileSize, tileHeight: tileSize });
       aboveLayers.forEach((data, index) => {
         this.aboveMap.addLayer(`rpgm-above-${index}`, data);
         if (isXp && xpAutotileSheets.length) this.aboveMap.addAutotileLayer(`rpgm-xp-above-${index}`, xpAboveAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
       });
+      this.aboveMap.zIndex = 1000000000;
       this.fog = initialFogUrl && loadedUrls.has(initialFogUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialFogUrl), width: game.width, height: game.height }) : null;
       if (this.fog) { this.fog.alpha = Math.max(0, Math.min(1, Number(mapSettings.fogOpacity ?? 0) / 255)); this.stage.addChild(this.fog); }
       // Placed directly above the map, below every sprite/window layer added further down,
@@ -182,7 +190,7 @@ export async function startMwgPixi(canvas, project) {
       // grid), feet-anchored like the engine: Sprite_Character centers x on
       // the tile and puts the sprite bottom at the tile bottom minus shiftY
       // (6px, or 0 for `!` object characters).
-      for (const event of mapEntry?.mwgEvents || []) { const page = mwg.Rpg.activePage(event, this.gameState); const image = page?.image; const sheet = image && eventSheets.get(image.name); if (!sheet) continue; const geom = eventGeoms.get(image.name); const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, image.direction, image.pattern)) }); const size = characterPixelSize(geom, tileSize); sprite.width = size.w; sprite.height = size.h; world.addChild(sprite); this.eventSprites.push({ event, sprite, ...size }); }
+      for (const event of mapEntry?.mwgEvents || []) { const page = mwg.Rpg.activePage(event, this.gameState); const image = page?.image; const sheet = image && eventSheets.get(image.name); if (!sheet) continue; const geom = eventGeoms.get(image.name); const sprite = new mwg.TintedSprite({ texture: sheet.get(characterCellIndex(geom, image.index, image.direction, image.pattern)) }); const size = characterPixelSize(geom, tileSize); sprite.width = size.w; sprite.height = size.h; sprite.zIndex = characterDepth(event.y); world.addChild(sprite); this.eventSprites.push({ event, sprite, ...size }); }
       this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } };
       window.addEventListener('keydown', this.saveKey);
       this.dialogue = null;
@@ -198,6 +206,7 @@ export async function startMwgPixi(canvas, project) {
       if (playerSheet) (isXp ? addXpCharacterAnimations : addCharacterAnimations)(this.player, playerSheet, project.playerSprite.index || 0, playerGeom.big);
       this.playerSize = playerSheet ? characterPixelSize(playerGeom, tileSize) : { w: tileSize, h: tileSize, shift: 0 };
       this.player.width = this.playerSize.w; this.player.height = this.playerSize.h; this.player.tint = 0xffffff;
+      this.player.zIndex = characterDepth(position.y, 1);
       world.addChild(this.player);
       world.addChild(this.aboveMap);
       this.pictureLayer = new mwg.Container2D();
@@ -205,6 +214,7 @@ export async function startMwgPixi(canvas, project) {
       this.pictureSprites = new Map();
       this.pictureTweens = new Map();
       this.overlayLayer = new mwg.Container2D();
+      this.overlayLayer.zIndex = 1000000001;
       world.addChild(this.overlayLayer);
       this.overlayAnims = [];
       this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
@@ -270,8 +280,8 @@ export async function startMwgPixi(canvas, project) {
       }
       // this.renderPosition reads the mover's map-space sprite pos (tile
       // top-left units), so fractional movement positions anchor correctly here.
-      this.player.x = x * scale + (scale - this.playerSize.w) / 2 + this.tileMap.x; this.player.y = y * scale + scale - this.playerSize.h - this.playerSize.shift + this.tileMap.y;
-      for (const item of this.eventSprites || []) { item.sprite.x = item.event.x * scale + (scale - item.w) / 2 + this.tileMap.x; item.sprite.y = item.event.y * scale + scale - item.h - item.shift + this.tileMap.y; }
+      this.player.x = x * scale + (scale - this.playerSize.w) / 2 + this.tileMap.x; this.player.y = y * scale + scale - this.playerSize.h - this.playerSize.shift + this.tileMap.y; this.player.zIndex = characterDepth(y, 1);
+      for (const item of this.eventSprites || []) { item.sprite.x = item.event.x * scale + (scale - item.w) / 2 + this.tileMap.x; item.sprite.y = item.event.y * scale + scale - item.h - item.shift + this.tileMap.y; item.sprite.zIndex = characterDepth(item.event.y); }
     }
     updateCameraPan(dt) {
       const tween = this.panTween;
@@ -1462,6 +1472,13 @@ function addCharacterAnimations(sprite, sheet, characterIndex, big) {
     sprite.add(`walk-${direction}`, [sheet.get(first), sheet.get(first + 1), sheet.get(first + 2)], { fps: 8 });
   }
   sprite.play('idle-down');
+}
+
+// Use a large separation between rows so the optional tie-breaker keeps the
+// player above an event standing on exactly the same tile, matching the stable
+// insertion order of the original map scene.
+export function characterDepth(y, tieBreaker = 0) {
+  return Number(y || 0) * 1000 + Number(tieBreaker || 0);
 }
 
 // Frame geometry for one character sheet, from the manifest's characterFrames
