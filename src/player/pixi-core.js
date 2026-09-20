@@ -160,6 +160,8 @@ export async function startMwgPixi(canvas, project) {
       if (this.screenEffects) this.stage.addChild(this.screenEffects);
       mwg.Input.attach();
       this.cooldown = 0;
+      this.autotileFrame = 0;
+      this.autotileElapsed = 0;
       this.messageOptions = { position: 2, frame: 0 };
       this.music = music;
       this.ambience = ambience;
@@ -270,6 +272,17 @@ export async function startMwgPixi(canvas, project) {
       this.updatePictures(dt);
       this.updateOverlayAnims(dt);
       this.updateCameraPan(dt);
+      if (nativeAutotilesReady) {
+        this.autotileElapsed += dt;
+        if (this.autotileElapsed >= 0.5) {
+          this.autotileElapsed %= 0.5;
+          this.autotileFrame++;
+          for (let index = 0; index < 4; index++) {
+            this.tileMap.setAutotileFrame(`rpgm-xp-${index}`, this.autotileFrame);
+            this.aboveMap.setAutotileFrame(`rpgm-xp-above-${index}`, this.autotileFrame);
+          }
+        }
+      }
       if (this.dialogue) return;
       this.parallelTimer -= dt;
       if (this.parallelTimer <= 0 && !this.eventRunning) { this.runParallelEvents(); this.parallelTimer = 0.25; }
