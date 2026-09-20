@@ -323,6 +323,11 @@ export async function startMwgPixi(canvas, project) {
       this.music?.update(dt);
       this.ambience?.update(dt);
       this.screenEffects?.update(dt);
+      // AnimatedSprite deliberately does not advance itself: MWG expects the
+      // owning scene (or a SpriteGroup) to provide the frame delta. Without
+      // this call the player keeps the texture selected at construction time,
+      // even though GridMover changes the walk/idle animation name correctly.
+      this.player?.update(dt);
       this.updatePictures(dt);
       this.updateOverlayAnims(dt);
       this.updateCameraPan(dt);
