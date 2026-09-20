@@ -533,10 +533,12 @@ export async function startMwgPixi(canvas, project) {
     }
     startMoveRoute(route) {
       const key = String(route.target || 'player');
-      if (this.backgroundRoutes.has(key)) return this.backgroundRoutes.get(key);
-      const task = this.runMoveRoute(route.target, route.steps, route).finally(() => this.backgroundRoutes.delete(key));
+      if (this.backgroundRoutes.has(key)) return undefined;
+      const task = this.runMoveRoute(route.target, route.steps, route)
+        .catch(error => console.error(`MWGP background movement route failed for ${key}`, error))
+        .finally(() => this.backgroundRoutes.delete(key));
       this.backgroundRoutes.set(key, task);
-      return task;
+      return undefined;
     }
     async runMoveRoute(target, steps, options = {}) {
       const isPlayer = target === 'player';
