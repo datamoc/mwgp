@@ -553,7 +553,16 @@ function convertCommand(command, context = {}) {
 
 function convertBranchCondition(parameters) {
   if (parameters[0] === 0) return { switch: String(parameters[1]), equals: parameters[2] === 0 };
-  if (parameters[0] === 1 && parameters[2] === 0) return { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) };
+  if (parameters[0] === 1) {
+    const operator = { 0: 'gte', 1: 'lte', 2: 'eq', 3: 'gt', 4: 'lt', 5: 'neq' }[Number(parameters[4] ?? 0)];
+    if (!operator) return null;
+    if (Number(parameters[2] || 0) === 0) {
+      return operator === 'gte'
+        ? { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) }
+        : { variable: String(parameters[1]), operator, value: Number(parameters[3] || 0) };
+    }
+    return { variable: String(parameters[1]), operator, compareVariable: String(parameters[3]) };
+  }
   return null;
 }
 

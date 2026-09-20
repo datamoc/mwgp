@@ -91,6 +91,8 @@ function validateCommands(commands, eventId, mapId) {
     check(Object.keys(command).some(key => allowed.has(key)), `unsupported command in event ${eventId} on map ${mapId}`);
     if (command.if) {
       check(command.if.switch || command.if.variable, `if command in event ${eventId} on map ${mapId} has no supported condition`);
+      if (command.if.operator) check(['eq', 'neq', 'gte', 'lte', 'gt', 'lt'].includes(command.if.operator),
+        `if command in event ${eventId} on map ${mapId} has an invalid variable operator`);
       validateCommands(command.then || [], eventId, mapId);
       validateCommands(command.else || [], eventId, mapId);
     }

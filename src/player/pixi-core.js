@@ -1263,6 +1263,15 @@ export class JumpSignal extends Error {
 // a stub scene. The browser entry point is unaffected (it uses startMwgPixi).
 export function prepareEventCommands(commands, scene) {
   return (commands || []).map(command => {
+    if (command.if?.operator) return { call: async state => {
+      const condition = command.if;
+      const left = Number(state.game.variable(String(condition.variable)) || 0);
+      const right = condition.compareVariable !== undefined
+        ? Number(state.game.variable(String(condition.compareVariable)) || 0)
+        : Number(condition.value || 0);
+      const matches = { eq: left === right, neq: left !== right, gte: left >= right, lte: left <= right, gt: left > right, lt: left < right }[condition.operator] === true;
+      await scene.runBranch(prepareEventCommands(matches ? command.then : command.else, scene));
+    } };
     if (command.if) return { ...command, then: prepareEventCommands(command.then, scene), ...(command.else ? { else: prepareEventCommands(command.else, scene) } : {}) };
     if (command.loop) return { call: () => scene.runLoop(prepareEventCommands(command.loop, scene)) };
     if (command.breakLoop) return { call: () => { throw new BreakLoopSignal(); } };

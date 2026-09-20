@@ -211,6 +211,12 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
   const native = prepareEventCommands([{ say: 'hi' }, { setSwitch: '1', value: true }, { if: { switch: '1', equals: true }, then: [{ wait: 1 }] }], stub);
   if (native[0].say !== 'hi' || native[1].setSwitch !== '1' || native[2].then[0].wait !== 1) fail('native commands were not passed through untouched');
   else notes.push(`prepareEventCommands routing ok (${routed.length} scene routes + sentinels + passthrough)`);
+  let comparisonBranch;
+  const comparisonScene = { runBranch: async commands => { comparisonBranch = commands[0]?.say; } };
+  const comparison = prepareEventCommands([{ if: { variable: '1', operator: 'gt', value: 2 }, then: [{ say: 'yes' }], else: [{ say: 'no' }] }], comparisonScene);
+  await comparison[0].call(state);
+  if (comparisonBranch !== 'yes') fail(`variable comparison selected ${comparisonBranch || 'no branch'}`);
+  else notes.push('variable comparison operators ok');
 
   // 5b: move-step descriptor table (converter emits, runMoveRoute resolves).
   const { resolveRouteStep } = await import(pathToFileURL(join(root, 'src', 'player', 'pixi-core.js')).href);

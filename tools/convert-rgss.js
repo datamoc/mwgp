@@ -67,7 +67,16 @@ function convertPageConditions(condition, mapId, eventId) {
 // branch.
 function convertBranchCondition(parameters, mapId, eventId) {
   if (parameters[0] === 0) return { switch: String(parameters[1]), equals: parameters[2] === 0 };
-  if (parameters[0] === 1 && parameters[2] === 0 && parameters[4] === 1) return { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) };
+  if (parameters[0] === 1) {
+    const operator = { 0: 'eq', 1: 'gte', 2: 'lte', 3: 'gt', 4: 'lt', 5: 'neq' }[Number(parameters[4] ?? 0)];
+    if (!operator) return null;
+    if (Number(parameters[2] || 0) === 0) {
+      return operator === 'gte'
+        ? { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) }
+        : { variable: String(parameters[1]), operator, value: Number(parameters[3] || 0) };
+    }
+    return { variable: String(parameters[1]), operator, compareVariable: String(parameters[3]) };
+  }
   if (parameters[0] === 2) return { switch: selfSwitchKey(mapId, eventId, parameters[1] || 'A'), equals: parameters[2] === 0 };
   return null;
 }
@@ -475,8 +484,9 @@ function buildCompatibilityReport(counts) {
   ]);
   // Every classification below is verified against the Interpreter section of
   // the shipped scripts, not guessed from MV's numbering: 111 is partial (only
-  // switch, constant->= variable, and self-switch branches map; ==/<=/>/</!=
-  // and variable-vs-variable tests are dropped), 116/126-129/313/315-319 are
+  // switch, all variable comparison operators, and self-switch branches map;
+  // timer/actor/other non-switch conditions remain unsupported),
+  // 116/126-129/313/315-319 are
   // supported no-ops-or-erase (116 erases the running event; the rest are
   // command_dummy in the engine itself, as is 314 with a nonzero target),
   // 122 partial (constant/random operands with set/add/subtract, variable
