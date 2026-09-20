@@ -38,11 +38,12 @@ export async function startMwgPixi(canvas, project) {
   const xpAutotileUrls = xpAutotileEntries.map(entry => entry.url);
   const xpAutotileResults = isXp ? await Promise.allSettled(xpAutotileUrls.map(url => mwg.Resources.load([url]))) : [];
   const xpAutotileSheets = isXp ? xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status === 'fulfilled').map(entry => ({ ...entry, sheet: mwg.SpriteSheet.grid(entry.url, 16) })) : [];
+  for (const entry of xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status !== 'fulfilled')) console.warn(`MWGP XP autotile '${entry.url}' is missing; keeping the compatibility path for this map`);
   // XP's autotile layout is uniform per source image and maps directly to MWG.
   // MV A4 mixes floor and wall tables by kind row, so it stays on the
   // adapter's engine-faithful atlas path until MWG can express that per-kind
   // table selection without duplicating a slot claim.
-  const nativeAutotilesReady = hasNativeAutotiles && isXp && xpAutotileSheets.length > 0;
+  const nativeAutotilesReady = hasNativeAutotiles && isXp && xpAutotileEntries.length > 0 && xpAutotileSheets.length === xpAutotileEntries.length;
   const playerUrl = project.assets?.characters && project.playerSprite?.name ? `${project.assets.root}/img/characters/${encodeURIComponent(project.playerSprite.name)}.png` : null;
   const eventNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.map(page => page.image?.name).filter(Boolean)))];
   const eventUrls = project.assets?.characters ? eventNames.map(name => `${project.assets.root}/img/characters/${encodeURIComponent(name)}.png`) : [];
