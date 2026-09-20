@@ -27,18 +27,29 @@ export async function startMwgPixi(canvas, project) {
   // Resources.load() leaves already-created frames with linear filtering and
   // can expose one-pixel seams at tile boundaries.
   const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
+  // A single broken or stalled optional asset must not hold the complete game
+  // startup hostage. The underlying request may finish later and be cached by
+  // MWG, but scene creation gets a bounded failure and can use its normal
+  // missing-asset fallback.
+  const loadResource = url => {
+    let timer;
+    return Promise.race([
+      mwg.Resources.load([url]),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`asset load timeout: ${url}`)), 12000); })
+    ]).finally(() => clearTimeout(timer));
+  };
   const hasNativeAutotiles = typeof mwg.TileMap.prototype?.addAutotileLayer === 'function';
-  const sheetResults = await Promise.allSettled(sheetUrls.map(url => mwg.Resources.load([url])));
+  const sheetResults = await Promise.allSettled(sheetUrls.map(loadResource));
   const missingSheets = sheetEntries.filter((_, index) => sheetResults[index]?.status !== 'fulfilled');
   const placeholderUrl = missingSheets.length ? placeholderSheet() : null;
-  if (placeholderUrl) await mwg.Resources.load([placeholderUrl]);
+  if (placeholderUrl) await loadResource(placeholderUrl);
   const renderSheetEntries = sheetEntries.map((entry, index) => sheetResults[index]?.status === 'fulfilled' ? entry : { ...entry, url: placeholderUrl });
   for (const entry of missingSheets) console.warn(`MWGP tileset sheet '${entry.url}' is missing; using a placeholder for slot ${entry.slot}`);
   const sheets = await Promise.all(renderSheetEntries.map(entry => entry.slot < 4
     ? buildAutotileSheet(entry.url, entry.slot, mwg, tilesetFlags)
     : Promise.resolve(mwg.SpriteSheet.grid(entry.url, tileSize))));
   const xpAutotileUrls = xpAutotileEntries.map(entry => entry.url);
-  const xpAutotileResults = isXp ? await Promise.allSettled(xpAutotileUrls.map(url => mwg.Resources.load([url]))) : [];
+  const xpAutotileResults = isXp ? await Promise.allSettled(xpAutotileUrls.map(loadResource)) : [];
   const xpAutotileSheets = isXp ? xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status === 'fulfilled').map(entry => ({ ...entry, sheet: mwg.SpriteSheet.grid(entry.url, 16) })) : [];
   for (const entry of xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status !== 'fulfilled')) console.warn(`MWGP XP autotile '${entry.url}' is missing; keeping the compatibility path for this map`);
   // XP's autotile layout is uniform per source image and maps directly to MWG.
@@ -69,7 +80,7 @@ export async function startMwgPixi(canvas, project) {
   // A project can reference an optional/plugin-generated image that is absent
   // from the distributed archive. Load each asset independently so one stale
   // reference does not discard the complete Pixi renderer.
-  const loadResults = await Promise.allSettled(optionalUrls.map(url => mwg.Resources.load([url])));
+  const loadResults = await Promise.allSettled(optionalUrls.map(loadResource));
   const loadedUrls = new Set(optionalUrls.filter((_, index) => loadResults[index].status === 'fulfilled'));
   // Character sheets are sliced by the converter-measured frame geometry
   // (manifest characterFrames), never by assuming 48px cells: the engine's
@@ -513,7 +524,7 @@ export async function startMwgPixi(canvas, project) {
       const previous = settings.kind === 'panorama' ? this.panorama : this.fog;
       if (previous) { this.stage.removeChild(previous); previous.destroy?.(); }
       if (!url) { if (settings.kind === 'panorama') this.panorama = null; else this.fog = null; return; }
-      try { await mwg.Resources.load([url]); } catch { console.warn(`MWGP XP map ${settings.kind} asset is missing: ${settings.name}`); return; }
+      try { await loadResource(url); } catch { console.warn(`MWGP XP map ${settings.kind} asset is missing: ${settings.name}`); return; }
       const visual = new mwg.TiledSprite({ texture: mwg.Resources.texture(url), width: game.width, height: game.height });
       if (settings.kind === 'panorama') { this.panorama = visual; if (this.stage.addChildAt) this.stage.addChildAt(visual, 0); else this.stage.addChild(visual); }
       else { visual.alpha = Math.max(0, Math.min(1, Number(settings.opacity ?? 0) / 255)); this.fog = visual; if (this.stage.addChildAt) this.stage.addChildAt(visual, 2); else this.stage.addChild(visual); }
