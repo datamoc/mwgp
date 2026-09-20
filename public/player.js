@@ -3,6 +3,12 @@ runtime.src = '/mwg.js';
 await new Promise((resolve, reject) => { runtime.onload = resolve; runtime.onerror = reject; document.head.append(runtime); });
 const { MwgPlayer } = await import('/player-core.js');
 const id = new URLSearchParams(location.search).get('id');
+const canvas = document.querySelector('#game');
+const loading = document.createElement('p');
+loading.id = 'loading';
+loading.textContent = 'Loading game assets…';
+loading.setAttribute('role', 'status');
+canvas.before(loading);
 const response = await fetch(`/api/mwgp/${encodeURIComponent(id || '')}`);
 if (!response.ok) throw new Error('MWGP project not found');
 const project = await response.json();
@@ -14,10 +20,12 @@ document.querySelector('#title').textContent = project.display?.title || 'MWGP P
 showCompatibilityWarning(project);
 try {
   const { startMwgPixi } = await import(`/pixi-core.js?v=${Date.now()}`);
-  await startMwgPixi(document.querySelector('#game'), project);
+  await startMwgPixi(canvas, project);
 } catch (error) {
   console.warn('Pixi player unavailable, using compatibility renderer', error);
-  new MwgPlayer(document.querySelector('#game'), project);
+  new MwgPlayer(canvas, project);
+} finally {
+  loading.remove();
 }
 
 function showCompatibilityWarning(project) {
