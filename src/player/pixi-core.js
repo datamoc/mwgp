@@ -1322,6 +1322,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.saveBgm) return { call: () => scene.saveBgm() };
     if (command.resumeBgm) return { call: () => scene.resumeBgm() };
     if (command.me) return { call: () => scene.playMe(command.me) };
+    if (command.menu === 'save') return { call: () => scene.saveGame() };
     if (command.menu) return { call: () => scene.unimplementedScene(command.menu) };
     if (command.sound) return { call: () => scene.playSound(command.sound) };
     if (command.stopSound) return { call: () => scene.stopSound() };

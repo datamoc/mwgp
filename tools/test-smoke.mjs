@@ -152,6 +152,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ resumeBgm: true }, 'resumeBgm'],
     [{ me: { name: 'Fanfare1', volume: 90, pitch: 100, pan: 0 } }, 'playMe'],
     [{ menu: 'menu' }, 'unimplementedScene'],
+    [{ menu: 'save' }, 'saveGame'],
     [{ changeState: { scope: 1, actor: 2, add: true, state: 4 } }, 'applyActor'],
     [{ recoverAll: { scope: 1, actor: 2 } }, 'applyActor'],
     [{ changeSkill: { scope: 1, actor: 2, learn: true, skill: 7 } }, 'applyActor'],
