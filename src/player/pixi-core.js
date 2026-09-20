@@ -510,29 +510,40 @@ export async function startMwgPixi(canvas, project) {
       state.game.setVariable(command.copyVariable, value);
     }
     async runMoveRoute(target, steps) {
-      if (target !== 'player' || !this.mover) return;
+      const isPlayer = target === 'player';
+      const eventId = String(target || '').startsWith('event:') ? String(target).slice(6) : null;
+      const event = eventId ? (mapEntry?.mwgEvents || []).find(candidate => String(candidate.id) === eventId) : null;
+      if (!isPlayer && !event) { console.warn(`MWGP movement route target "${target}" is not on this map; skipping`); return; }
+      let facing = isPlayer ? this.facing : (event.facing || 'down');
+      const coordinate = () => isPlayer ? { x: this.mover.x, y: this.mover.y } : { x: event.x, y: event.y };
       for (const step of steps || []) {
-        const resolved = resolveRouteStep(step, this.facing);
+        const resolved = resolveRouteStep(step, facing);
         if (!resolved) continue;
+        if (resolved.dx === undefined && resolved.dy === undefined && !resolved.jump) continue;
+        if (resolved.turn) { facing = resolved.turn; if (!isPlayer) event.facing = facing; else this.turnPlayer(facing); continue; }
         // MV jumps arc over intervening tiles, ignoring passability; without a
         // jump animation the honest equivalent is an instant relocation.
         if (resolved.jump) {
-          this.mover.x += resolved.jump.dx;
-          this.mover.y += resolved.jump.dy;
-          position.x = this.mover.x;
-          position.y = this.mover.y;
-          this.updateCamera();
+          const current = coordinate();
+          const next = { x: current.x + resolved.jump.dx, y: current.y + resolved.jump.dy };
+          if (isPlayer) { this.mover.x = next.x; this.mover.y = next.y; position.x = next.x; position.y = next.y; this.updateCamera(); }
+          else { event.x = next.x; event.y = next.y; }
           continue;
         }
-        if (!this.canStep(this.mover.x + resolved.dx, this.mover.y + resolved.dy, resolved.dx, resolved.dy)) continue;
-        this.facing = resolved.dy > 0 ? 'down' : resolved.dy < 0 ? 'up' : resolved.dx < 0 ? 'left' : 'right';
-        if (!this.mover.moveBy(resolved.dx, resolved.dy)) continue;
-        await new Promise(resolve => {
-          const check = () => this.mover.isMoving ? setTimeout(check, 16) : resolve();
-          check();
-        });
-        position.x = this.mover.x;
-        position.y = this.mover.y;
+        const current = coordinate();
+        const next = { x: current.x + resolved.dx, y: current.y + resolved.dy };
+        if (!this.canStep(next.x, next.y, resolved.dx, resolved.dy)) continue;
+        facing = resolved.dy > 0 ? 'down' : resolved.dy < 0 ? 'up' : resolved.dx < 0 ? 'left' : 'right';
+        if (isPlayer) {
+          this.facing = facing;
+          if (!this.mover.moveBy(resolved.dx, resolved.dy)) continue;
+          await new Promise(resolve => {
+            const check = () => this.mover.isMoving ? setTimeout(check, 16) : resolve();
+            check();
+          });
+          position.x = this.mover.x;
+          position.y = this.mover.y;
+        } else { event.x = next.x; event.y = next.y; event.facing = facing; }
       }
     }
     turnPlayer(direction) {
@@ -549,6 +560,12 @@ export async function startMwgPixi(canvas, project) {
       else if (direction === 'toward' || direction === 'away') facing = this.facing;
       const vector = vectors[facing];
       if (vector) { this.facing = facing; this.mover?.turnTo(...vector); }
+    }
+    turnRoute(route) {
+      if (!route || route.target === 'player') { this.turnPlayer(route?.direction || route); return; }
+      const eventId = String(route.target || '').startsWith('event:') ? String(route.target).slice(6) : '';
+      const event = (mapEntry?.mwgEvents || []).find(candidate => String(candidate.id) === eventId);
+      if (event) event.facing = route.direction;
     }
     presentScroll(scroll) {
       // MV scrolls lines upward full-screen; the widget has no scroller, so the
@@ -1291,7 +1308,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.eraseEvent) return { call: () => scene.eraseEvent() };
     if (command.script !== undefined) return { call: () => scene.unsupportedCommand('script', command.script) };
     if (command.pluginCommand) return { call: () => scene.unsupportedCommand('pluginCommand', command.pluginCommand.raw) };
-    if (command.turn) return { call: () => scene.turnPlayer(command.turn) };
+    if (command.turn) return { call: () => typeof command.turn === 'object' ? scene.turnRoute(command.turn) : scene.turnPlayer(command.turn) };
     if (command.portrait && (command.say !== undefined || command.ask !== undefined)) return { call: () => scene.presentPortrait(command) };
     return command;
   });

@@ -330,16 +330,21 @@ function convertCommand(command, context = {}) {
     }).filter(Boolean);
   }
   if (command.code === 230) return [{ wait: Number(command.parameters?.[0] || 0) / 60 }];
-  // Routes targeting the player (-1) or the running event itself (0) execute as
-  // player movement: the player has no per-event movers, so an event's own route
-  // visibly moves the player instead — an approximation. Other targets are dropped.
+  // Routes keep their real target. The player is -1, the running event is 0,
+  // and positive values address a map event by id. The player executes these
+  // routes through the same movement callback as native MWG commands.
   // Step codes are MV's Game_Character.ROUTE_* constants (see rpg_objects.js in
   // any MV project). Steps needing runtime state (facing/position) are emitted
   // as descriptors ({ random, forward, backward, jump }) that the player's
   // resolveRouteStep interprets; speed/frequency/anim/fix/through/image/blend
   // steps (29-38, 41, 43) have no player-side equivalent and stay dropped,
   // keeping code 205 partial.
-  if (command.code === 205 && (command.parameters?.[0] === -1 || command.parameters?.[0] === 0)) {
+  if (command.code === 205) {
+    const rawTarget = Number(command.parameters?.[0]);
+    const routeTarget = rawTarget === -1 ? 'player'
+      : rawTarget === 0 && context.eventId != null ? `event:${context.eventId}`
+        : rawTarget > 0 ? `event:${rawTarget}` : null;
+    if (!routeTarget) return [];
     const route = command.parameters?.[1] || {};
     const commands = [];
     for (const step of route.list || []) {
@@ -354,9 +359,9 @@ function convertCommand(command, context = {}) {
         16: 'down', 17: 'left', 18: 'right', 19: 'up', 20: 'right90', 21: 'left90',
         22: 'around', 23: 'random', 24: 'random', 25: 'toward', 26: 'away'
       }[step.code];
-      if (movement) commands.push({ move: { target: 'player', steps: [movement] } });
-      else if (jump) commands.push({ move: { target: 'player', steps: [jump] } });
-      else if (turn) commands.push({ turn });
+      if (movement) commands.push({ move: { target: routeTarget, steps: [movement] } });
+      else if (jump) commands.push({ move: { target: routeTarget, steps: [jump] } });
+      else if (turn) commands.push(routeTarget === 'player' ? { turn } : { turn: { target: routeTarget, direction: turn } });
       else if (step.code === 15) commands.push({ wait: Number(step.parameters?.[0] || 0) / 60 });
       else if (step.code === 27 || step.code === 28) commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 });
       else if (step.code === 39) commands.push({ setTransparent: true });
