@@ -347,6 +347,8 @@ function convertCommand(command, context = {}) {
     if (!routeTarget) return [];
     const route = command.parameters?.[1] || {};
     const commands = [];
+    const repeatableSteps = [];
+    let routeOnly = true;
     for (const step of route.list || []) {
       const movement = {
         1: { dx: 0, dy: 1 }, 2: { dx: -1, dy: 0 }, 3: { dx: 1, dy: 0 }, 4: { dx: 0, dy: -1 },
@@ -359,23 +361,26 @@ function convertCommand(command, context = {}) {
         16: 'down', 17: 'left', 18: 'right', 19: 'up', 20: 'right90', 21: 'left90',
         22: 'around', 23: 'random', 24: 'random', 25: 'toward', 26: 'away'
       }[step.code];
-      if (movement) commands.push({ move: { target: routeTarget, steps: [movement] } });
-      else if (jump) commands.push({ move: { target: routeTarget, steps: [jump] } });
-      else if (relative) commands.push({ move: { target: routeTarget, steps: [relative] } });
-      else if (turn) commands.push(routeTarget === 'player' ? { turn } : { turn: { target: routeTarget, direction: turn } });
-      else if (step.code === 15) commands.push({ wait: Number(step.parameters?.[0] || 0) / 60 });
-      else if (step.code === 27 || step.code === 28) commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 });
-      else if (step.code === 39) commands.push({ setTransparent: true });
-      else if (step.code === 40) commands.push({ setTransparent: false });
-      else if (step.code === 42) commands.push({ setTransparent: Math.max(0, Math.min(1, Number(step.parameters?.[0] ?? 255) / 255)) });
+      if (movement) { commands.push({ move: { target: routeTarget, steps: [movement] } }); repeatableSteps.push(movement); }
+      else if (jump) { commands.push({ move: { target: routeTarget, steps: [jump] } }); repeatableSteps.push(jump); }
+      else if (relative) { commands.push({ move: { target: routeTarget, steps: [relative] } }); repeatableSteps.push(relative); }
+      else if (turn) { commands.push(routeTarget === 'player' ? { turn } : { turn: { target: routeTarget, direction: turn } }); repeatableSteps.push({ turn }); }
+      else if (step.code === 15) { const wait = { wait: Number(step.parameters?.[0] || 0) / 60 }; commands.push(wait); repeatableSteps.push(wait); }
+      else if (step.code === 27 || step.code === 28) { routeOnly = false; commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 }); }
+      else if (step.code === 39) { routeOnly = false; commands.push({ setTransparent: true }); }
+      else if (step.code === 40) { routeOnly = false; commands.push({ setTransparent: false }); }
+      else if (step.code === 42) { routeOnly = false; commands.push({ setTransparent: Math.max(0, Math.min(1, Number(step.parameters?.[0] ?? 255) / 255)) }); }
       else if (step.code === 44) {
+        routeOnly = false;
         const se = step.parameters?.[0];
         if (se?.name) {
           soundNames.add(se.name);
           commands.push({ sound: { name: se.name, volume: Number(se.volume ?? 90), pitch: Number(se.pitch ?? 100), pan: Number(se.pan || 0) } });
         }
-      } else if (step.code === 45 && step.parameters?.[0]) commands.push({ script: String(step.parameters[0]) });
+      } else if (step.code === 45 && step.parameters?.[0]) { routeOnly = false; commands.push({ script: String(step.parameters[0]) }); }
+      else if (step.code !== 0) routeOnly = false;
     }
+    if (route.repeat && routeOnly && repeatableSteps.length) return [{ move: { target: routeTarget, steps: repeatableSteps, repeat: true, skippable: route.skippable === true, wait: route.wait === true } }];
     if (commands.length) return commands;
   }
   if (command.code === 231) {

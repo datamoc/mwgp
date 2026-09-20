@@ -187,6 +187,7 @@ export async function startMwgPixi(canvas, project) {
       window.addEventListener('keydown', this.saveKey);
       this.dialogue = null;
       this.eventQueue = Promise.resolve();
+      this.backgroundRoutes = new Map();
       this.eventRunning = false;
       this.parallelTimer = 0;
       this.windows = new mwg.WindowStack();
@@ -530,18 +531,26 @@ export async function startMwgPixi(canvas, project) {
               : spec.operation === 'modulo' ? (operand === 0 ? 0 : current % operand) : current;
       state.game.setVariable(String(spec.target), value);
     }
-    async runMoveRoute(target, steps) {
+    startMoveRoute(route) {
+      const key = String(route.target || 'player');
+      if (this.backgroundRoutes.has(key)) return this.backgroundRoutes.get(key);
+      const task = this.runMoveRoute(route.target, route.steps, route).finally(() => this.backgroundRoutes.delete(key));
+      this.backgroundRoutes.set(key, task);
+      return task;
+    }
+    async runMoveRoute(target, steps, options = {}) {
       const isPlayer = target === 'player';
       const eventId = String(target || '').startsWith('event:') ? String(target).slice(6) : null;
       const event = eventId ? (mapEntry?.mwgEvents || []).find(candidate => String(candidate.id) === eventId) : null;
       if (!isPlayer && !event) { console.warn(`MWGP movement route target "${target}" is not on this map; skipping`); return; }
       let facing = isPlayer ? this.facing : (event.facing || 'down');
       const coordinate = () => isPlayer ? { x: this.mover.x, y: this.mover.y } : { x: event.x, y: event.y };
-      for (const step of steps || []) {
+      const execute = async () => { for (const step of steps || []) {
+        if (step.wait !== undefined) { await new Promise(resolve => setTimeout(resolve, Math.max(0, Number(step.wait) * 1000))); continue; }
         const resolved = resolveRouteStep(step, facing, coordinate(), isPlayer ? null : { x: this.mover.x, y: this.mover.y });
         if (!resolved) continue;
         if (resolved.dx === undefined && resolved.dy === undefined && !resolved.jump) continue;
-        if (resolved.turn) { facing = resolved.turn; if (!isPlayer) event.facing = facing; else this.turnPlayer(facing); continue; }
+        if (resolved.turn) { facing = resolved.turn === 'random' ? ['up', 'right', 'down', 'left'][Math.floor(Math.random() * 4)] : resolved.turn; if (!isPlayer) event.facing = facing; else this.turnPlayer(facing); continue; }
         // MV jumps arc over intervening tiles, ignoring passability; without a
         // jump animation the honest equivalent is an instant relocation.
         if (resolved.jump) {
@@ -565,7 +574,8 @@ export async function startMwgPixi(canvas, project) {
           position.x = this.mover.x;
           position.y = this.mover.y;
         } else { event.x = next.x; event.y = next.y; event.facing = facing; }
-      }
+      } };
+      do { await execute(); if (options.repeat) await new Promise(resolve => setTimeout(resolve, 16)); } while (options.repeat);
     }
     turnPlayer(direction) {
       const vectors = { down: [0, 1], left: [-1, 0], right: [1, 0], up: [0, -1] };
@@ -1250,6 +1260,7 @@ function pictureToneColor(tone) {
 // the player itself when the route target is the player).
 export function resolveRouteStep(step, facing, origin = null, target = null) {
   if (!step || typeof step !== 'object') return null;
+  if (step.turn) return { turn: step.turn };
   if (Number.isFinite(step.dx) && Number.isFinite(step.dy)) return { dx: step.dx, dy: step.dy };
   if (step.jump && Number.isFinite(step.jump.dx) && Number.isFinite(step.jump.dy)) {
     return { jump: { dx: step.jump.dx, dy: step.jump.dy } };
@@ -1317,6 +1328,7 @@ export function prepareEventCommands(commands, scene) {
     } };
     if (command.branches) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: state => scene.transfer(command.transfer, state) };
+    if (command.move?.repeat) return { call: () => command.move.wait ? scene.runMoveRoute(command.move.target, command.move.steps, command.move) : scene.startMoveRoute(command.move) };
     if (command.picture) return { call: () => scene.showPicture(command.picture) };
     if (command.erasePicture !== undefined) return { call: () => scene.erasePicture(command.erasePicture) };
     if (command.movePicture) return { call: () => scene.movePicture(command.movePicture) };

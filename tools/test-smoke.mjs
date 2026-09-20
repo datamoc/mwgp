@@ -183,6 +183,7 @@ if (uncovered.length) fail(`pixi-core.js has no prepareEventCommands branch for:
     [{ inputNumber: { variable: '1', digits: 3 } }, 'inputNumber'],
     [{ messageOptions: { position: 0, frame: 0 } }, 'setMessageOptions'],
     [{ loop: [{ wait: 1 }] }, 'runLoop'],
+    [{ move: { target: 'event:1', steps: [{ dir: 'left' }], repeat: true } }, 'startMoveRoute'],
     [{ ask: '', choices: [{ text: 'A', value: 0 }], branches: [[{ wait: 1 }]] }, 'presentChoice'],
     [{ say: 'hi', portrait: { name: 'P', index: 0 } }, 'presentPortrait'],
     [{ battle: { troopId: 1, canEscape: true, canLose: false, branches: { win: [{ wait: 1 }] } } }, 'startBattle'],
