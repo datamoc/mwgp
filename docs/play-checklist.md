@@ -84,6 +84,34 @@ the corresponding manual playthrough.
 - [ ] Same as 0.1.4 for the remaining manual steps; note differences in the
   result log.
 
+### Elementals (MZ)
+
+- [x] Opening map renders; the real mw_games scene starts (no fallback renderer), 0 console errors.
+- [x] Move: keyboard input moves/turns the player on map 1, and on map 2 after the transfer
+  (ArrowDown walked 11,3 -> 11,6).
+- [x] Dialogue: the full opening sequence advances line by line (progressive reveal): controls
+  pages, tutorial text, element intro, closing confirmation.
+- [x] Choice: three choice scenes run with different branches sampled — `List other Controls` /
+  `Continue`, `Elements` / `Character Stats`, and the 5-option element picker. These choices
+  disallow cancel (`cancel: -1`), so no cancel branch exists to test here.
+- [x] Transfer: map 1 -> map 2 lands at exactly (11, 3) with state intact — gold 5 -> 20,
+  party [1] -> [3] (the chosen element's dedicated character), through the SaveSystem reload.
+- [x] Save/load: F5/F9 round trip passes in the harness; slots 2 and 4 keep independent
+  save summaries.
+- [x] Banner review: 57/57 command codes `supported`, 0 plugin families, no `unsupported`
+  markers anywhere in the events — there is nothing for the compatibility banner to warn about.
+- [x] Battle: the weakest troop (50, a 10 HP Crab) resolves as `win` through the real dialogue
+  UI with the enemy sprite drawn; `npm test`'s sweep additionally fights all 58 Elementals
+  troops (323 across the MV/MZ corpus).
+- [x] MZ data shapes: the new `npm test` MZ fixture asserts six width-major normalized layers
+  per map (sentinel values stripped), the battle-runner database tables, and 357 never filed
+  `unsupported`.
+- [x] MZ plugin commands (357): Elementals ships an empty `js/plugins.js` (0 plugins) and uses
+  no 357 commands — the real-project path is "no uses". Conversion of real 357 calls stays
+  covered by the synthetic MZ probe in `npm test`.
+- [~] Common steps' breadth: all 89 maps boot in the harness map sweep and 60 s / 180 s soaks
+  run clean, but nobody has hand-walked all 89 maps end to end.
+
 ## Result log
 
 | Date | Game | Pass/fail | Notes |
@@ -110,3 +138,12 @@ the corresponding manual playthrough.
 | 2026-09-20 | Transfer/save hardening | pass (source/data) | `transfer()` validates the target (unknown map or non-numeric coords stay put with a warning) and clamps into the map; boot transition and `loadGame` ignore corrupt saves with a loud message instead of throwing. `npm test` covers 8 transfer/save validation checks; both MV manifests still validate. |
 | 2026-09-20 | MZ 357 plugin commands | pass (source/data) | MZ code 357 (`[plugin, command, label, args]`) converts to the existing `pluginCommand` vocabulary, tallies under the command name, and reports partial; a synthetic MZ fixture converts with zero loud markers and validates. `npm test` covers 5 MZ probe checks + manifest validation. No real MZ project on disk yet — full playthrough remains open. |
 | 2026-09-20 | Elementals tile-shape validation | pass (source/data) | New MZ project Elementals (89 maps) failed validation: layer-4 shadow bitflags (e.g. `0x80000000`-based) and overlong map arrays, both copied verbatim from source. Validator now checks tile ids on layers 0-3 only and requires at least six layers' worth of data. Manifest validates; `npm test` green over all 5 projects including 4 malformed-event input checks. |
+| 2026-09-26 | Full reconversion | pass | `npm run convert:auto -- RPGM_versions MWGP_versions` regenerated all 5 projects (5 converted, 0 skipped, 0 failed). `npm test` green afterwards: all 5 manifests validate, 323-troop battle sweep, command routing, server catalog. Banner review reset to open (new manifests). |
+| 2026-09-26 | Compatibility banner review (all 5) | open, explicit | New vs 2026-09-20: Karryn's Prison carries 2 loud `unsupported` markers, both MV code 339 kind 0 in troop events 68 and 91 (no `compatibility.commands` entry for 339); command 351 is now `supported` (was partial), 355 (466) and 356 (4178) stay partial. Both Pokemon Void manifests report 6 failed RGSS library units (`BootStatement_435`, `RandomDungeon`, `EventIndicator`, `SpriteWindow_DebugVariables`, `PBAnimations`, `Game_FollowerFactory`) where the 2026-09-20 audit had 0, and `PokemonSystem` is newly partial in both (0.1.4: 5 partial; 0.1.5: 6 partial incl. `PBEffects`). Elementals is clean (no unsupported/partial). Way of Corruption unchanged (356/Quest partial, 989). |
+| 2026-09-26 | T152 map-sweep shapes (Void/Karryn/WoC) | pass (source + browser) | `pbExclaim` failed to load (duplicate top-level function across merged pieces vs the runtime's `with(scope)` compile) and `event.at_coordinate` degraded (manifest `methods` kept raw `?` names the runtime looks up stripped): both fixed in `tools/rgss-library.mjs` with smoke regression checks, manifests reconverted, `npm test` green. `pbExclaim`/`pbWalkCharacterTo`/`pbCameraFollowEvent` run end to end in Node; Void maps 3/14 and WoC 32/332/426/446 boot PASS in Chromium with no console errors. Karryn map 31's `setWardenMapPoseExtensions` log is the game's own guard on unset pose (`-1`) under mid-game `skipTitle` boots and recovers by design. |
+| 2026-09-26 | Elementals (MZ) playthrough — T121 | pass (browser) | Full opening played through in Chromium: three choice scenes with both branches sampled, tutorial text with progressive reveal, and the map 1 → map 2 transfer landing at exactly (11, 3) with state intact (gold 5 → 20, party [1] → [3]) after the SaveSystem page reload; movement works on the new map. Battle: weakest troop 50 (Crab 10 HP) resolves `win` through the dialogue UI with the enemy sprite drawn. Harness: boot PASS with 0 console errors, 89/89 maps boot, 60 s and 180 s soaks clean (1 dialogue, no errors), F5/F9 save/load and slots 2/4 independent, menu Item/Status walked. Banner: 57/57 command codes `supported`, 0 plugins, no `unsupported` markers. |
+| 2026-09-26 | MZ fixture in `npm test` — T121 | pass (source/data) | New `rpg-maker-mz` branch in the per-project smoke loop asserts what only a real MZ project can: every map carries exactly `width*height*6` normalized tiles (MZ signed sentinel values stripped by `normalizeMZMapData`), the battle-runner database tables exist when a party is configured, code 357 is never reported `unsupported`, and plugin census statuses are well-formed. Elementals passes all 4 checks. Finding: Elementals ships an empty `js/plugins.js` (0 plugins, 0 uses of 357), so "357 against a real MZ plugin set" is honestly *no uses* in this corpus; the synthetic MZ probe keeps covering conversion of real 357 calls. |
+| 2026-09-26 | T121 observations (open, explicit) | open, explicit | Two follow-ups seen only under bot input, not in paced play or any harness run: (1) hammering Enter (~90 confirms) on the "List other Controls" loop raises repeated `TypeError: Cannot read properties of null (reading '_getFinalPadding')` console errors from `mw_games`' `_updateGpuText` (Pixi text path) — non-fatal, game keeps running, 0 occurrences in paced play/soaks; worth an upstream note. (2) 2 of 5 scripted opening runs stalled mid-sequence (dialogue open, confirm ignored, gold stuck at 5) — intermittent, never reproduced at harness pacing; needs a human-eye check on the tutorial text pages. Also noted for T126: the harness prints only `notes.slice(0, 2)`, so the battle/audio notes are truncated from PASS output. |
+| 2026-09-26 | Karryn door teleport (map 35) | pass (browser) | Two stacked bugs, both fixed in `src/player/player-core.js` with smoke rows: autorun events ran only at map boot, never after a page finished, so ev7 never fired after the door choice (`refreshAutorunEvents` on page completion, skipped during cross-map transfer); and ev7's forced-save loop gates on `$gameSystem._saveCount`, which no save ever incremented (`noteEngineSave` in `saveGame`, snapshotted synchronously so it rides saves/transfers). `menu:save` (code 352) now prompts for a slot (`promptSaveGame`) instead of silently overwriting the last slot. Played end to end in Chromium: choice → door scene → save prompt → slot picker → count 0→1 → prologue ask → transfer to map 17 (18,20). |
+| 2026-09-26 | Karryn dialogue text codes | pass (browser) | Converter now resolves sidecar `loc` tables inside `pluginCommand` args/raw (split first so multi-word entries don't shatter positionals): all 440 leftover `\REM_MAP` keys resolve (Tachie portrait names are real text), reconverted manifest validates, shipped manifest transplanted with its asset/audio sections preserved. Player runs the game's own `TextManager.convertExtraEscapeCharacters`/`convertEscapeCharacters` before the built-in escapes (quiet probe, one loud warning then self-disable): dynamic `\REM_AVR`/`\REM_FR` resolve live (`2`, `25%`). `if` without `else` now converts with `else: []` (both converters) and prepares quietly (613 sites in Karryn were warning per evaluation). |
+| 2026-09-26 | Elementals black tiles (maps 46/76) | authored, faithful | The map-46 blobs are wall-of-fire A2 autotiles (kind 20, shapes 44-46): the source sheet block holds exactly that black-with-orange-fringe art and the engine samples the same block for the same tile id, so the original shows the same pits. Map 76 screenshots clean (sand/castle render, no black cells). No renderer change; layer-4 shadows stay unrendered (known gap, floors read brighter, opposite symptom). |

@@ -110,6 +110,20 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
 
 ## Recent (coord-tracked)
 
+- **T121 — MZ playthrough + MZ-specific command coverage (done).** Elementals (MZ, 89 maps) played
+  through in the browser: opening sequence with three choice scenes (both branches sampled), the
+  map 1 → map 2 transfer landing at (11, 3) with gold/party carried through the SaveSystem reload,
+  movement on the new map, weakest-troop battle won through the dialogue UI with the enemy sprite
+  drawn, 89/89 maps booting, 60 s/180 s soaks and F5/F9 + menu checks clean, banner fully clean
+  (57/57 command codes supported, 0 plugins). `npm test` gained the real-project MZ fixture
+  (`rpg-maker-mz` branch: six normalized tile layers per map, battle-runner database, 357 never
+  filed unsupported); Elementals passes all 4 checks and the sweep now fights its 58 troops
+  (323 total). Finding recorded honestly: Elementals ships no plugins at all, so the corpus has **zero
+  real 357 uses** — conversion of real 357 calls stays covered by the synthetic MZ probe.
+  Two bot-only observations logged in `docs/play-checklist.md` (Enter-spam GPU text errors upstream,
+  an intermittent dialogue-advance stall in scripted runs) and the harness's `notes.slice(0, 2)`
+  truncation was reported for T126.
+- **T152 — Essentials map-sweep script shapes (done).** Two converter fixes in `tools/rgss-library.mjs`, both regression-covered in `tools/test-smoke.mjs`: the manifest's `methods` list now strips Ruby `?`/`!` suffixes like the transpiled output (so `event.at_coordinate(x, y)` and other predicate calls resolve on shim characters instead of degrading), and merged multi-piece units drop shadowed top-level `function` redefinitions, keeping Ruby's last-wins (so the patched `pbExclaim` loads instead of failing the runtime's `with(scope)` compile). Verified in Node against the real Void library (`pbExclaim`/`pbWalkCharacterTo`/`pbCameraFollowEvent` run end to end) and in Chromium (Void maps 3/14, WoC 32/332/426/446 boot PASS). Karryn map 31's `setWardenMapPoseExtensions` log is the game's own recovery path on unset pose state under mid-game `skipTitle` boots, not a player defect. Manifests reconverted; `npm test` green.
 - **T141 — RGSS API surface -> shim coverage report (done).** `tools/rgss-api-dump.mjs` extracts the RGSS
   class/method surface from a runtime binary's strings (`docs/rgss-api-xp.json`, from Pokemon Void's
   `Game.exe`; its `RGSS104E.dll` is packed and exposes no names), `tools/rgss-coverage.mjs` compares it with
