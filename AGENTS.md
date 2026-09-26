@@ -269,7 +269,8 @@ through the real dialogue UI (`MWGP_SMOKE_NOBATTLE=1` skips it).
 
 **XP database (`tools/rgss-database.mjs`):** `convert-rgss.js` converts `Actors/Classes/Skills/Items/Weapons/Armors/
 Enemies/Troops/States/System.rxdata` into the same MV-shaped `database`, so XP games with the default battle system
-use this runner and menu unchanged. Stats map to params (mhp, mmp, atk = weapon atk, def = pdef, mat = int, mdf = mdef,
+use this runner and menu unchanged. (VX `.rvdata` files are discovered and its maps/events/scripts convert, but the
+mapper stays XP-only: VX manifests ship `database: {}`.) Stats map to params (mhp, mmp, atk = weapon atk, def = pdef, mat = int, mdf = mdef,
 agi, luk = dex, and param 8 = str); each skill's power/stat factors are written out as an XP damage formula string; the
 per-actor stat tables (`actor.params[param][level]`) and XP's exp curve (`actor.expCurve`) live on the actor; element/
 state ranks become trait 11/13 rates; troop pages convert through the same event converter. XP's own records use ids 1
@@ -465,8 +466,11 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   real menus) is untested. A person playing is the next real check.
 - **Timing** — snippets that do not wait on frames are synchronous; their dialogue/balloons/animations are queued and
   awaited in order after the snippet. Code that waits on frames is lifted to async (see above). Conditions and
-  Control Variables scripts stay synchronous (never lifted). Not covered: VX/Ace *converters* (only XP `.rxdata`
-  exists), move-route script steps.
+  Control Variables scripts stay synchronous (never lifted). Not covered: the Ace *converter* (only XP `.rxdata`
+  and VX `.rvdata` exist), move-route script steps. VX converts end to end (`tools/rgss-vx.mjs` tables, synthetic
+  VX/XP fixtures in `npm test`) but ships `database: {}` (flat VX stats unmapped: duel-fallback battles, minimal
+  menu) and empty tile-passage flags (no database source: movement unclamped), and no local VX game has been
+  played through yet.
 - `npm test` runs a made-up game (Interpreter + Game_Event + module + helper `def`) through the
   whole pipeline, plus an MV script; both real Pokémon Void games transpile 100% of event
   scripts and ~96% of library units (`compatibility.scripts`, `rubyLibrary.failed`).

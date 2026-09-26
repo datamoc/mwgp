@@ -5,7 +5,7 @@
 // - MV/MZ (`www/index.html` or `index.html`) -> tools/convert-mv.js with
 //   --copy-assets, so the output plays without RPG Maker and without the
 //   original folder.
-// - Extracted RGSS (`Data/*.rxdata`) -> tools/convert-rgss.js.
+// - Extracted RGSS (`Data/*.rxdata` XP, `Data/*.rvdata` VX) -> tools/convert-rgss.js.
 // - Raw RGSS (`Game.rgssad`) -> extracted to a temp dir, then convert-rgss.js.
 // - Anything else is skipped with a reason.
 //
@@ -27,7 +27,7 @@ const skipExisting = flags.includes('--skip-existing');
 mkdirSync(outputRoot, { recursive: true });
 
 const hasRxdata = folder => existsSync(join(folder, 'Data')) &&
-  readdirSync(join(folder, 'Data')).some(name => /\.rxdata$/i.test(name));
+  readdirSync(join(folder, 'Data')).some(name => /\.(rxdata|rvdata)$/i.test(name));
 const hasMv = folder => existsSync(join(folder, 'www', 'index.html')) || existsSync(join(folder, 'index.html'));
 const hasRgssad = folder => existsSync(join(folder, 'Game.rgssad'));
 

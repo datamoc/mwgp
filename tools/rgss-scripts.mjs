@@ -48,9 +48,11 @@ function readMarshal(buffer) {
 const inflate = bytes => inflateSync(bytes).toString('utf8');
 
 // Returns [{ name, source }] in load order (Scripts first, then plugin scripts).
+// T122: VX ships the same container as Scripts.rvdata (RGSS2 Ruby goes
+// through the same pipeline; only the filename differs).
 export async function readRgssScripts(dataDir) {
   const scripts = [];
-  for (const file of ['Scripts.rxdata', 'PluginScripts.rxdata']) {
+  for (const file of ['Scripts.rxdata', 'Scripts.rvdata', 'PluginScripts.rxdata']) {
     let buffer;
     try { buffer = await readFile(join(dataDir, file)); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }

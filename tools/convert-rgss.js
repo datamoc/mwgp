@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { decodeMarshal } from '@datamoc/mw_games/rpg';
 import { transpileSnippet, setInterpreterMethods } from './rgss-snippet.mjs';
@@ -10,6 +10,8 @@ import { convertRgssDatabase } from './rgss-database.mjs';
 import { liftBlocking } from './rgss-async.mjs';
 import { exportRubyData, buildFileIndex, readTextFiles } from './rgss-data.mjs';
 import { setKnownMethods } from './rgss-call-filter.mjs';
+import { VX_DATA_EXT, ENGINE_VX, VX_TILE_SIZE, VX_FPS, VX_TILESET_SHEETS, VX_MAP_LAYERS,
+  vxRemap, vxWeatherType, VX_SYSTEM_SOUNDS, VX_SUPPORTED, VX_PARTIAL, vxCommandStatus } from './rgss-vx.mjs';
 
 const [, , extractedArg, outputArg, ...flags] = process.argv;
 if (!extractedArg || !outputArg) {
@@ -20,6 +22,15 @@ if (!extractedArg || !outputArg) {
 // library get transpiled (default 3); --no-library skips the library (event scripts only).
 const libraryDepth = flags.includes('--no-library') ? 0 : Number(flags[flags.indexOf('--library-depth') + 1]) || 8;
 const source = resolve(extractedArg), output = resolve(outputArg), dataDir = join(source, 'Data');
+// T122: VX projects ship Data/*.rvdata (RGSS2) instead of XP's .rxdata. The
+// engine gates every divergence below; the XP path stays byte-identical.
+const isVx = existsSync(join(dataDir, `System${VX_DATA_EXT}`));
+const ENGINE_LABEL = isVx ? 'VX' : 'XP';
+const dataExt = isVx ? VX_DATA_EXT : '.rxdata';
+const dataFile = stem => join(dataDir, `${stem}${dataExt}`);
+const vxSystemDir = join(source, 'Graphics', 'System');
+// VX runs stock 60fps waits; XP waits below are Essentials' /20 seconds.
+const FRAME_DIVISOR = isVx ? VX_FPS : 20;
 const XP_AUTOTILE_PATTERNS = 48;
 const XP_AUTOTILE_IMAGES = 8;
 const XP_STATIC_TILE_BASE = XP_AUTOTILE_PATTERNS * XP_AUTOTILE_IMAGES;
@@ -32,7 +43,9 @@ function pngDimensions(buffer) {
 }
 
 function parseTable(value) {
-  const raw = Buffer.from(value?.raw || []);
+  // Real Table dumps decode to { class, raw: bytes }; the ivars form below
+  // matches tools/rgss-database.mjs for programmatically built fixtures.
+  const raw = Buffer.from(value?.raw || value?.ivars?.['@raw'] || []);
   const z = raw.readInt32LE(0), x = raw.readInt32LE(4), y = raw.readInt32LE(8);
   const size = raw.readInt32LE(16) || x * y * z;
   // RGSS1's Table user-marshal payload has five Int32 header words followed
@@ -55,12 +68,21 @@ function tableData(value) {
 const commandCounts = new Map();
 // Loud-fallback counter, initialized before the map loop runs (top-level order).
 const unsupportedCommandFallbacks = new Map();
+// Branch (111) and variable-operand (122) fallback sites, mirroring MV's maps:
+// 111/122 promote to supported in the report below when these stay empty.
+const unsupportedBranchFallbacks = new Map();
+const unsupportedOperandFallbacks = new Map();
+function recordFallback(fallbacks, key, mapId, eventId) {
+  const seen = fallbacks.get(key);
+  if (!seen) fallbacks.set(key, { count: 1, first: `map ${mapId}, event ${eventId}` });
+  else seen.count++;
+}
 function unsupportedCommand(code, kind, mapId, eventId) {
   const key = `${code}:${kind}`;
   const seen = unsupportedCommandFallbacks.get(key);
   if (!seen) {
     unsupportedCommandFallbacks.set(key, { count: 1, first: `map ${mapId}, event ${eventId}` });
-    console.warn(`MWGP convert: XP event command ${code} has no converted equivalent; it warns at runtime and is skipped (first seen at map ${mapId}, event ${eventId})`);
+    console.warn(`MWGP convert: ${ENGINE_LABEL} event command ${code} has no converted equivalent; it warns at runtime and is skipped (first seen at map ${mapId}, event ${eventId})`);
   } else seen.count++;
   return { unsupported: { code, kind } };
 }
@@ -99,10 +121,14 @@ function convertXpGameDataOperand(p, operation, context = {}) {
   if (kind === 6 && Number(p[4]) === -1 && Number(p[5]) === 0) gameData = { kind: 'playerX' };
   else if (kind === 6 && Number(p[4]) === -1 && Number(p[5]) === 1) gameData = { kind: 'playerY' };
   else if (kind === 7 && Number(p[4]) === 0) gameData = { kind: 'mapId' };
-  else if (kind === 7 && Number(p[4]) === 1) gameData = { kind: 'pokemonCount' };
+  // Index 1 is Essentials' Pokémon count override (verified against its
+  // command_122); stock VX reads party members there, which has no MWGP
+  // operand and stays loud below.
+  else if (kind === 7 && Number(p[4]) === 1 && !isVx) gameData = { kind: 'pokemonCount' };
   else if (kind === 7 && Number(p[4]) === 2) gameData = { kind: 'gold' };
   if (!gameData || !operationName) {
-    console.warn(`MWGP convert: XP game-data operand ${kind}/${p[4]}/${p[5]} has no converted equivalent; it warns at runtime and reads as 0 (map ${context.mapId}, event ${context.eventId})`);
+    console.warn(`MWGP convert: ${ENGINE_LABEL} game-data operand ${kind}/${p[4]}/${p[5]} has no converted equivalent; it warns at runtime and reads as 0 (map ${context.mapId}, event ${context.eventId})`);
+    recordFallback(unsupportedOperandFallbacks, `122:${kind}`, context.mapId, context.eventId);
     return range(() => ({ unsupported: { code: 122, kind } }));
   }
   return range(id => ({ modifyVariable: { target: id, operation: operationName, operand: { gameData } } }));
@@ -133,7 +159,7 @@ function convertBranchCondition(parameters, mapId, eventId) {
   if (parameters[0] === 0) return { switch: String(parameters[1]), equals: parameters[2] === 0 };
   if (parameters[0] === 1) {
     const operator = { 0: 'eq', 1: 'gte', 2: 'lte', 3: 'gt', 4: 'lt', 5: 'neq' }[Number(parameters[4] ?? 0)];
-    if (!operator) { console.warn(`MWGP convert: XP variable comparison operator ${parameters[4]} has no converted equivalent; it warns at runtime and takes the else-branch (map ${mapId}, event ${eventId})`); return { unsupported: { code: 111, kind: 1 } }; }
+    if (!operator) { console.warn(`MWGP convert: ${ENGINE_LABEL} variable comparison operator ${parameters[4]} has no converted equivalent; it warns at runtime and takes the else-branch (map ${mapId}, event ${eventId})`); recordFallback(unsupportedBranchFallbacks, '111:1', mapId, eventId); return { unsupported: { code: 111, kind: 1 } }; }
     if (Number(parameters[2] || 0) === 0) {
       return operator === 'gte'
         ? { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) }
@@ -155,7 +181,8 @@ function convertBranchCondition(parameters, mapId, eventId) {
   }
   // Types without an engine-free equivalent must stay loud instead of dropping
   // the whole branch: the player warns on the marker and takes the else-branch.
-  console.warn(`MWGP convert: XP branch type ${parameters[0]} has no converted equivalent; it warns at runtime and takes the else-branch (map ${mapId}, event ${eventId})`);
+  console.warn(`MWGP convert: ${ENGINE_LABEL} branch type ${parameters[0]} has no converted equivalent; it warns at runtime and takes the else-branch (map ${mapId}, event ${eventId})`);
+  recordFallback(unsupportedBranchFallbacks, `111:${parameters[0]}`, mapId, eventId);
   return { unsupported: { code: 111, kind: Number(parameters[0]) } };
 }
 
@@ -281,8 +308,12 @@ function convertCommands(list, context = {}) {
         continue;
       }
       // 301 Battle Processing owns its following Win/Escape/Lose blocks (601-603, closed by 604).
+      // VX carries a leading designation (0 direct, 1 variable troop, 2 random
+      // encounter), so its troop id sits one slot later; variable/random
+      // designations still read that slot (battles are duel-fallback without
+      // a mapped VX database anyway).
       if (command.code === 301) {
-        const [troop, canEscape, canLose] = command.parameters || [];
+        const [troop, canEscape, canLose] = isVx ? (command.parameters || []).slice(1) : (command.parameters || []);
         const branches = {};
         index++;
         while (index < list.length) {
@@ -311,7 +342,8 @@ function convertCommands(list, context = {}) {
       }
       // 105 (Show Scrolling Text) owns its following 405 body lines the way
       // 355 owns 655s. A 405 outside a 105 stays dropped by convertCommand.
-      if (command.code === 105) {
+      // XP-only: VX has neither code (both stay loud markers there).
+      if (command.code === 105 && !isVx) {
         const [speed, noFast] = command.parameters || [];
         const lines = [];
         while (index + 1 < list.length && list[index + 1].code === 405) {
@@ -324,12 +356,34 @@ function convertCommands(list, context = {}) {
       }
       // 209 (Set Movement Route) owns its following 509 step entries the way
       // 355 owns 655s; the route object itself lives in parameters[1]
-      // (verified: 638/638 routes in the Pokemon Void corpus).
-      if (command.code === 209) {
+      // (verified: 638/638 routes in the Pokemon Void corpus). VX renumbered
+      // the pair to 205/505 with the same positions.
+      if ((command.code === 209 && !isVx) || (command.code === 205 && isVx)) {
         const moved = convertRoute(command.parameters?.[0], unwrap(command.parameters?.[1]));
         if (moved.length) result.push(...moved);
         index++;
-        while (index < list.length && list[index].code === 509) index++;
+        const continuation = isVx ? 505 : 509;
+        while (index < list.length && list[index].code === continuation) index++;
+        continue;
+      }
+      // VX 302 (Shop Processing) owns its following 605 goods lines like MV's
+      // 302: the command's own parameters are the first goods entry
+      // [goods_type, goods_id, price_type, price] (no purchase-only flag).
+      if (command.code === 302 && isVx) {
+        const goods = [command.parameters || []];
+        while (index + 1 < list.length && list[index + 1].code === 605) {
+          index++;
+          goods.push(list[index].parameters || []);
+        }
+        result.push({ shop: {
+          goods: goods.map(entry => ({
+            kind: Number(entry[0] ?? 0),
+            id: Number(entry[1] ?? 0),
+            priceType: Number(entry[2] ?? 0),
+            price: Number(entry[3] ?? 0)
+          }))
+        } });
+        index++;
         continue;
       }
       const converted = convertCommand(command, { depth, mapId, eventId, stack });
@@ -367,7 +421,7 @@ function convertRoute(target, route) {
     if (movement) commands.push({ move: { target: 'player', steps: [movement] } });
     else if (jump) commands.push({ move: { target: 'player', steps: [jump] } });
     else if (turn) commands.push({ turn });
-    else if (step.code === 15) commands.push({ wait: Number(step.parameters?.[0] || 0) / 20 });
+    else if (step.code === 15) commands.push({ wait: Number(step.parameters?.[0] || 0) / FRAME_DIVISOR });
     else if (step.code === 27 || step.code === 28) commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 });
     else if (step.code === 37 || step.code === 38) commands.push({ routeThrough: { target: 'player', value: step.code === 37 } });
     else if (step.code === 39 || step.code === 40 || step.code === 42) {
@@ -392,20 +446,70 @@ function audioParams(entry) {
 }
 
 function convertCommand(command, context = {}) {
+  // T122: VX divergences. Same-number/different-meaning codes get their own
+  // case here so no XP case below can mis-fire on VX data; pure renumbers
+  // normalize to the XP case afterwards (order matters: a remapped 203 must
+  // reach XP's 202 relocate case, not VX's 202 vehicle case above).
+  if (isVx) {
+    const vp = command.parameters || [];
+    // 202 is Set Vehicle Location [vehicle, designation, map, x, y] (XP's
+    // 202 is Set Event Location): same shape MV's 202 produces.
+    if (command.code === 202) {
+      const [vehicle, designation, a, b, c] = vp;
+      if (Number(designation || 0) === 0) return [{ vehicleLocation: { vehicle: Number(vehicle || 0), mapId: Number(a || 0), x: Number(b || 0), y: Number(c || 0) } }];
+      if (Number(designation) === 1) return [{ vehicleLocation: { vehicle: Number(vehicle || 0), mapVar: String(a ?? 0), xVar: String(b ?? 0), yVar: String(c ?? 0) } }];
+      return [unsupportedCommand(Number(command.code), Number(designation), context.mapId, context.eventId)];
+    }
+    // 230 is Wait [frames] at the stock 60 fps.
+    if (command.code === 230) return [{ wait: Number(vp[0] || 0) / VX_FPS }];
+    // 212/213 are the real Show Animation / Show Balloon Icon
+    // [character_id, id, wait], like MV's; a falsy id shows nothing.
+    if (command.code === 212) return Number(vp[1]) ? [{ animation: { target: Number(vp[0] ?? -1), animation: Number(vp[1]), wait: vp[2] === true } }] : [];
+    if (command.code === 213) return Number(vp[1]) ? [{ balloon: { target: Number(vp[0] ?? -1), balloon: Number(vp[1]), wait: vp[2] === true } }] : [];
+    // 236 weather [type, power, duration]: int enum onto player strings.
+    if (command.code === 236) return [{ weather: { type: vxWeatherType(vp[0]), power: Number(vp[1] || 0), duration: Number(vp[2] || 0) / VX_FPS, wait: false } }];
+    // 303 name input [actor_id, max_characters], like MV's 303.
+    if (command.code === 303) return [{ inputName: { target: 'player', actorId: Number(vp[0] || 0), maxLength: Number(vp[1] || 12) } }];
+    // 126-129 inventory/party [id, operation, operand_type, value] (weapons
+    // and armor carry an unmapped include_equipped fifth slot): same amount
+    // shape MV's identical commands produce.
+    if (command.code === 126 || command.code === 127 || command.code === 128) {
+      const [id, op, type, val] = vp;
+      const amount = type === 0 ? (op === 1 ? -Number(val || 0) : Number(val || 0)) : { variable: String(val), op: op === 1 ? 'sub' : 'add' };
+      const key = command.code === 126 ? 'changeItem' : command.code === 127 ? 'changeWeapon' : 'changeArmor';
+      return [{ [key]: { id: Number(id), amount } }];
+    }
+    // 129 party [actor_id, operation, initialize]: add/remove converts; the
+    // initialize flag has no MWGP shape (partial in the report).
+    if (command.code === 129) return [{ changeParty: { actorId: Number(vp[0]), add: Number(vp[1]) === 0 } }];
+    // 214 is Erase Event (XP's 116): explicit case, not a remap, because the
+    // XP 116 case below is engine-gated.
+    if (command.code === 214) return [{ eraseEvent: true }];
+    const remapped = vxRemap(command.code);
+    if (remapped != null) command = { ...command, code: remapped };
+  }
   const p = command.parameters || [];
   // 101/401 continuation lines join into one message box in the engine, but MV's
   // converter already emits them as sequential says and the player shows those
   // in order, so XP matches that shape instead of introducing a joined form.
-  if (command.code === 101 || command.code === 401) return [{ say: String(p[0] || '') }];
-  if (command.code === 102 || command.code === 105 || command.code === 111 || command.code === 112 || command.code === 209 || command.code === 355) return [];
+  // VX carries the first line the same way (it has no face graphics); a
+  // four-param face-style opener carries no text — the 401s below do.
+  if (command.code === 401) return [{ say: String(p[0] || '') }];
+  if (command.code === 101) {
+    if (isVx && p.length >= 4 && typeof p[1] === 'number') return [];
+    return [{ say: String(p[0] || '') }];
+  }
+  if (command.code === 102 || command.code === 111 || command.code === 112 || command.code === 355 || ((command.code === 105 || command.code === 209) && !isVx)) return [];
   // Essentials' 103/104 commands are stateful message interactions rather
   // than MV's same-numbered commands. Keep their verified XP parameters in
   // the manifest so the player can reproduce them without guessing.
   if (command.code === 103) return [{ inputNumber: { variable: String(p[0] ?? 0), digits: Number(p[1] ?? 1) } }];
-  if (command.code === 104) return [{ messageOptions: { position: Number(p[0] ?? 2), frame: Number(p[1] ?? 0) } }];
+  // 104/106 are XP/Essentials shapes (message options, /20 waits); VX has
+  // neither code, so they stay loud markers there (gated below).
+  if (command.code === 104 && !isVx) return [{ messageOptions: { position: Number(p[0] ?? 2), frame: Number(p[1] ?? 0) } }];
   // Essentials measures waits in real seconds as frames/20 (command_106), not
   // the /60 MV's 60fps engine implies.
-  if (command.code === 106) return [{ wait: Number(p[0] || 0) / 20 }];
+  if (command.code === 106 && !isVx) return [{ wait: Number(p[0] || 0) / 20 }];
   // 108/408 (Comment / Comment body) are correctly handled by doing nothing.
   if (command.code === 108 || command.code === 408 || command.code === 0) return [];
   if (command.code === 113) return [{ breakLoop: true }];
@@ -437,7 +541,8 @@ function convertCommand(command, context = {}) {
     const operandType = Number(p[3] || 0);
     if (operandType === 6 || operandType === 7) return convertXpGameDataOperand(p, operation, { mapId: context.mapId, eventId: context.eventId });
     if (operandType > 2) {
-      console.warn(`MWGP convert: XP variable operand kind ${operandType} has no converted equivalent; it warns at runtime and reads as 0 (map ${context.mapId}, event ${context.eventId})`);
+      console.warn(`MWGP convert: ${ENGINE_LABEL} variable operand kind ${operandType} has no converted equivalent; it warns at runtime and reads as 0 (map ${context.mapId}, event ${context.eventId})`);
+      recordFallback(unsupportedOperandFallbacks, `122:${operandType}`, context.mapId, context.eventId);
       return Array.from({ length: last - first + 1 }, () => ({ unsupported: { code: 122, kind: operandType } }));
     }
     return Array.from({ length: last - first + 1 }, (_, offset) => {
@@ -505,14 +610,17 @@ function convertCommand(command, context = {}) {
   // 126/127/128/129 (items/weapons/armor/party) are command_dummy no-ops in
   // the shipped engine itself — Pokémon tracks those elsewhere — so doing
   // nothing is the faithful conversion.
-  if (command.code === 116) return [{ eraseEvent: true }];
-  if (command.code === 126 || command.code === 127 || command.code === 128 || command.code === 129) return [];
+  // 116/126-129/208/210 are XP shapes (erase, Essentials dummy inventory,
+  // transparency, wait-for-move); VX renumbered erase to 214 and maps
+  // inventory for real above, so the XP cases stay gated.
+  if (command.code === 116 && !isVx) return [{ eraseEvent: true }];
+  if (!isVx && (command.code === 126 || command.code === 127 || command.code === 128 || command.code === 129)) return [];
   // 208 sets player transparency (like MV's 211), which MWGP's setTransparent
   // already expresses. 210 (Wait for Move's Completion) is satisfied by the
   // sequential execution itself: converted routes run to completion before the
   // next command starts.
-  if (command.code === 208) return [{ setTransparent: p[0] === 0 }];
-  if (command.code === 210) return [];
+  if (command.code === 208 && !isVx) return [{ setTransparent: p[0] === 0 }];
+  if (command.code === 210 && !isVx) return [];
   // 221 (freeze) + 222 (execute transition by name) bracket a scene transition;
   // with the usual empty name that transition is a plain fade, which screenFade
   // approximates. A named fancy transition still reads as a visible cut.
@@ -596,19 +704,39 @@ function convertCommand(command, context = {}) {
   // 313/315-319 (state/EXP/level/params/skills/equipment) are command_dummy
   // no-ops in the shipped engine, so doing nothing is faithful. 314 heals the
   // party only when parameters[0] is 0; any other target is a no-op in the
-  // engine too.
-  if (command.code === 313 || (command.code >= 315 && command.code <= 319)) return [];
+  // engine too. VX actor commands are real engine calls with unverified
+  // layouts (except 314's party shape, shared below), so they stay loud.
+  if (!isVx && (command.code === 313 || (command.code >= 315 && command.code <= 319))) return [];
   if (command.code === 314) return Number(p[0] || 0) === 0 ? [{ recoverAll: { scope: 0, actor: 0 } }] : [];
   // 509 steps are consumed structurally by 209 above; an orphaned one is data.
-  if (command.code === 509) return [];
-  // 212-216 have no handler in the shipped Interpreter at all, so dropping
-  // them matches the engine. Anything else unmapped is a real gap: loud
-  // marker, never a skip.
+  // VX uses 505 continuations instead (consumed by its 205 block), so an
+  // orphaned 509 there stays loud.
+  if (command.code === 509 && !isVx) return [];
+  // 212-216 have no handler in the shipped XP Interpreter at all, so dropping
+  // them matches the engine; VX's interpreter likewise dispatches no 215/216
+  // (its 212-214 convert for real above). Anything else unmapped is a real
+  // gap: loud marker, never a skip.
   if ([212, 213, 214, 215, 216].includes(Number(command.code))) return [];
   return [unsupportedCommand(Number(command.code), 0, context.mapId, context.eventId)];
 }
 
+function classifyCommands(counts, supported, partial) {
+  return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
+    count,
+    status: supported.has(code) ? 'supported' : partial.has(code) ? 'partial' : 'unsupported'
+  }]));
+}
+
 function buildCompatibilityReport(counts) {
+  // T122: VX classifies against its own command set (tools/rgss-vx.mjs);
+  // 111/122 promote exactly like XP's when the corpus used only mapped shapes.
+  if (isVx) {
+    const supported = new Set(VX_SUPPORTED);
+    const partial = new Set(VX_PARTIAL);
+    if (!unsupportedBranchFallbacks.size) { partial.delete(111); supported.add(111); }
+    if (!unsupportedOperandFallbacks.size) { partial.delete(122); supported.add(122); }
+    return classifyCommands(counts, supported, partial);
+  }
   const supported = new Set([
     0, 101, 102, 103, 104, 105, 106, 108, 112, 113, 115, 116, 117, 118, 119, 121,
     126, 127, 128, 129, 201, 203, 208, 209, 210, 221, 222, 223, 224, 225, 231, 232,
@@ -640,16 +768,17 @@ function buildCompatibilityReport(counts) {
   // 103/104 supported (number input and message options), 212/213/214/
   // 215/216 dropped (no handler in the shipped Interpreter at all).
   const partial = new Set([111, 122, 123, 125, 202, 204, 231, 232, 234]);
-  return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
-    count,
-    status: supported.has(code) ? 'supported' : partial.has(code) ? 'partial' : 'unsupported'
-  }]));
+  // Like MV, 111/122 promote to supported when the corpus used only mapped
+  // shapes: the fallback maps above stay empty and no manifest carries markers.
+  if (!unsupportedBranchFallbacks.size) { partial.delete(111); supported.add(111); }
+  if (!unsupportedOperandFallbacks.size) { partial.delete(122); supported.add(122); }
+  return classifyCommands(counts, supported, partial);
 }
 
-const mapInfoHash = decodeMarshal(await readFile(join(dataDir, 'MapInfos.rxdata')));
+const mapInfoHash = decodeMarshal(await readFile(dataFile('MapInfos')));
 // Common events inline into pages at code 117 like MV's; normalize once here so
 // pages share the same { code, indent, parameters } shape the parser consumes.
-for (const entry of decodeMarshal(await readFile(join(dataDir, 'CommonEvents.rxdata')))) {
+for (const entry of decodeMarshal(await readFile(dataFile('CommonEvents')))) {
   if (!entry) continue;
   commonEvents.set(Number(field(entry, 'id', 0)), field(entry, 'list', []).map(item => ({
     code: field(item, 'code', 0),
@@ -657,38 +786,71 @@ for (const entry of decodeMarshal(await readFile(join(dataDir, 'CommonEvents.rxd
     parameters: field(item, 'parameters', [])
   })));
 }
-const tilesetData = decodeMarshal(await readFile(join(dataDir, 'Tilesets.rxdata')));
-const tilesets = tilesetData.map((value, index) => value ? {
-  id: index,
-  tilesetNames: [null, null, null, null, null, field(value, 'tileset_name', '')],
-  autotileNames: field(value, 'autotile_names', []).map(name => name || null),
-  // XP's passages table already uses MV's flag convention (verified against the
-  // shipped scripts: Game_Map#passable? blocks when `passage & bit != 0` with
-  // the same down/left/right/up = 0x01/0x02/0x04/0x08 bits the player tests),
-  // so it passes through unchanged.
-  flags: tableData(field(value, 'passages', null)),
-  priorities: tableData(field(value, 'priorities', null)),
-  terrainTags: tableData(field(value, 'terrain_tags', null))
-} : null);
+// VX has no Tilesets database and maps carry no tileset_id: one global
+// tileset (Graphics/System/TileA1..A5, TileB..E, copied to img/tilesets
+// below). Passage flags have no database source, so the manifest carries
+// none and conversion warns loudly; movement stays unclamped until the
+// source is found (see T122).
+let tilesets;
+if (isVx) {
+  tilesets = [{ id: 0, tilesetNames: [...VX_TILESET_SHEETS], autotileNames: [],
+    flags: [], priorities: [], terrainTags: [], global: true }];
+  console.warn('MWGP convert: VX tile passage flags have no database source; the manifest carries empty flags and every tile reads as passable');
+} else {
+  const tilesetData = decodeMarshal(await readFile(dataFile('Tilesets')));
+  tilesets = tilesetData.map((value, index) => value ? {
+    id: index,
+    tilesetNames: [null, null, null, null, null, field(value, 'tileset_name', '')],
+    autotileNames: field(value, 'autotile_names', []).map(name => name || null),
+    // XP's passages table already uses MV's flag convention (verified against the
+    // shipped scripts: Game_Map#passable? blocks when `passage & bit != 0` with
+    // the same down/left/right/up = 0x01/0x02/0x04/0x08 bits the player tests),
+    // so it passes through unchanged.
+    flags: tableData(field(value, 'passages', null)),
+    priorities: tableData(field(value, 'priorities', null)),
+    terrainTags: tableData(field(value, 'terrain_tags', null))
+  } : null);
+}
 // The game's own Ruby library is indexed before events convert: its Interpreter methods
 // decide how bare calls in event snippets are compiled (as `this.<name>()`).
-const rubyScripts = libraryDepth ? await readRgssScripts(dataDir).catch(error => { console.warn(`MWGP convert: cannot read Scripts.rxdata (${error.message}); event scripts run without the game library`); return []; }) : [];
+const rubyScripts = libraryDepth ? await readRgssScripts(dataDir).catch(error => { console.warn(`MWGP convert: cannot read Scripts${dataExt} (${error.message}); event scripts run without the game library`); return []; }) : [];
 const libraryIndex = rubyScripts.length ? indexScripts(rubyScripts, message => console.warn(`MWGP convert: ${message}`)) : null;
 setInterpreterMethods(libraryIndex?.interpreterMethods);
 if (libraryIndex) setKnownMethods(libraryIndex.allDefNames);
 const maps = [];
-for (const name of (await readdir(dataDir)).filter(item => /^Map\d+\.rxdata$/i.test(item)).sort()) {
+let shadowWarned = false;
+for (const name of (await readdir(dataDir)).filter(item => /^Map\d+/i.test(item) && item.toLowerCase().endsWith(dataExt)).sort()) {
   const sourceMap = decodeMarshal(await readFile(join(dataDir, name)));
   const width = Number(field(sourceMap, 'width', 0)), height = Number(field(sourceMap, 'height', 0));
   const table = parseTable(field(sourceMap, 'data', {}));
-  const layers = Array.from({ length: 6 }, (_, layer) => Array.from({ length: width * height }, (_, index) => table.data[layer * width * height + index] || 0));
+  const tableLayer = layer => Array.from({ length: width * height }, (_, index) => table.data[layer * width * height + index] || 0);
+  // VX Tables are width x height x 3 (lower, upper, shadow): the two tile
+  // layers land on MV layers 0 and 4 (characters render between them); the
+  // shadow mask has no player rendering and is dropped loudly when used.
+  // Tile ids are already in MV's number space (VX introduced the layout).
+  let layers;
+  if (isVx) {
+    const empty = Array.from({ length: width * height }, () => 0);
+    layers = [tableLayer(0), empty, empty, empty, tableLayer(1), empty];
+    if (!shadowWarned && tableLayer(2).some(tile => tile)) {
+      shadowWarned = true;
+      console.warn('MWGP convert: VX shadow-layer tiles are dropped; the player renders no shadows');
+    }
+  } else {
+    layers = Array.from({ length: 6 }, (_, layer) => tableLayer(layer));
+  }
   const events = field(sourceMap, 'events', new Map());
   const id = Number(name.match(/\d+/)[0]);
   const mwgEvents = [...events.values()].map(event => convertEvent(event, id));
   const bgm = field(sourceMap, 'bgm', null);
   const bgs = field(sourceMap, 'bgs', null);
-  maps.push({ id, info: unwrap(mapInfoHash.get(id)) || null, data: {
-    width, height, data: layers.flat(), tilesetId: Number(field(sourceMap, 'tileset_id', 0)),
+  // VX MapInfo unwraps to {@name, ...} ivars; surface a clean {name} like the
+  // player (save labels) and the map index (stub names) read.
+  const mapInfo = isVx
+    ? { name: String(field(unwrap(mapInfoHash.get(id)), 'name', '') || '') }
+    : unwrap(mapInfoHash.get(id)) || null;
+  maps.push({ id, info: mapInfo, data: {
+    width, height, data: layers.flat(), tilesetId: isVx ? 0 : Number(field(sourceMap, 'tileset_id', 0)),
     autoplayBgm: Boolean(field(sourceMap, 'autoplay_bgm', false)),
     bgm: bgm ? { name: field(bgm, 'name', ''), volume: Number(field(bgm, 'volume', 100)), pitch: Number(field(bgm, 'pitch', 100)) } : null,
     autoplayBgs: Boolean(field(sourceMap, 'autoplay_bgs', false)),
@@ -714,6 +876,15 @@ async function copyTree(input, destination) {
 await mkdir(output, { recursive: true });
 await copyTree(join(source, 'Graphics', 'Characters'), join(output, 'assets', 'img', 'characters'));
 await copyTree(join(source, 'Graphics', 'Tilesets'), join(output, 'assets', 'img', 'tilesets'));
+// VX's global tileset lives as loose sheets under Graphics/System.
+if (isVx) {
+  for (const sheet of VX_TILESET_SHEETS) {
+    const sheetFile = join(vxSystemDir, `${sheet}.png`);
+    if (!existsSync(sheetFile)) continue;
+    await mkdir(join(output, 'assets', 'img', 'tilesets'), { recursive: true });
+    await writeFile(join(output, 'assets', 'img', 'tilesets', `${sheet}.png`), await readFile(sheetFile));
+  }
+}
 await copyTree(join(source, 'Graphics', 'Pictures'), join(output, 'assets', 'img', 'pictures'));
 await copyTree(join(source, 'Graphics'), join(output, 'assets', 'graphics'));
 if (existsSync(join(source, 'Fonts'))) await copyTree(join(source, 'Fonts'), join(output, 'assets', 'fonts'));
@@ -724,9 +895,11 @@ if (existsSync(join(source, 'Audio'))) {
     if (entry.isDirectory()) await copyTree(join(source, 'Audio', entry.name), join(output, 'assets', 'audio', entry.name.toLowerCase()));
   }
 }
-const system = decodeMarshal(await readFile(join(dataDir, 'System.rxdata')));
+const system = decodeMarshal(await readFile(dataFile('System')));
+// player_metadata.dat is Essentials-only; VX reads the start actor's charset
+// from its own Actors table instead (see resolveVxPlayerSprite below).
 const playerMetadataPath = join(dataDir, 'player_metadata.dat');
-const playerMetadata = existsSync(playerMetadataPath) ? decodeMarshal(await readFile(playerMetadataPath)) : new Map();
+const playerMetadata = !isVx && existsSync(playerMetadataPath) ? decodeMarshal(await readFile(playerMetadataPath)) : new Map();
 const firstPlayer = [...playerMetadata.values()].sort((a, b) => Number(field(a, 'id', 0)) - Number(field(b, 'id', 0)))[0] || null;
 const characterDir = join(source, 'Graphics', 'Characters');
 const characterFiles = new Map();
@@ -740,10 +913,12 @@ if (existsSync(characterDir)) {
 const characterFrames = Object.fromEntries([...characterFiles].map(([name, dimensions]) => [name, {
   // RGSS character sheets are four columns and four directional rows. The
   // dimensions are read from the actual PNG, so Essentials' 64px sheets and
-  // custom-sized object sheets both retain their authored geometry.
-  format: 'xp',
-  fw: dimensions.width / 4,
-  fh: dimensions.height / 4,
+  // custom-sized object sheets both retain their authored geometry. VX sheets
+  // are eight 3x4 characters (four across, two down): the 'vx' format selects
+  // the player's MV-style cell math for that layout.
+  ...(isVx
+    ? { format: 'vx', fw: dimensions.width / 12, fh: dimensions.height / 8 }
+    : { format: 'xp', fw: dimensions.width / 4, fh: dimensions.height / 4 }),
   big: false,
   object: false
 }]));
@@ -761,11 +936,26 @@ function resolvePlayerSprite(metadata) {
   const candidate = [...characterFiles.keys()].find(name => name.toLowerCase() === `trainer_${suffix}`.toLowerCase());
   return candidate ? { name: candidate, index: 0, source: 'player_metadata_trainer_fallback' } : { name: walk, index: 0, source: 'player_metadata_missing_asset' };
 }
-const playerSprite = resolvePlayerSprite(firstPlayer);
+// VX start actor: first party member's charset from the Actors table.
+function resolveVxPlayerSprite() {
+  const party = field(system, 'party_members', []);
+  const actorId = Array.isArray(party) ? Number(party[0] || 0) : 0;
+  if (!actorId) return null;
+  let actors = null;
+  try { actors = decodeMarshal(readFileSync(dataFile('Actors'))); } catch { return null; }
+  const actor = (Array.isArray(actors) ? actors : []).find(entry => Number(field(entry, 'id', 0)) === actorId);
+  const name = String(field(actor, 'character_name', '') || '');
+  if (!name || !characterFiles.has(name)) return null;
+  return { name, index: Math.max(0, Math.min(7, Number(field(actor, 'character_index', 0)))), source: 'vx-start-actor' };
+}
+const playerSprite = isVx ? resolveVxPlayerSprite() : resolvePlayerSprite(firstPlayer);
 const startMapId = Number(field(system, 'start_map_id', 0));
-const initialMap = maps.find(map => map.id === startMapId) || maps.find(map => map.data.data.some(tile => tile >= XP_STATIC_TILE_BASE)) || maps[0];
+// VX tile ids live in MV's number space (A tiles at 1536+), so the
+// has-content fallback looks there instead of XP's static base.
+const initialMap = maps.find(map => map.id === startMapId)
+  || maps.find(map => map.data.data.some(tile => tile >= (isVx ? 1536 : XP_STATIC_TILE_BASE))) || maps[0];
 const assetAvailability = {
-  tilesets: existsSync(join(source, 'Graphics', 'Tilesets')),
+  tilesets: existsSync(join(source, 'Graphics', 'Tilesets')) || (isVx && VX_TILESET_SHEETS.every(sheet => existsSync(join(vxSystemDir, `${sheet}.png`)))),
   autotiles: existsSync(join(source, 'Graphics', 'Autotiles')),
   characters: existsSync(join(source, 'Graphics', 'Characters')),
   pictures: existsSync(join(source, 'Graphics', 'Pictures')),
@@ -799,20 +989,27 @@ const fileIndex = await buildFileIndex(source);
 const textFiles = await readTextFiles(source, fileIndex);
 const libraryFailures = Object.entries(rubyLibrary?.failed || {}).map(([name, error]) => ({ name, error }));
 const libraryPartials = Object.entries(rubyLibrary?.partial || {}).map(([name, detail]) => ({ name, ...detail }));
-const xpDatabase = await convertRgssDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the RPG database (${error.message}); battles use the dialogue duel`); return null; });
+// The database mapper reads XP-shaped tables (stat names, rank curves);
+// VX's flat fields and Table curves are not mapped, so VX manifests ship
+// database {} (dialogue-duel battles, minimal menu) like the placeholder path.
+const xpDatabase = isVx ? null : await convertRgssDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the RPG database (${error.message}); battles use the dialogue duel`); return null; });
+if (isVx) console.warn('MWGP convert: the VX database is not mapped to MV-shaped tables yet; battles use the dialogue duel and the menu stays minimal');
 if (xpDatabase) console.log(`MWGP convert: database ${xpDatabase.actors.length - 1} actors, ${xpDatabase.enemies.length - 1} enemies, ${xpDatabase.troops.length - 1} troops, ${xpDatabase.skills.length - 1} skills`);
+// VX start party comes straight from System (the database mapper is skipped).
+const vxParty = isVx && Array.isArray(field(system, 'party_members', [])) ? field(system, 'party_members', []).map(Number).filter(id => id > 0) : [];
 const manifest = {
   format: 'MWGP', version: 1,
-  source: { engine: 'rpg-maker-xp', projectName: output.split(/[\\/]/).pop(), convertedAt: new Date().toISOString() },
-  display: { title: field(system, 'game_title', 'Pokémon Essentials'), width: 512, height: 384, tileSize: 32 },
+  source: { engine: isVx ? ENGINE_VX : 'rpg-maker-xp', projectName: output.split(/[\\/]/).pop(), convertedAt: new Date().toISOString() },
+  display: { title: field(system, 'game_title', isVx ? 'Untitled VX game' : 'Pokémon Essentials'), width: 512, height: 384, tileSize: VX_TILE_SIZE },
   initialMapId: initialMap?.id || null,
   player: initialMap ? { mapId: initialMap.id, x: Number(field(system, 'start_x', 0)), y: Number(field(system, 'start_y', 0)) } : null,
-  tilesetFormat: { engine: 'rpg-maker-xp', autotilePatternCount: XP_AUTOTILE_PATTERNS, autotileImageCount: XP_AUTOTILE_IMAGES, staticTileBase: XP_STATIC_TILE_BASE },
-  assets: { root: 'assets', kind: 'decoded', ...assetAvailability, faces: false, encryption: 'rgssad-extracted' },
+  tilesetFormat: isVx ? { engine: ENGINE_VX } : { engine: 'rpg-maker-xp', autotilePatternCount: XP_AUTOTILE_PATTERNS, autotileImageCount: XP_AUTOTILE_IMAGES, staticTileBase: XP_STATIC_TILE_BASE },
+  assets: { root: 'assets', kind: 'decoded', ...assetAvailability, faces: false, encryption: isVx ? 'loose-files' : 'rgssad-extracted' },
   tilesets, playerSprite, characterFrames, playerMetadata: playerMetadataValues.map(value => ({
     id: Number(field(value, 'id', 0)), trainerType: field(value, 'trainer_type', ''), walkCharset: field(value, 'walk_charset', ''), runCharset: field(value, 'run_charset', ''), cycleCharset: field(value, 'cycle_charset', ''), surfCharset: field(value, 'surf_charset', '')
-  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })), libraryFailed: libraryFailures, libraryPartial: libraryPartials } }, maps, database: xpDatabase || {},
+  })), plugins: [], compatibility: { source: isVx ? ENGINE_VX : 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })), libraryFailed: libraryFailures, libraryPartial: libraryPartials } }, maps, database: xpDatabase || {},
   ...(xpDatabase ? { initialParty: xpDatabase.system.partyMembers } : {}),
+  ...(vxParty.length ? { initialParty: vxParty } : {}),
   ...(fileIndex.length ? { fileIndex } : {}),
   ...(Object.keys(textFiles).length ? { textFiles } : {}),
   ...(rubyDataFiles.length ? { rubyData: { root: 'ruby-data', files: rubyDataFiles } } : {}),
@@ -824,9 +1021,12 @@ const manifest = {
   const audioRoot = join(output, 'assets', 'audio');
   if (existsSync(audioRoot)) {
     const track = key => audioParams(field(system, key, null));
+    // VX System keeps the twelve UI sounds in a positional array (same slots
+    // the XP converter reads as named keys); flat keys win when both exist.
+    const vxSounds = isVx && Array.isArray(field(system, 'sounds', [])) ? field(system, 'sounds', []) : [];
     const sounds = Object.fromEntries([['cursor', 'cursor_se'], ['ok', 'decision_se'], ['cancel', 'cancel_se'], ['buzzer', 'buzzer_se'], ['equip', 'equip_se'], ['shop', 'shop_se'],
       ['save', 'save_se'], ['load', 'load_se'], ['battleStart', 'battle_start_se'], ['escape', 'escape_se'], ['actorCollapse', 'actor_collapse_se'], ['enemyCollapse', 'enemy_collapse_se']]
-      .map(([name, key]) => [name, track(key)]).filter(([, value]) => value));
+      .map(([name, key], index) => [name, track(key) || audioParams(vxSounds[index])]).filter(([, value]) => value));
     // MIDI music sounds far better with a SoundFont: `--soundfont <file>`, else the project's own .sf2.
     const flagged = flags.indexOf('--soundfont') >= 0 ? flags[flags.indexOf('--soundfont') + 1] : null;
     const found = flagged || (await readdir(source)).find(name => /\.sf2$/i.test(name));
@@ -837,7 +1037,9 @@ const manifest = {
 }
 await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest, null, 2));
 console.log(`Event scripts: ${scriptStats.transpiled}/${scriptStats.total} transpiled to JS${scriptStats.failed.size ? `, ${scriptStats.failed.size} unique failed (see compatibility.scripts.failed)` : ''}`);
-console.log(`Converted ${maps.length} XP maps to ${join(output, 'mwgp.json')}`);
-for (const [key, info] of [...unsupportedCommandFallbacks].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))) {
-  if (info.count > 1) console.warn(`MWGP convert: XP event command ${key} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
+console.log(`Converted ${maps.length} ${ENGINE_LABEL} maps to ${join(output, 'mwgp.json')}`);
+for (const [fallbacks, label] of [[unsupportedCommandFallbacks, 'event command'], [unsupportedBranchFallbacks, '111 branch type'], [unsupportedOperandFallbacks, '122 operand']]) {
+  for (const [key, info] of [...fallbacks].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))) {
+    if (info.count > 1) console.warn(`MWGP convert: ${ENGINE_LABEL} ${label} ${key} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
+  }
 }

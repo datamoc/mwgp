@@ -1441,6 +1441,213 @@ try {
   fail(`--scan failed: ${String(error.message).slice(0, 300)}`);
 }
 
+// 7: VX (RGSS2) conversion (T122) - a synthetic VX project and its XP twin,
+// built with mw_games' own encodeMarshal, convert end to end and validate.
+try {
+  const vx = await import(pathToFileURL(join(root, 'tools', 'rgss-vx.mjs')).href);
+  const { encodeMarshal } = await import('@datamoc/mw_games/rpg');
+  const { deflateSync } = await import('node:zlib');
+  const vxChecks = [];
+  const check = (ok, label) => vxChecks.push([ok, label]);
+  // Reference-table sanity: every VX command classifies exactly once, and the
+  // renumbers/weather map land where the converter applies them.
+  const classified = new Set([...vx.VX_SUPPORTED, ...vx.VX_PARTIAL]);
+  check(Object.keys(vx.VX_COMMAND_NAMES).every(code => classified.has(Number(code)) || vx.vxCommandStatus(code) === 'unsupported'), 'every VX command has a status');
+  check(vx.vxRemap(203) === 202 && vx.vxRemap(204) === 203 && vx.vxRemap(205) === 209 && vx.vxRemap(214) === null, 'VX renumbers hit XP cases');
+  check(vx.vxWeatherType(1) === 'rain' && vx.vxWeatherType(2) === 'storm' && vx.vxWeatherType(3) === 'snow' && vx.vxWeatherType(9) === 'none', 'VX weather enum maps');
+  check(vx.VX_TILESET_SHEETS.length === 9 && vx.VX_TILESET_SHEETS[0] === 'TileA1', 'VX global tileset sheets listed');
+  const O = (cls, ivars) => ({ class: cls, ivars });
+  const cmd = (code, parameters, indent = 0) => O('RPG::EventCommand', { '@code': code, '@indent': indent, '@parameters': parameters });
+  const audioFile = name => O('RPG::AudioFile', { '@name': name, '@volume': 90, '@pitch': 100 });
+  const tableBytes = (w, h, z, fill) => {
+    const bytes = [];
+    for (const n of [3, w, h, z, w * h * z]) for (let i = 0; i < 4; i++) bytes.push((n >> (8 * i)) & 0xff);
+    for (let i = 0; i < w * h * z; i++) { const v = fill(i); bytes.push(v & 0xff, (v >> 8) & 0xff); }
+    return bytes;
+  };
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc32 = buf => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const pngChunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const head = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(head));
+    return Buffer.concat([len, head, crc]);
+  };
+  const png = (w, h) => {
+    const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+    const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(w * 3, 0x80)]);
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', ihdr),
+      pngChunk('IDAT', deflateSync(Buffer.concat(Array.from({ length: h }, () => row)))), pngChunk('IEND', Buffer.alloc(0))]);
+  };
+  // Hand-built Scripts container: zlib bytes cannot round-trip encodeMarshal.
+  const fixnum = n => {
+    if (n === 0) return [0];
+    if (n > 0 && n < 123) return [n + 5];
+    const bytes = []; let v = Math.abs(n);
+    while (v > 0) { bytes.push(v & 0xff); v >>>= 8; }
+    return [n < 0 ? 256 - bytes.length : bytes.length].concat(bytes);
+  };
+  const mstr = bytes => [0x22].concat(fixnum(bytes.length), [...bytes]);
+  const scriptsFile = entries => {
+    const out = [4, 8, 0x5b].concat(fixnum(entries.length));
+    for (const [id, name, code] of entries) {
+      const nb = Buffer.from(name, 'utf8'), zb = deflateSync(code);
+      out.push(0x5b, ...fixnum(3), 0x69, ...fixnum(id), ...mstr(nb), ...mstr(zb));
+    }
+    return Buffer.from(out);
+  };
+  const route = steps => O('RPG::MoveRoute', { '@repeat': false, '@skippable': false,
+    '@list': steps.map(([code, parameters]) => O('RPG::MoveCommand', { '@code': code, '@parameters': parameters })) });
+  const pageOf = (list, graphic) => O('RPG::Event::Page', {
+    '@condition': O('RPG::Event::Page::Condition', {}),
+    '@graphic': graphic || O('RPG::Event::Page::Graphic', {}),
+    '@move_type': 0, '@trigger': 0, '@list': list });
+  const buildFixture = (dir, engine) => {
+    const isVx = engine === 'vx';
+    const ext = isVx ? '.rvdata' : '.rxdata';
+    const write = (name, value) => writeFileSync(join(dir, 'Data', name + ext), Buffer.from(encodeMarshal(value)));
+    mkdirSync(join(dir, 'Data'), { recursive: true });
+    const sysIv = { '@game_title': `${engine} Probe`, '@start_map_id': 1, '@start_x': 2, '@start_y': 3,
+      '@title_bgm': audioFile('Town1'), '@battle_bgm': audioFile('Battle1'),
+      '@battle_end_me': audioFile('Victory1'), '@gameover_me': audioFile('GameOver1') };
+    if (isVx) {
+      sysIv['@party_members'] = [1];
+      sysIv['@sounds'] = [audioFile('Cursor1'), audioFile('Decision1'), null, null, null, null, null, null, null, null, null, null];
+    }
+    write('System', O('RPG::System', sysIv));
+    write('MapInfos', new Map([[1, O('RPG::MapInfo', { '@name': 'Town', '@parent_id': 0, '@order': 1 })]]));
+    write('CommonEvents', []);
+    if (isVx) write('Actors', [O('RPG::Actor', { '@id': 1, '@character_name': 'Hero', '@character_index': 2 })]);
+    else {
+      const tilesetTable = layer => tableBytes(6, 5, 1, () => layer);
+      write('Tilesets', [O('RPG::Tileset', { '@id': 0, '@tileset_name': 'World', '@autotile_names': ['028-Weiner'],
+        '@passages': O('Table', { '@raw': tilesetTable(15) }), '@priorities': O('Table', { '@raw': tilesetTable(0) }), '@terrain_tags': O('Table', { '@raw': tilesetTable(0) }) })]);
+    }
+    const list = [
+      cmd(101, ['Hello']), cmd(401, ['World']),
+      cmd(111, [1, 7, 0, 5, 1], 0),
+      cmd(126, [5, 0, 0, 3], 1), cmd(411, [], 0), cmd(125, [1, 0, 50], 1), cmd(412, [], 0),
+      cmd(212, [-1, 3, true]), cmd(213, [0, 1, false]),
+      cmd(122, [1, 2, 0, 0, 10]), cmd(122, [5, 5, 1, 7, 0]), cmd(122, [6, 6, 0, 7, 1]),
+      cmd(129, [2, 0, 0]), cmd(314, [0, 0]), cmd(313, [0, 1, 0, 5]),
+      cmd(102, [['Yes', 'No'], -1]), cmd(402, [0, 'Yes']), cmd(402, [1, 'No']), cmd(403, []), cmd(404, []),
+      cmd(301, isVx ? [0, 7, true, false] : [7, true, false]),
+      cmd(355, ['$game_variables[3] = 7']),
+      cmd(111, [12, '$game_switches[1]'])
+    ];
+    if (isVx) list.push(
+      cmd(205, [-1, route([[1, []]])]), cmd(505, []),
+      cmd(230, [30]), cmd(214, []), cmd(203, [-1, 0, 2, 3, 2]), cmd(204, [2, 5, 4]),
+      cmd(202, [0, 0, 1, 4, 5]), cmd(236, [1, 5, 60]),
+      cmd(302, [0, 5, 0, 100]), cmd(605, [1, 3, 0, 200]), cmd(303, [1, 8]),
+      cmd(211, [0, 0]), cmd(106, [20]));
+    else list.push(
+      cmd(209, [-1, route([[1, []]])]), cmd(509, []),
+      cmd(106, [20]), cmd(116, []), cmd(208, [0]), cmd(104, [2, 0]),
+      cmd(105, [2, false]), cmd(405, ['scroll line']));
+    const mapIv = {
+      '@width': 6, '@height': 5,
+      '@data': O('Table', { '@raw': tableBytes(6, 5, 3, i => (i < 30 ? 2816 : (i === 30 ? 20 : (i === 61 ? 1 : 0)))) }),
+      '@events': new Map([[1, O('RPG::Event', { '@id': 1, '@name': 'Greeter', '@x': 2, '@y': 3,
+        '@pages': [pageOf(list, O('RPG::Event::Page::Graphic', { '@character_name': 'Hero', '@character_index': 0, '@direction': 2, '@pattern': 1 }))] })]]),
+      '@bgm': audioFile('Town1'), '@autoplay_bgm': true, '@bgs': audioFile(''), '@autoplay_bgs': false
+    };
+    if (!isVx) mapIv['@tileset_id'] = 0;
+    write('Map001', O('RPG::Map', mapIv));
+    writeFileSync(join(dir, 'Data', 'Scripts' + ext), scriptsFile([[1, 'VXLib', 'class Game_VX\nend\n']]));
+    mkdirSync(join(dir, 'Graphics', 'Characters'), { recursive: true });
+    writeFileSync(join(dir, 'Graphics', 'Characters', 'Hero.png'), png(isVx ? 96 : 128, isVx ? 128 : 192));
+    if (isVx) {
+      mkdirSync(join(dir, 'Graphics', 'System'), { recursive: true });
+      for (const sheet of vx.VX_TILESET_SHEETS) writeFileSync(join(dir, 'Graphics', 'System', sheet + '.png'), png(32, 32));
+    }
+  };
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'mwgp-vx-'));
+  try {
+    const converted = {};
+    for (const engine of ['vx', 'xp']) {
+      const from = join(fixtureRoot, engine), to = join(fixtureRoot, engine + '-out');
+      buildFixture(from, engine);
+      try {
+        execFileSync(process.execPath, [join(root, 'tools', 'convert-rgss.js'), from, to], { stdio: 'pipe' });
+      } catch (error) {
+        check(false, `${engine} fixture converts (${String(error.stderr || error.message).slice(0, 200)})`);
+        continue;
+      }
+      try {
+        execFileSync(process.execPath, [join(root, 'tools', 'validate-mwgp.js'), join(to, 'mwgp.json')], { stdio: 'pipe' });
+        check(true, `${engine} fixture manifest validates`);
+      } catch (error) {
+        check(false, `${engine} fixture manifest validates (${String(error.stderr || error.message).slice(0, 200)})`);
+      }
+      converted[engine] = JSON.parse(readFileSync(join(to, 'mwgp.json'), 'utf8'));
+    }
+    const strongly = (cond, label) => check(!!cond, label);
+    if (converted.vx) {
+      const m = converted.vx, event = m.maps[0].mwgEvents[0], commands = event.pages[0].commands;
+      const flat = [];
+      (function walk(list) { for (const c of list || []) { flat.push(c); walk(c.then); walk(c.else); for (const b of c.branches || []) walk(b); if (c.cancelBranch) walk(c.cancelBranch); } })(commands);
+      const one = pred => flat.find(pred);
+      const loud = flat.filter(c => c.unsupported !== undefined).map(c => `${c.unsupported.code}:${c.unsupported.kind}`).sort();
+      strongly(m.source.engine === 'rpg-maker-vx', 'VX manifest carries the VX engine tag');
+      strongly(m.display.tileSize === 32 && m.maps.length === 1 && m.maps[0].info?.name === 'Town', 'VX map converts with its name');
+      strongly(JSON.stringify(m.tilesets[0]?.tilesetNames) === JSON.stringify(vx.VX_TILESET_SHEETS) && m.tilesets[0]?.flags?.length === 0, 'VX global tileset synthesizes with empty flags');
+      strongly(m.maps[0].data.tilesetId === 0, 'VX maps need no tileset_id');
+      const layer = l => m.maps[0].data.data.slice(l * 30, l * 30 + 30);
+      strongly(layer(0).every(t => t === 2816) && layer(4)[0] === 20 && layer(4).slice(1).every(t => t === 0)
+        && [1, 2, 3, 5].every(l => layer(l).every(t => t === 0)), 'VX tile layers land on MV 0/4, shadow dropped');
+      strongly(m.playerSprite?.name === 'Hero' && m.playerSprite?.index === 2, 'VX start actor gives the player sprite');
+      strongly(JSON.stringify(m.initialParty) === '[1]' && Object.keys(m.database || {}).length === 0, 'VX party comes from System, database stays empty');
+      strongly(commands[0]?.say === 'Hello' && commands[1]?.say === 'World', 'VX text converts');
+      strongly(one(c => c.wait === 0.5) !== undefined, 'VX 230 waits /60');
+      strongly(one(c => c.eraseEvent) !== undefined, 'VX 214 erases');
+      strongly(JSON.stringify(one(c => c.animation)?.animation) === JSON.stringify({ target: -1, animation: 3, wait: true }), 'VX 212 animates');
+      strongly(one(c => c.relocate?.target) !== undefined && one(c => c.relocate)?.relocate?.x === 2, 'VX 203 relocates (not a vehicle)');
+      strongly(one(c => c.scrollMap?.distance === 5) !== undefined, 'VX 204 scrolls');
+      strongly(one(c => c.vehicleLocation?.mapId === 1) !== undefined, 'VX 202 places the vehicle');
+      strongly(one(c => c.weather?.type === 'rain') !== undefined, 'VX 236 weathers by enum');
+      strongly(one(c => c.shop)?.shop?.goods?.length === 2, 'VX 302 shops with 605 goods');
+      strongly(one(c => c.inputName?.actorId === 1) !== undefined, 'VX 303 takes the name');
+      strongly(one(c => c.battle?.troopId === 7) !== undefined, 'VX 301 designates the troop');
+      strongly(one(c => typeof c.script === 'string' && typeof c.js === 'string') !== undefined, 'VX scripts transpile');
+      strongly(one(c => c.if?.script) !== undefined, 'VX script branches convert');
+      strongly(one(c => c.changeItem?.id === 5) !== undefined, 'VX 126 changes items');
+      strongly(one(c => c.changeParty?.actorId === 2) !== undefined, 'VX 129 changes the party');
+      strongly(one(c => c.recoverAll) !== undefined, 'VX 314 recovers the party');
+      strongly(one(c => c.choices && c.cancelBranch) !== undefined, 'VX choices keep branches');
+      strongly(JSON.stringify(loud) === JSON.stringify(['106:0', '122:7', '211:0', '313:0']), 'VX unknowns stay loud (106/122-kind7/211/313)');
+      const report = m.compatibility.commands;
+      strongly(report['205']?.status === 'supported' && report['214']?.status === 'supported'
+        && report['230']?.status === 'supported' && report['505']?.status === 'supported'
+        && report['111']?.status === 'supported' && report['122']?.status === 'partial'
+        && report['301']?.status === 'partial', 'VX compatibility report classifies');
+    }
+    if (converted.xp) {
+      const m = converted.xp, commands = m.maps[0].mwgEvents[0].pages[0].commands;
+      const flat = [];
+      (function walk(list) { for (const c of list || []) { flat.push(c); walk(c.then); walk(c.else); } })(commands);
+      const one = pred => flat.find(pred);
+      strongly(m.source.engine === 'rpg-maker-xp', 'XP manifest keeps the XP engine tag');
+      strongly(JSON.stringify(m.tilesets[0]?.tilesetNames) === JSON.stringify([null, null, null, null, null, 'World'])
+        && m.tilesets[0]?.flags?.length === 30, 'XP tileset still maps with flags');
+      strongly(one(c => c.wait === 1) !== undefined, 'XP 106 waits /20');
+      strongly(one(c => c.eraseEvent) !== undefined, 'XP 116 erases');
+      strongly(one(c => c.setTransparent === true) !== undefined, 'XP 208 sets transparency');
+      strongly(one(c => c.messageOptions) !== undefined, 'XP 104 keeps message options');
+      strongly(one(c => c.scroll?.text === 'scroll line') !== undefined, 'XP 105 scrolls with 405 lines');
+      strongly(one(c => c.battle?.troopId === 7) !== undefined, 'XP 301 keeps its troop');
+      strongly(one(c => c.modifyVariable?.operand?.gameData?.kind === 'pokemonCount') !== undefined, 'XP 122-kind7 keeps the Essentials operand');
+      strongly(m.maps[0].mwgEvents[0].pages[0].commands[2]?.then?.length === 0, 'XP 126 stays a dummy drop');
+    }
+    for (const [ok, label] of vxChecks) if (!ok) fail(`VX fixture: ${label}`);
+    if (converted.vx && converted.xp) notes.push(`VX/XP fixtures convert (${vxChecks.length} checks)`);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+} catch (error) {
+  fail(`VX fixture check failed: ${String(error.message).slice(0, 200)}`);
+}
+
 // 6: lazy per-map index (T119) - stubs keep id+info and drop data/mwgEvents,
 // every stub resolves back to its full entry, and the index is far smaller.
 try {
