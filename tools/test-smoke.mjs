@@ -101,6 +101,33 @@ for (const dir of convertedDirs) {
       notes.push(`${dir}: XP format metadata, decoded autotiles, player sprite, and data-driven start position ok`);
     }
   }
+  // Real MZ project fixture (the synthetic MZ probe further down only proves the
+  // converter on a made-up project): a locally installed MZ game must keep the MZ
+  // data shapes intact end to end — six width-major map layers with MZ's signed
+  // sentinel values stripped (normalizeMZMapData), the MV-shaped database the
+  // battle runner needs, and code 357 filed as a converted (never unsupported)
+  // pluginCommand.
+  if (project.source?.engine === 'rpg-maker-mz') {
+    const mzChecks = [];
+    const badMaps = (project.maps || []).filter(map => {
+      const width = Number(map.data?.width), height = Number(map.data?.height), tiles = map.data?.data;
+      if (!Number.isInteger(width) || !width || !Number.isInteger(height) || !Array.isArray(tiles)) return true;
+      if (tiles.length !== width * height * 6) return true;
+      return tiles.some(tile => !Number.isInteger(tile) || tile < 0 || tile >= 8192);
+    });
+    mzChecks.push([!badMaps.length, `every map carries exactly width*height*6 normalized tiles (bad: ${badMaps.slice(0, 3).map(map => map.id).join(', ') || 'none'})`]);
+    const db = project.database || {};
+    const party = (db.system?.partyMembers || []).filter(id => db.actors?.[id]);
+    mzChecks.push([!party.length || Boolean(db.troops && db.enemies && db.classes && db.skills), 'database tables the battle runner needs are present']);
+    const commandReport = project.compatibility?.commands || {};
+    mzChecks.push([(commandReport['357']?.status || 'unused') !== 'unsupported', 'MZ code 357 is never reported unsupported']);
+    const pluginReport = project.compatibility?.plugins;
+    mzChecks.push([!Object.keys(pluginReport || {}).length || Object.values(pluginReport).every(entry => ['supported', 'partial', 'unsupported'].includes(entry.status)), 'plugin census statuses are well-formed']);
+    for (const [ok, label] of mzChecks) if (!ok) fail(`${dir}: MZ fixture: ${label}`);
+    if (mzChecks.every(([ok]) => ok)) {
+      notes.push(`${dir}: MZ fixture ok (${mzChecks.length} checks: ${commandReport['357'] ? `${commandReport['357'].count} code-357 use(s) filed ${commandReport['357'].status}` : 'no code-357 uses; covered by the synthetic probe'}, ${party.length} battle party member(s))`);
+    }
+  }
 }
 
 

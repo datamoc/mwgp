@@ -436,9 +436,17 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   `Window_CommandPokemon`) are each individually wrapped by `gameClass`/`gameInstance` (every top-level class export
   gets this wrapping independently at `unit()` load time) and one calls `super()` into another. A minimal 3-level
   `class extends` repro with a base constructor returning a Proxy works fine in plain Node; the discrepancy shows up
-  only with the real generated multi-level chain. Next step: reproduce with a *minimal* 2-3-class `gameClass`-wrapped
-  chain (not the real 6-level Void one) to isolate whether `gameClass`'s `construct` trap composes incorrectly across
-  levels, before touching the wrapping logic further.
+  only with the real generated multi-level chain. **Tried and ruled out**: a 6-level repro built to match the real
+  structure exactly (each level independently `gameClass`-wrapped, `super()` chaining through each, including the
+  real `gameInstance` `[]=`/`[]` fallback branches and the shim's `has` trap) still round-trips an underscore field
+  correctly — so the bug is not in `gameClass`/`gameInstance` composing across levels as such. The real difference is
+  something specific to the actual compiled `SpriteWindow*` classes not captured by that repro (candidates not yet
+  checked: a real ES6 accessor pair on one ancestor for an unrelated key that has a side effect reachable from this
+  path; the full `known`/`callableNames` method lists interacting, rather than the simplified repro's empty ones;
+  something in how `MessageConfig` itself — a separate `__self`-wrapped module, not a class in this chain — resolves
+  when called with `this` bound to a `gameInstance` proxy vs. a plain object). Next step if resumed: binary-search the
+  real `SpriteWindow_Base` unit source (comment out pieces / simplify) rather than a hand-written repro, since the
+  hand-written repro path is now a dead end.
 - **Where Void stops** — both versions run the character select and customization scenes without a runtime error in
   the soak (7-20 dialogues) and the character select is visible (trainer sprites over the scene background; the
   text drawn with the bitmap font has not been checked by eye); the pause menu (opt-in, see above) gets further than
