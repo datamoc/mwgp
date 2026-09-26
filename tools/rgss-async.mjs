@@ -498,13 +498,52 @@ function rubyTruthinessEdits(ast, js) {
   return edits;
 }
 
+// A bare, implicit-self `each do |s| ... end` is meant to call the receiver's real `each` (a data-registry class
+// like `GameData::Stat` walking its own `DATA` table, whether `each` is a method on the class itself or hung off it
+// via a mixin - `__mixin(Stat, Object.getOwnPropertyDescriptors(ClassMethodsSymbols))` - from a module defined
+// elsewhere in the file). Ruby2JS instead compiles the bare call as direct enumeration of the receiver's own JS
+// properties - `for (let s of __values(this)) { ... }` / `__each(this)` - which is never what a real method body
+// wants (nothing meaningful enumerates its own receiver's raw property bag); tracing which scope actually supplies
+// `each` (own class body vs. some other module later mixed in) isn't needed - the shape alone is the signal.
+// Rewritten to a real call - `this.each((s) => { ... })` - only the boundary before/after the loop body is edited
+// (not the body's own text), so an edit elsewhere inside the body (e.g. `rubyTruthinessEdits`) is never nested
+// inside this edit's deleted span and can't be corrupted the way that pass's own whole-span version was.
+function selfEachEdits(ast, js) {
+  const edits = [];
+  // `enclosingEach` guards against rewriting inside `each` itself (infinite recursion) if its own body ever takes
+  // this literal shape; every real `each` seen in practice iterates a backing collection (`this.DATA`, a sorted key
+  // list, ...), never `this` directly, but the guard costs nothing and removes the possibility entirely.
+  const visit = (node, enclosingEach) => {
+    if (!node || typeof node.type !== 'string') return;
+    let nextEach = enclosingEach;
+    // A class method's value is an anonymous FunctionExpression (no `id`) - only a NAMED function/method declaration
+    // updates the flag; an anonymous one (the MethodDefinition itself already set it) must inherit it unchanged.
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') && node.id?.name) nextEach = node.id.name === 'each';
+    else if (node.type === 'MethodDefinition') nextEach = !node.computed && node.key?.name === 'each';
+    // The raw, pre-lowering AST has the bare `for (s of this)` shape (Ruby2JS's literal translation); the
+    // `__values(this)`/`__each(this)` wrapper seen in the final output is only the OTHER `ForOfStatement`-wrapping
+    // edit below applying its own rewrite to the same node - it never touches the AST itself, so a check for the
+    // wrapped-call shape here would never match. The wrap pass itself is taught to skip a bare `this` right-hand
+    // side (see its own comment) so the two edits never compete for the same node.
+    if (!enclosingEach && node.type === 'ForOfStatement' && node.left.type === 'VariableDeclaration' && node.left.declarations.length === 1
+      && node.left.declarations[0].id.type === 'Identifier' && node.right.type === 'ThisExpression') {
+      const varName = node.left.declarations[0].id.name;
+      edits.push({ pos: node.start, del: node.body.start - node.start, text: `this.each((${varName}) => ` });
+      edits.push({ pos: node.body.end, del: 0, text: ');' });
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) visit(child, nextEach); else if (value && typeof value.type === 'string') visit(value, nextEach); }
+  };
+  visit(ast, false);
+  return edits;
+}
+
 export function lowerRuby(js, known = null, zeroArg = null) {
   js = repairCallAssignments(js);
   // `::Sprite` (a top-level constant, from inside a namespace) is emitted as `Function("return this")().Sprite`: the runtime's own globals.
   js = js.split('Function("return this")()').join('__global');
   let ast;
   try { ast = parse(js); } catch { return js; }
-  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js)];
+  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js), ...selfEachEdits(ast, js)];
   const stack = [ast];
   while (stack.length) {
     const node = stack.pop();
@@ -535,7 +574,13 @@ export function lowerRuby(js, known = null, zeroArg = null) {
     // `for (x of hash)`: Ruby's `hash.each_value { |x| }` (x is the value) and `hash.each { |pair| pair[1] }` (x is the pair)
     // both compile to it, and a plain object is not iterable. A single loop variable that the body never indexes is a
     // values loop; anything else iterates [key, value] pairs. The runtime helpers pass real iterables through untouched.
-    if (node.type === 'ForOfStatement' && node.left.type === 'VariableDeclaration' && node.left.declarations[0].id.type === 'Identifier') {
+    // A bare `for (x of this)` is `selfEachEdits`'s to handle (a bare implicit-self `each` call, meant to reach the
+    // receiver's real `each`, not to enumerate its own JS properties): leave it alone here so the two passes never
+    // both edit the same node (nesting this edit's insertions inside that other edit's deleted span would corrupt
+    // the output when both are applied).
+    if (node.type === 'ForOfStatement' && node.right.type === 'ThisExpression') {
+      // no-op
+    } else if (node.type === 'ForOfStatement' && node.left.type === 'VariableDeclaration' && node.left.declarations[0].id.type === 'Identifier') {
       const variable = node.left.declarations[0].id.name;
       let indexed = false;
       const scan = [node.body];
