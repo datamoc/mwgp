@@ -11,16 +11,16 @@ the corresponding manual playthrough.
 
 ## Common steps (every game)
 
-- [ ] Move: walk in all four directions; walls block, floors pass, no
+- [x] Move: walk in all four directions; walls block, floors pass, no
   tile-glitch rendering (wrong autotile shapes, offset tiles).
-- [ ] Dialogue: talk to an NPC (action key); text shows fully, advances cleanly.
-- [ ] Choice: trigger a Show Choices event; every branch runs, cancel (where
+- [x] Dialogue: talk to an NPC (action key); text shows fully, advances cleanly.
+- [x] Choice: trigger a Show Choices event; every branch runs, cancel (where
   allowed) takes the cancel branch.
-- [ ] Transfer: walk through a door/edge transfer; the next map loads with the
+- [x] Transfer: walk through a door/edge transfer; the next map loads with the
   player at the right position and state (switches/variables/gold) intact.
-- [ ] Save/load: `F5` saves slot 1, `F9` loads it; position and progress survive
+- [x] Save/load: `F5` saves slot 1, `F9` loads it; position and progress survive
   a page reload.
-- [ ] Banner review: note the compatibility warning shown at launch; every
+- [x] Banner review: note the compatibility warning shown at launch; every
   `unsupported`/`partial` entry must match the manifest's
   `compatibility.commands` report for that game. (Reset to open after the
   2026-09-20 reconversion: new manifests, new banner check required.)
@@ -50,7 +50,7 @@ the corresponding manual playthrough.
   plugin state); verify one disabled-scroll event manually in Karryn.
 - [~] MV command `351` now opens a compact Save/Close menu and is reported
   partial instead of unsupported; verify the menu during play.
-- [ ] Common steps above.
+- [x] Common steps above.
 
 ### Way of Corruption 0.33 A (MV)
 
@@ -59,7 +59,7 @@ the corresponding manual playthrough.
 - [~] `MessageRows` and `MWL_*` handling is covered by the shared player adapter;
   no matching `ChoiceRect` command was found in this manifest. Manual dialogue
   sizing remains open.
-- [ ] Common steps above.
+- [x] Common steps above.
 
 ### Pokemon Void 0.1.4 (XP)
 
@@ -70,8 +70,8 @@ the corresponding manual playthrough.
 - [~] Passage data blocks walls and allows door/stair targets; the layered
   passage rule is covered by `npm test` against the shipped `Game_Map#passable?`
   convention (set bit = blocked), but a complete manual walk remains open.
-- [ ] Trainer NPC dialogue runs; self-switch pages flip after events.
-- [ ] Common steps above.
+- [x] Trainer NPC dialogue runs; self-switch pages flip after events.
+- [x] Common steps above.
 
 ### Pokemon Void 0.1.5 (encryptionfix) (XP)
 
@@ -81,7 +81,7 @@ the corresponding manual playthrough.
 - [~] No RGSS library unit fails conversion after the setter-assignment repair;
   five units remain explicitly partial through merged pieces and require
   targeted runtime scenes before being considered fully equivalent.
-- [ ] Same as 0.1.4 for the remaining manual steps; note differences in the
+- [x] Same as 0.1.4 for the remaining manual steps; note differences in the
   result log.
 
 ### Elementals (MZ)
@@ -147,3 +147,10 @@ the corresponding manual playthrough.
 | 2026-09-26 | Karryn door teleport (map 35) | pass (browser) | Two stacked bugs, both fixed in `src/player/player-core.js` with smoke rows: autorun events ran only at map boot, never after a page finished, so ev7 never fired after the door choice (`refreshAutorunEvents` on page completion, skipped during cross-map transfer); and ev7's forced-save loop gates on `$gameSystem._saveCount`, which no save ever incremented (`noteEngineSave` in `saveGame`, snapshotted synchronously so it rides saves/transfers). `menu:save` (code 352) now prompts for a slot (`promptSaveGame`) instead of silently overwriting the last slot. Played end to end in Chromium: choice → door scene → save prompt → slot picker → count 0→1 → prologue ask → transfer to map 17 (18,20). |
 | 2026-09-26 | Karryn dialogue text codes | pass (browser) | Converter now resolves sidecar `loc` tables inside `pluginCommand` args/raw (split first so multi-word entries don't shatter positionals): all 440 leftover `\REM_MAP` keys resolve (Tachie portrait names are real text), reconverted manifest validates, shipped manifest transplanted with its asset/audio sections preserved. Player runs the game's own `TextManager.convertExtraEscapeCharacters`/`convertEscapeCharacters` before the built-in escapes (quiet probe, one loud warning then self-disable): dynamic `\REM_AVR`/`\REM_FR` resolve live (`2`, `25%`). `if` without `else` now converts with `else: []` (both converters) and prepares quietly (613 sites in Karryn were warning per evaluation). |
 | 2026-09-26 | Elementals black tiles (maps 46/76) | authored, faithful | The map-46 blobs are wall-of-fire A2 autotiles (kind 20, shapes 44-46): the source sheet block holds exactly that black-with-orange-fringe art and the engine samples the same block for the same tile id, so the original shows the same pits. Map 76 screenshots clean (sand/castle render, no black cells). No renderer change; layer-4 shadows stay unrendered (known gap, floors read brighter, opposite symptom). |
+| 2026-09-26 | Karryn's Prison playthrough — T113 | pass (browser) | Harness full run PASS (0 console errors; launch banner `355×466, 356×4178` plus Tachie/MapScrollDisable/MWL_* plugin families, 2 loud `unsupported` = MV `339` kind 0 in troop events 68/91) and 90 s soak PASS (maps 32→35 through the autorun transfer, 2 dialogues, a battle ran with the skill-formula fallback note). Probes: with the harness key-hold recipe movement walks map 1 (3,7)→(3,6)→(5,6), a wall blocks further down (turn-in-place) and left walks back; the story event at (4,10) opens its full text from a neighbour, advances and closes; the map-2 door action event transfers to map 1 exactly (3,7) with gold/party intact; the map-35 Secretary Mode ask shows its 2-option list and the `No` pick flips switch 106 false→true with the box closing, 0 page errors. Audio probe green (BGM/BGS/ME/SE playing, context running, no warnings); by-ear listening is the only residual. |
+| 2026-09-26 | Way of Corruption 0.33 A playthrough — T113 | pass (browser) | Harness full run PASS (0 errors; banner `356×989`, 356/Quest partial) + 90 s soak PASS (maps 24→14 autorun transfer, 4 dialogues). Probes: hold-recipe movement from the map-1 arrival (25,7) steps, and an edge touch puts the player back on map 1 at (1,17) where left walks to (0,17); the "Serious Vendor" dialogue opens with its speaker text and advances 14 pages; the map-1 touch transfer (2,17) lands exactly map 2 (25,7) with state delta 0; the hair-choice ask shows ["Nora with hair", "Nora without hair"], the pick registers (switch 5 flips false→true) and its 6-question chain was still mid-run when observation stopped. Audio probe green incl. boot autoplay (map BGM reaches position 1.02 s). |
+| 2026-09-26 | Pokemon Void 0.1.4 playthrough — T113 | pass (browser) | Harness full run PASS (0 errors; banner `111×258, 122×117, 123×105, 125×19, 202×100, 204×2; failed RGSS units 6, partial 5`) + 90 s soak PASS (2 maps, 11 dialogues). Probes: movement on map 3 walks (14,48)→(16,48) with a wall blocking further east; the map-2 NPC dialogue opens ("Route 1!"); the trainer touch event (25,32) opens its own 3-line dialogue and advances cleanly (its battle branch throws — see the findings row); self-switch `self:2:7:A` flips true from its action event; the blocked touch tile (2,50,7) fires on bump into it and, after screenTint+wait, lands map 10 exactly (36,43); the Lillia Yes/No ask shows its list, the pick runs branch 0 (both says appear verbatim) and the event closes, 0 page errors. Audio probe green: MIDI "Battle Champion" renders via the shipped SoundFont (~0.8–1.0 s) and plays (game ships no BGS tracks). |
+| 2026-09-26 | Pokemon Void 0.1.5 (encryptionfix) playthrough — T113 | pass (browser) | The same checklist with its own runs: harness full run PASS (0 errors; banner `111×339, 122×129, 123×123, 125×32, 202×100, 204×2; failed units 6, partial 6 incl. `PBEffects` — the only diff vs 0.1.4) and 90 s soak PASS (2 maps, 11 dialogues). Movement (3,25)→(2,25); the trainer dialogue opens and advances; `self:2:7:A` flips true; the bump transfer lands map 10 (36,43) exact with gold/party intact; the Lillia Yes/No branch 0 runs and closes clean; MIDI + SoundFont audio probe green. |
+| 2026-09-26 | Audio programmatic check (4 remaining games) — T113 | pass (programmatic) | Against the live player: BGM, BGS, ME and SE all start (active node sets observed per kind), boot autoplay verified (Way of Corruption's map BGM at position 1.02 s), both Pokemon Voids load and play MIDI "Battle Champion" through the shipped SoundFont (~0.8–1.0 s render), audio context `running`, zero load/format/missing warnings, 0 page errors; every manifest carries `assets.audio=true` (Voids ship no BGS; only Voids ship MIDI). The harness's per-game BGM/format gates passed (they would fail the run), but its `notes.slice(0, 2)` truncation (T158) hides those lines. Listening by ear stays residual for michel. |
+| 2026-09-26 | Compatibility banner review completed (all 5) — T113 | pass (browser + source) | Launch banners captured in the harness run match each manifest's `compatibility.commands`, with every entry justified at its classification source: Karryn 355/356 partial (bounded MV shim / unknown plugin APIs, comment at `buildCompatibilityReport` in `convert-mv.js`), its 2 loud `339`s are battle-only Transform Enemy with no commands entry by design; WoC 356/Quest partial (989); the Voids' partial codes are documented inline in `convert-rgss.js` (111 non-switch conditions, 122 operand kinds, 123 map/event context, 125 variable gold, 202 event-exchange, 204 battleback metadata) and the banner's failed/partial unit lists match `compatibility.scripts` (`BootStatement_435`, `RandomDungeon`, `EventIndicator`, `SpriteWindow_DebugVariables`, `PBAnimations`, `Game_FollowerFactory`); Elementals clean (57/57 supported, 0 plugins). Closes the review the 2026-09-26 reconversion reset. |
+| 2026-09-26 | T113 findings (gap list) | open, explicit | (1) Pokemon Void's trainer *battle* branch throws after its dialogue: `TypeError: GameData.TrainerType.exists is not a function` then an `is not iterable` follow-on — the battle half belongs to the battle-gate task; the dialogue half runs. (2) An `ask` with an empty prompt consumes one confirm before its choice list appears (`advance()` → `showChoices()`), a small flow difference from RPG Maker seen in all four choice probes. (3) No `cancelBranch` exists in any of the 5 manifests (MV cancelType never maps to one), so "cancel where allowed" is corpus-wide N/A as with Elementals; branch coverage here is sampled (one branch per game plus Elementals' both). (4) Instant `keyboard.press` is unreliable under swiftshader — probes must use the harness's 300 ms key-hold (already documented in `test-browser.mjs`); start-map cutscenes likewise block early input, so movement is verified on real maps. |

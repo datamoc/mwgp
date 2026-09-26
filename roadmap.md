@@ -110,6 +110,22 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
 
 ## Recent (coord-tracked)
 
+- **T113 — Play all 5 converted games through the manual checklist and log results (done).** The four
+  remaining games (Karryn's Prison, Way of Corruption 0.33 A, Pokemon Void 0.1.4 and 0.1.5) were played
+  in Chromium against `docs/play-checklist.md` and logged as dated rows, together with the common steps:
+  movement (harness key-hold recipe — instant `keyboard.press` falls between frames under swiftshader;
+  walls block, floors pass, turn-in-place counts), NPC dialogue with real text advancing and closing,
+  Show Choices events with a branch proven by a switch flip or its verbatim branch says, door/touch/bump
+  transfers landing at exact coordinates with gold/party/switch state intact (Void's blocked touch tile
+  fires on bump after screenTint+wait), F5/F9 + reload survival through the harness, and a completed
+  compatibility-banner review — every `unsupported`/`partial` entry matched to its classification comment
+  in `convert-mv.js`/`convert-rgss.js`. Audio verified programmatically per kind (BGM/BGS/ME/SE active
+  nodes, boot autoplay, MIDI+SoundFont render for the Voids); by-ear listening stays residual for michel.
+  Full harness runs (0 console errors) and 90 s soaks back every row. Gap list logged explicitly: Void's
+  trainer battle branch throws on `GameData.TrainerType.exists` (battle-gate scope), empty-prompt asks
+  consume one confirm before their choice list shows, no `cancelBranch` exists anywhere in the corpus, and
+  the harness's `notes.slice(0, 2)` still hides per-game detail (T158). Closes the manual-playthrough gate
+  T114/T115/T116/T117/T125/T127/T128 were waiting on.
 - **T121 — MZ playthrough + MZ-specific command coverage (done).** Elementals (MZ, 89 maps) played
   through in the browser: opening sequence with three choice scenes (both branches sampled), the
   map 1 → map 2 transfer landing at (11, 3) with gold/party carried through the SaveSystem reload,
