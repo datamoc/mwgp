@@ -41,6 +41,7 @@ const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 
 // One keyboard probe per page: RGSS `Input` reads it (see rgss-classes.js).
 let keyProbe = null;
+let lastMatch = null;   // Ruby's `$~`, set by String#test
 
 // The few Ruby core methods that Ruby2JS leaves as plain method calls and that game code
 // leans on everywhere. Installed once, non-enumerable, so nothing that iterates keys
@@ -82,6 +83,16 @@ function installRubyCore() {
   define(Object.prototype, 'send', function (name, ...args) { const target = this[String(name)]; return typeof target === 'function' ? target.apply(this, args) : target; });
   define(Object.prototype, 'public_send', function (name, ...args) { return this.send(name, ...args); });
   define(Object.prototype, 'tap', function (block) { block(this); return this; });
+  // `str =~ /re/` is emitted as `str.test(/re/)`.
+  // It also records the match for `$~` (`$MATCH`: pre_match, post_match, groups), which the game's loops read.
+  define(String.prototype, 'test', function (pattern) {
+    const text = String(this);
+    if (!(pattern instanceof RegExp)) { const at = text.indexOf(String(pattern)); lastMatch = at < 0 ? null : { text, index: at, groups: [String(pattern)] }; return at >= 0; }
+    const flags = pattern.flags.replace('g', '').replace('y', '');
+    const found = new RegExp(pattern.source, flags).exec(text);
+    lastMatch = found ? { text, index: found.index, groups: [...found] } : null;
+    return Boolean(found);
+  });
   // Ruby String/Numeric conversions that Ruby2JS leaves as method calls.
   define(String.prototype, 'to_i', function (base = 10) { const value = parseInt(String(this).replace(/_/g, ''), base); return Number.isNaN(value) ? 0 : value; });
   define(String.prototype, 'to_f', function () { const value = parseFloat(String(this)); return Number.isNaN(value) ? 0 : value; });
@@ -103,6 +114,8 @@ function installRubyCore() {
       });
     }
   }
+  // Hash#include? (key membership); Array and String keep their own `includes`.
+  define(Object.prototype, 'includes', function (key) { return Object.prototype.hasOwnProperty.call(this, key); });
   // Hash#map / #each_pair over a plain object (a Ruby Hash): the block receives [key, value] pairs. Arrays, Maps and Sets
   // keep their own `map`.
   define(Object.prototype, 'map', function (block) { return Object.entries(this).map(block); });
@@ -302,6 +315,10 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // A paren-less zero-arg read compiles to a call when the game `def`s that name and to a
   // property read otherwise (see tools/rgss-library.mjs); expose the same shape.
   const definedMethods = new Set(library?.methods || []);
+  // Names the converter always reads as properties (JS-native members: `keys`, `length`, `map`, ...), even when the game defines a
+  // method of that name: never wrapped as callable readers.
+  const NATIVE_PROPERTY_NAMES = new Set(['length', 'size', 'map', 'filter', 'find', 'findIndex', 'includes', 'indexOf', 'lastIndexOf', 'slice', 'join', 'concat', 'reverse', 'sort', 'forEach', 'keys', 'values', 'entries', 'toString', 'valueOf', 'state']);
+  const callableMethods = new Set([...definedMethods].filter(name => !NATIVE_PROPERTY_NAMES.has(name)));
   // One browser frame: resolves on the next animation frame. A loop that never awaits it (an unlifted sync spin)
   // trips the counter, which only a real frame boundary resets.
   let framesSpun = 0;
@@ -482,9 +499,19 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // such names with a function returning the value, and keep `this` as the instance, since the class's own code
   // reads them as calls too.
   const gameInstance = instance => (definedMethods.size ? new Proxy(instance, {
+    set: (target, key, value, receiver) => {
+      if (typeof key === 'string' && !(key in target) && typeof target['[]='] === 'function') { target['[]='](key, value); return true; }
+      return Reflect.set(target, key, value, receiver);
+    },
     get: (target, key, receiver) => {
       const value = Reflect.get(target, key, receiver);
-      return typeof key === 'string' && typeof value !== 'function' && definedMethods.has(key) && Reflect.has(target, key) ? () => value : value;
+      // `obj.keys` / `obj.values` on a game hash-like class: Ruby2JS reads them as properties, but the class defines methods.
+      if ((key === 'keys' || key === 'values') && typeof value === 'function') return arrayLikeCallable(() => value.call(receiver));
+      // Index syntax on a class that defines Ruby's `[]` / `[]=`: `options[name]` calls the method.
+      if (value === undefined && typeof key === 'string' && typeof target['[]'] === 'function' && !(key in target)) return target['[]'](key);
+      // Never for an underscore-prefixed key: that's a plain ivar field, never a method call, even if some unrelated
+      // class in the game happens to define a method of that literal (underscored) name.
+      return typeof key === 'string' && !key.startsWith('_') && typeof value !== 'function' && callableMethods.has(key) && Reflect.has(target, key) ? () => value : value;
     }
   }) : instance);
   // `Klass.keys` is a static method here but Ruby2JS reads it as a property (`Klass.keys[0]`, `.keys.first`): the method
@@ -537,7 +564,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   const screen = dialect === 'rgss' && typeof document !== 'undefined' ? createRgssScreen({ width: Number(scene.project?.display?.width) || 640, height: Number(scene.project?.display?.height) || 480 }) : null;
   const rgssClasses = createRgssClasses({
     screen,
-    callableNames: definedMethods,
+    callableNames: callableMethods,
+    rawFile: path => { const key = fsPath(path).toLowerCase(); return fsFiles.has(key) ? (fsText.get(key) ?? String.fromCharCode(0)) : undefined; },
     warnOnce, files: virtualFiles,
     uptime: () => ((typeof performance !== 'undefined' ? performance.now() : startedAt) - startedAt) / 1000 + (scene.rpgExtra?.rgss?.data?.uptimeBase || 0),
     keys: typeof window !== 'undefined' ? (keyProbe ||= createKeyProbe(window)) : null,
@@ -564,7 +592,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       get: (object, key) => {
         const value = Reflect.get(object, key, object);
         if (typeof value === 'function') return typeof key === 'string' && key !== 'constructor' ? value.bind(object) : value;
-        return typeof key === 'string' && definedMethods.has(key) ? () => value : value;
+        // Never for an underscore-prefixed key: that's a plain ivar field, never a method call.
+        return typeof key === 'string' && !key.startsWith('_') && definedMethods.has(key) ? () => value : value;
       }
     })
   });
@@ -578,7 +607,9 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       get trainer_type() { return rgss().data["player.trainer_type"] ?? "PLAYER"; }
     }),
     $game_switches: keyed(key => current.state.game.switch(key), (key, value) => current.state.game.setSwitch(key, Boolean(value))),
-    $game_variables: keyed(key => current.state.game.variable(key), (key, value) => current.state.game.setVariable(key, Number(value))),
+    // Variables store raw values like MV/XP (a script can keep a string: Ruby's
+    // `slice!` returns one). Readers coerce to Number where they do arithmetic.
+    $game_variables: keyed(key => current.state.game.variable(key), (key, value) => current.state.game.setVariable(key, value)),
     $game_self_switches: keyed(key => current.state.game.switch(selfKey(key)), (key, value) => current.state.game.setSwitch(selfKey(key), Boolean(value))),
     $game_map: openObject('map', {
       get map_id() { return reader('map_id', () => mapId); },
@@ -645,6 +676,20 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     // `Object.defineProperties(X, Object.getOwnPropertyDescriptors(M))` to this).
     // `::Name` from inside a namespace: the sandbox's own global lookup (builtins, then the game's units).
     get __global() { return scope; },
+    // Ruby `slice!` on a String (emitted as `.splice`): the removed piece is returned and the variable reassigned; an Array is
+    // spliced in place.
+    __splice: (target, assign, ...args) => {
+      if (Array.isArray(target)) return target.splice(...args);
+      const [start, length] = args;
+      const text = String(target ?? '');
+      const from = start < 0 ? Math.max(0, text.length + start) : start;
+      const count = length === undefined ? 1 : length;
+      const removed = text.slice(from, from + count);
+      assign(text.slice(0, from) + text.slice(from + count));
+      return removed;
+    },
+    // Ruby's `$~` (English: `$MATCH`): the last `str =~ /re/` match.
+    get $MATCH() { return lastMatch ? { pre_match: lastMatch.text.slice(0, lastMatch.index), post_match: lastMatch.text.slice(lastMatch.index + lastMatch.groups[0].length), to_a: lastMatch.groups, ...lastMatch.groups } : null; },
     __mixin: (target, descriptors) => { for (const key of Reflect.ownKeys(descriptors)) if (!Object.prototype.hasOwnProperty.call(target, key)) Object.defineProperty(target, key, descriptors[key]); return target; },
     __values: value => (value != null && typeof value === 'object' && typeof value[Symbol.iterator] !== 'function' ? Object.values(value) : value),
     __each: value => (value != null && typeof value[Symbol.iterator] !== 'function' && typeof value === 'object' ? Object.entries(value) : value),
@@ -658,6 +703,13 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       exist: fsExists, exists: fsExists, file: path => fsFiles.has(fsPath(path).toLowerCase()), directory: path => fsDirs.has(fsPath(path).toLowerCase()), readable: fsExists,
       // Embedded text files only (bitmap-font descriptors, tables); anything else reads as empty.
       read: path => fsText.get(fsPath(path).toLowerCase()) ?? '',
+      // Read-only: a file in the index opens (its text, when embedded; otherwise a single NUL byte per read), anything else is ENOENT.
+      open: (path, mode, block) => {
+        if (!fsFiles.has(fsPath(path).toLowerCase())) throw Object.assign(new Error(`No such file or directory - ${path}`), { name: 'Errno::ENOENT', code: 'ENOENT' });
+        const text = fsText.get(fsPath(path).toLowerCase());
+        const file = { read: length => (text !== undefined ? (length === undefined ? text : text.slice(0, length)) : String.fromCharCode(0).repeat(length === undefined ? 0 : length)), readlines: () => (text ?? '').split(String.fromCharCode(10)), close() {}, eof: () => true, each_line() {}, path: String(path) };
+        return typeof block === 'function' ? block(file) : file;
+      },
       readlines: path => (fsText.get(fsPath(path).toLowerCase()) ?? '').split(String.fromCharCode(10)).map(line => line + String.fromCharCode(10)),
       // Path helpers (pure string work; there is no file system here).
       join: (...parts) => parts.flat().map(String).map(part => part.split(String.fromCharCode(92)).join('/')).filter((part, index) => part !== '' || index === 0).join('/').split('//').join('/'),
@@ -672,11 +724,13 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     // callback shape without letting the transpiled `eachPath` block call
     // escape into an unbound `_implicitBlockYield`.
     RTP: {
+      // The game's own paths resolve against the project file index (`fileIndex`): the callback gets the path as given, and the
+      // game's own existence checks (`FileTest.exist`, `File.open`) answer from the index.
       eachPathFor: (filename, callback) => {
-        // The browser asset resolver handles decoded files separately; do not
-        // feed a synthetic disk path into Essentials' FileTest/PB loader.
-        // Leaving the callback untouched means “not found” and lets the
-        // player continue without a portrait rather than throwing in Ruby2JS.
+        if (!filename || typeof callback !== 'function') return;
+        // Only a path that exists (as given, or with an image/audio extension) is yielded: no file, no callback.
+        if (['', '.png', '.gif', '.jpg', '.jpeg', '.bmp', '.ogg', '.wav', '.mid', '.midi', '.mp3'].some(extension => fsExists(String(filename) + extension))) callback(String(filename));
+        else warnOnce(`RTP file ${filename}`, 'is not among the project files (a resource lookup will come back empty)');
       },
       eachPath: callback => {
         if (typeof callback === 'function') callback('./');
@@ -892,7 +946,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // assigns the game's global: `$player`, `$bag`, ...). Every map change reloads the page, so after each script the values
   // are written back (`save_value`) as plain data: class name + fields, with shared/cyclic references kept by id.
   const bootIds = library?.boot || [];
-  let bootReady = !bootIds.length || dialect !== 'rgss';
+  let bootReady = !(library?.boot?.length || library?.bootStatements?.length) || dialect !== 'rgss';
   const encodeState = (value, seen = new Map()) => {
     if (value === null || value === undefined || typeof value === 'string' || typeof value === 'boolean') return value ?? null;
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -923,6 +977,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     for (const [key, item] of Object.entries(data.$p ?? data.$o ?? {})) raw[key] = decodeState(item, refs);
     return out;
   };
+  const bootStatementNames = library?.bootStatements || [];
   const ensureBoot = () => {
     if (bootReady) return;
     bootReady = true;
@@ -940,6 +995,18 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         else if (typeof record.new_game_value === 'function') record.load_value(record.new_game_value());
       } catch (error) { console.warn(`MWGP save-data value "${id}" could not be set up: ${String(error?.message || error).slice(0, 160)}`); }
     }
+    runBootStatements();
+  };
+  // Registrations on handler registries (`MenuHandlers.add`, `GameData::X.register`, ...): each statement is a unit whose code
+  // runs when loaded. They run in script order, once, quietly: a statement that cannot run is counted, not logged one by one.
+  const runBootStatements = () => {
+    if (!bootStatementNames.length || dialect !== 'rgss') return;
+    let failed = 0;
+    for (const name of bootStatementNames) {
+      try { compile(fixExportedGetters(units[name])).call(scope, scope); }
+      catch (error) { failed++; if (failed <= 3) warnOnce(`registration ${name}`, String(error?.message || error).slice(0, 100)); }
+    }
+    if (failed) console.warn(`MWGP ${failed} of ${bootStatementNames.length} handler registrations could not run`);
   };
   const snapshotBoot = () => {
     if (!bootIds.length || dialect !== 'rgss') return;
@@ -1162,6 +1229,12 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       // library slice). Keep the event alive: calls to known game-defined but
       // absent methods become the same loud callable stub used for free names,
       // rather than a fatal `undefined is not a function`.
+      // RGSS engine built-ins the game's scripts extend but never create: `RPG::Cache` keeps its bitmaps in `@cache`.
+      // ... and the small RPG data classes the engine defines (audio file descriptors carry name, volume and pitch).
+      if (name === 'RPG' && adapted && typeof adapted === 'object' && !adapted.AudioFile) {
+        adapted.AudioFile = class AudioFile { constructor(name = '', volume = 100, pitch = 100) { this._name = name; this._volume = volume; this._pitch = pitch; } get name() { return this._name; } set name(value) { this._name = value; } get volume() { return this._volume; } set volume(value) { this._volume = value; } get pitch() { return this._pitch; } set pitch(value) { this._pitch = value; } };
+      }
+      if (name === 'RPG' && adapted?.Cache && typeof adapted.Cache === 'object' && adapted.Cache._cache === undefined) adapted.Cache._cache = {};
       // The game's classes construct instances that honour the call-vs-property rule (see `gameInstance`).
       let exposed = adapted;
       if (dialect === 'rgss' && typeof adapted === 'function') exposed = gameClass(adapted);
@@ -1269,7 +1342,7 @@ ${iterableLoops(js)}
         for (const thunk of pending) await thunk();
         return true;
       } catch (error) {
-        console.error('MWGP RGSS script failed', describe(script), error);
+        console.error('MWGP RGSS script failed', describe(script), error, error?.stack || new Error('(no JS stack: a bare Ruby raise)').stack);
         screen?.disposeSince(screenMark);
         return false;
       } finally { queue = null; snapshotEngine(); snapshotBoot(); }

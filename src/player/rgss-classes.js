@@ -39,7 +39,7 @@ export function createKeyProbe(target = typeof window !== 'undefined' ? window :
   return { down: symbol => any(held, symbol), pressed: symbol => any(latched, symbol) || any(edges, symbol), update: () => { latched = new Set(edges); edges.clear(); } };
 }
 
-export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = null, reopened = () => undefined, shipped = () => undefined, imageUrl = () => null, screen = null, callableNames = null }) {
+export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = null, reopened = () => undefined, shipped = () => undefined, imageUrl = () => null, screen = null, callableNames = null, rawFile = () => undefined }) {
   const loud = (owner, method) => () => { warnOnce(`${owner}.${method}`, 'needs the RGSS display layer, which the headless script runtime does not have'); };
 
   // Value objects (Color, Tone, Rect, Font) answer a name the game `def`s anywhere as a callable reader (`clr.red()`): the game
@@ -112,6 +112,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
   Object.assign(Font, { default_name: 'Arial', default_size: 22, default_bold: false, default_italic: false, default_shadow: false, default_outline: true, default_color: new Color(255, 255, 255, 255), default_out_color: new Color(0, 0, 0, 128) });
 
   // ---- display classes: state is kept, drawing and pixel access are loud no-ops -----------
+  const receiverOf = target => target;
   const display = (owner, methods, extra = {}) => {
     const known = new Set(methods);
     return class {
@@ -123,14 +124,18 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
             if (Object.hasOwn(store, key)) {   // own only: Object.prototype carries Ruby fallbacks (`disposed`)
               const value = store[key];
               // A name the game `def`s anywhere is read as a call (`this.opacity()`), including while a subclass is still constructing.
-              return callableNames?.has(key) && typeof value !== 'function' && value !== undefined ? () => value : value;
+              // Never for an underscore-prefixed key: that's always a plain ivar field (`@x` -> `this._x`), never a method call,
+              // even when some unrelated class in the game happens to define a method of that literal (underscored) name.
+              return callableNames?.has(key) && !key.startsWith('_') && typeof value !== 'function' && value !== undefined ? () => value : value;
             }
             if (key === 'dispose') return () => { store.__disposed = true; screen?.remove(store); };
             if (key === 'disposed') return () => Boolean(store.__disposed);
             // update / flash / effects: nothing to advance or show (the screen draws bitmaps only).
             if (key === 'update' || key === 'flash') return () => undefined;
             if (known.has(key)) return (...callArgs) => { loud(owner, key)(); return undefined; };
-            return Reflect.get(target, key);
+            // Accessors a game subclass defines (`columns`, ...) are read as calls too.
+            const inherited = Reflect.get(target, key, receiverOf(target, key));
+            return callableNames?.has(key) && typeof inherited !== 'function' && inherited !== undefined && !key.startsWith('_') ? () => inherited : inherited;
           },
           set: (target, key, value) => { store[key] = value; return true; },
           has: (target, key) => key in store || known.has(key) || key in target
@@ -336,14 +341,21 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
       throw new Error('Marshal.load: only data dumped by Marshal.dump in this session can be loaded');
     }
   };
-  const enoent = path => Object.assign(new Error(`No such file or directory - ${path}`), { name: 'Errno::ENOENT', code: 'ENOENT' });
+  // Ruby's Errno classes (the game rescues them by class) and the engine's own error classes.
+  class SystemCallError extends Error {}
+  const Errno = Object.fromEntries(['ENOENT', 'EINVAL', 'EACCES', 'EISDIR', 'EEXIST', 'ENOTDIR'].map(code => [code, class extends SystemCallError { constructor(message) { super(message); this.name = `Errno::${code}`; this.code = code; } }]));
+  class RGSSError extends Error {}
+  class MKXPError extends Error {}
+  const enoent = path => new Errno.ENOENT(`No such file or directory - ${path}`);
   const normalizePath = path => String(path ?? '').replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
   // save_data/load_data: a virtual file store (kept in the saved rpgExtra); files the game ships in
   // Data/ are not converted, so reading one that was never written raises ENOENT like a missing file.
-  const load_data = path => {
+  const load_data = (path, raw = false) => {
     const stored = files.get(normalizePath(path));
     if (stored !== undefined) return deepClone(stored);
     // A Data file the game ships (exported by the converter): the same decoded value every time.
+    // `load_data(path, true)` (MKXP): the file's raw contents, here a file the project lists (its text when embedded).
+    if (raw === true) { const content = rawFile(String(path)); if (content !== undefined) return content; }
     const bundled = shipped(normalizePath(path));
     if (bundled === undefined) throw enoent(path);
     return bundled;
@@ -382,6 +394,6 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
 
   return {
     Input: withGameConstants('Input', input), System: withGameConstants('System', system), Marshal: marshal, load_data, save_data,
-    Color, Tone, Rect, Font, Table, Bitmap: drawable ? CanvasBitmap : BitmapBase, Sprite, Viewport, Plane, Window, Tilemap
+    Errno, RGSSError, MKXPError, Color, Tone, Rect, Font, Table, Bitmap: drawable ? CanvasBitmap : BitmapBase, Sprite, Viewport, Plane, Window, Tilemap
   };
 }

@@ -25,6 +25,7 @@ import { convert, parse, Filter } from '../transpilers/ruby2js-master/demo/selfh
 import Functions from '../transpilers/ruby2js-master/demo/selfhost/filters/functions.js';
 import Combiner from '../transpilers/ruby2js-master/demo/selfhost/filters/combiner.js';
 import Return from '../transpilers/ruby2js-master/demo/selfhost/filters/return.js';
+import * as acorn from 'acorn';
 import { RgssCalls, setKnownMethods, addKnownMethods, setSelfMethods, collectDefNames } from './rgss-call-filter.mjs';
 import { resolveInitializeAliases } from './rgss-initialize-alias.mjs';
 import { repairCallAssignments } from './rgss-repair.mjs';
@@ -95,8 +96,23 @@ function bootRegistration(node, bytes) {
   return { id, name: `BootValue_${id}`, node, text: `BootValue_${id} = { ${entries.join(', ')} }` };
 }
 
+// A top-level registration on a handler registry (`MenuHandlers.add(:pause_menu, :pokedex, {...})`,
+// `ItemHandlers::UseOnPokemon.add(...)`, `GameData::TerrainTag.register(...)`): plain arguments (hashes of procs), no DSL. Kept as
+// an ordered "boot statement" so the registries are filled when the game starts, as they are when Ruby loads the scripts.
+const constPath = node => (node?.type === 'const' ? `${node.children[0] ? `${constPath(node.children[0])}::` : ''}${node.children[1]}` : null);
+function bootStatement(node, bytes) {
+  const call = node.type === 'block' ? node.children[0] : node;
+  if (call?.type !== 'send') return null;
+  const receiver = constPath(call.children[0]);
+  if (!receiver || !['add', 'register'].includes(String(call.children[1]))) return null;
+  if (!receiver.endsWith('Handlers') && !receiver.startsWith('GameData::')) return null;
+  const location = node.location ?? node.loc;
+  return { text: bytes.subarray(location._start_offset, location._end_offset).toString('utf8') };
+}
+
 export function indexScripts(scripts, log = () => {}) {
   const bootNames = [];
+  const bootStatementNames = [];
   const units = new Map(); // name -> { kind, pieces: [{ script, text }], sends, consts, methods }
   const allDefNames = new Set();
   for (const script of scripts) {
@@ -120,6 +136,8 @@ export function indexScripts(scripts, log = () => {}) {
       // `SaveData.register(:player) do save_value { ... }; load_value { |v| ... }; new_game_value { ... } end`: a save-data
       // registration written in Ruby's instance_eval DSL, which Ruby2JS cannot express. Kept as a "boot" unit: a hash of
       // lambdas the runtime applies at startup (see `bootState` in rgss-script.js).
+      const statement = bootStatement(node, bytes);
+      if (statement) { const name = `BootStatement_${bootStatementNames.length}`; record(name, 'const', node, new Set(), statement.text); bootStatementNames.push(name); continue; }
       const boot = bootRegistration(node, bytes);
       if (boot) { record(boot.name, 'const', boot.node, new Set(), boot.text); boot.id && bootNames.push(boot.name); continue; }
       if ((node.type === 'module' || node.type === 'class') && GLOBAL_SCOPES.includes(constRoot(node.children[0])) && node.children[0].children[0] == null) {
@@ -141,7 +159,7 @@ export function indexScripts(scripts, log = () => {}) {
     }
   }
   const interpreter = INTERPRETER_CLASSES.find(name => units.get(name)?.kind === 'const' && units.get(name).methods.size) || null;
-  return { units, allDefNames, bootNames, interpreter, interpreterMethods: interpreter ? units.get(interpreter).methods : new Set() };
+  return { units, allDefNames, bootNames, bootStatementNames, interpreter, interpreterMethods: interpreter ? units.get(interpreter).methods : new Set() };
 }
 
 // Names event snippets reach: units they reference directly, plus the interpreter
@@ -186,6 +204,27 @@ export const nilSafeToString = js => js.replace(/(?<![\w$.)\]])([A-Za-z_$][\w$]*
 let methodOnlyNames = new Set();
 export function setMethodOnlyNames(names) { methodOnlyNames = new Set(names || []); }
 
+// A patch script redefining a helper (`def pbExclaim` twice across pieces) reaches
+// JS as duplicate top-level `function NAME` declarations. Bare they validate, but
+// the runtime compiles units inside `with (scope)`, where the duplicate throws and
+// the whole unit fails to load. Ruby's last definition wins, so earlier ones are
+// dropped (hoisting already made the last one the visible binding everywhere).
+function dropShadowedFunctions(js) {
+  let ast;
+  try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); }
+  catch { return js; }
+  const seen = new Map();
+  const shadowed = [];
+  for (const node of ast.body) {
+    if (node.type !== 'FunctionDeclaration' || !node.id) continue;
+    if (seen.has(node.id.name)) shadowed.push(seen.get(node.id.name));
+    seen.set(node.id.name, node);
+  }
+  let out = js;
+  for (const node of shadowed.sort((a, b) => b.start - a.start)) out = out.slice(0, node.start) + out.slice(node.end);
+  return out;
+}
+
 export function transpileUnit(unit) {
   let source = unit.pieces.map(piece => `# ---- ${piece.script} ----\n${piece.text}`).join('\n\n');
   const resolvedAliases = resolveInitializeAliases(source);
@@ -225,7 +264,7 @@ export function transpileUnit(unit) {
   filters.push(RgssCalls.prototype);
   // `x.name += 1` compiles to `x.name() += 1` (an assignment to a call): repaired here, so the syntax check below does not
   // send the unit down the "no call heuristic" fallback, which would turn every zero-argument call in it into a property read.
-  let js = repairCallAssignments(nilSafeToString(convert(source, { preset: true, eslevel: 2022, loose_break: true, underscored_private: true, filters }).toString()));
+  let js = dropShadowedFunctions(repairCallAssignments(nilSafeToString(convert(source, { preset: true, eslevel: 2022, loose_break: true, underscored_private: true, filters }).toString())));
   // Ruby methods with an implicit block parameter are emitted by Ruby2JS as
   // `get each(_implicitBlockYield)`, which is invalid JavaScript: accessors
   // cannot declare parameters. Such methods are called with a block and must
@@ -339,7 +378,7 @@ export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = 
     setMethodOnlyNames([...instance].filter(name => !topLevel.has(name) && name !== 'initialize'));
   }
   const roots = snippetRoots(index, snippets);
-  for (const name of index.bootNames || []) roots.add(name);   // save-data registrations are always loaded, with what they reference
+  for (const name of [...(index.bootNames || []), ...(index.bootStatementNames || [])]) roots.add(name);   // save-data registrations are always loaded, with what they reference
   const depths = closure(index, roots, maxDepth);
   for (const name of ENGINE_CLASSES) if (index.units.has(name) && !depths.has(name)) depths.set(name, maxDepth);
   // Text filters: a module exposing `def self.inline(text) (or module_function inline)` is the game's own
@@ -356,7 +395,7 @@ export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = 
   // `methods`: every name the game defines with `def`. Ruby2JS compiles a paren-less zero-arg
   // call on such a name as a call, on any other name as a property read, so the player's
   // built-in objects must expose exactly those names as functions (see rgss-script.js).
-  const out = { interpreter: index.interpreter, interpreterMethods: [...index.interpreterMethods], methods: [...index.allDefNames].map(String), textFilters, units: {}, failed: {}, partial: {} };
+  const out = { interpreter: index.interpreter, interpreterMethods: [...index.interpreterMethods], methods: [...new Set([...index.allDefNames].map(name => String(name).replace(/[?!]$/, '')))], textFilters, units: {}, failed: {}, partial: {} };
   let done = 0;
   for (const [name] of depths) {
     // Ruby2JS drops `?`/`!` from method names, so units are keyed by their JS name.
@@ -382,6 +421,7 @@ export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = 
     if (++done % 25 === 0) log(`library: ${done}/${depths.size} units (${Object.keys(out.failed).length} failed)`);
   }
   out.boot = (index.bootNames || []).filter(name => out.units[name]);
+  out.bootStatements = (index.bootStatementNames || []).filter(name => out.units[name]);
   log(`library: ${Object.keys(out.units).length} units transpiled, ${Object.keys(out.failed).length} failed${out.boot.length ? `, ${out.boot.length} save-data registration(s)` : ''}`);
   return out;
 }

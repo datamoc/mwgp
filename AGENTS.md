@@ -405,17 +405,45 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   methods (`Graphics.update;` stayed a property read); `def self.x` with no parameters becomes a method, not a static getter;
   a receiver-less call to an inherited instance method inside a class is `this.name()` (`methodOnlyNames`);
   constructors: `this` assignments ahead of `super(...)` move after it, and a derived constructor that never calls
-  `super` gets `super()`; the async lift only follows `obj.name()` calls through names whose every definition is async
-  (`strong`), while bare and `this.` calls follow any async name (this removed a class of un-awaited-constructor bugs);
-  `repairCallAssignments` runs before the syntax check so a unit no longer falls back to the no-call-heuristic transpile.
-  With `?gamemenu=1` the game's own pause menu runs further (it builds its windows) and now stops in
-  `WindowCursorRect` (a subclass of the shim `Rect` whose setter override calls `super.x`, which the shim's plain
-  fields cannot serve). Beyond that its command windows are Ruby `Window` subclasses that are neither drawn nor driven
-  by the inert `Window` shim, so it needs a real Window (skin, contents, cursor, `index`) next.
-- **Where Void stops** — both versions now run the character select and customization scenes without a runtime error in
-  the soak (9-20 dialogues) and the character select is visible (trainer sprites over the scene background; the
-  text drawn with the bitmap font has not been checked by eye); everything beyond them (the Pokémon battle system,
-  the real menus) is untested. A person playing is the next real check.
+  `super` gets `super()`; `repairCallAssignments` runs before the syntax check so a unit no longer falls back to the
+  no-call-heuristic transpile. With `?gamemenu=1` the game's own pause menu runs further (it builds its windows, sets
+  a cursor rect, plays its open sound) and now stops on a memoized windowskin path (`SpriteWindow_Base`'s
+  `MessageConfig.pbGetSystemFrame()`) coming back nil at a specific point in the real menu flow, though it returns the
+  correct string when called standalone — not yet root-caused (see next item's correction). Beyond that its command
+  windows are Ruby `Window` subclasses that are neither drawn nor driven by the inert `Window` shim, so it needs a
+  real Window (skin, contents, cursor, `index`) next.
+  **Correction (superseding "the async lift only follows `obj.name()` ... while bare and `this.` calls follow any
+  async name" above)**: that was a real bug, not a feature — `this.foo()` can reach as many different classes as
+  `obj.foo()` can, so it needs the same full-agreement (`strong`) requirement, not the lenient one bare global calls
+  get. Without this, one unrelated class's legitimately-async `foo` silently made every *other* class's synchronous
+  `this.foo()` await a value that was never a promise — this broke a Ruby setter (`pokemon=`) that can't be `async` in
+  JS, which received a `Promise` instead of a string. Fixed in `rgss-async.mjs` (`calleeKind(...) === 'bare'` gates
+  the lenient path now). Confirmed by tracing a real false-positive chain (`icon_filename_from_pokemon` →
+  `icon_filename` → `check_egg_graphic_file` → `get_species_form`, none of which touch anything blocking) back to
+  fully synchronous. Async count dropped from ~900 to ~730 functions.
+  **Second fix, same investigation**: Ruby's `self.class`/class-variable memoization idiom (`this.constructor._cache
+  ||= ...`, from `@@x` or module-level `@x`) was colliding across *every* module in the game, because a plain `{}`'s
+  `.constructor` is JS's shared `Object`. Each module's `__self` now gets `Object.defineProperty(__self, 'constructor',
+  { value: __self, enumerable: false })` so this state is scoped per module (`moduleSelfEdits` in `rgss-async.mjs`).
+  **Also found and fixed**: the "own field is read as a call" wrapping (`sprite.opacity()`) applied to *any* key the
+  game defines a method for anywhere, including underscore-prefixed ivar fields (`this._curframe`) that happen to
+  share a name with an unrelated method elsewhere — silently turning a plain string field into a callable wrapper.
+  Guarded with `!key.startsWith('_')` in all three call sites (`rgss-classes.js`'s display-object proxy and value-class
+  `callable()`, `rgss-script.js`'s `gameInstance`/`callableAttributes`).
+  **Open, not yet root-caused**: with all of the above fixed, `SpriteWindow_Base`'s windowskin lookup *still* comes
+  back nil specifically when several independently-loaded classes in one inheritance chain (`SpriteWindow` →
+  `SpriteWindow_Base` → `SpriteWindow_Selectable` → `SpriteWindow_SelectableEx` → `Window_DrawableCommand` →
+  `Window_CommandPokemon`) are each individually wrapped by `gameClass`/`gameInstance` (every top-level class export
+  gets this wrapping independently at `unit()` load time) and one calls `super()` into another. A minimal 3-level
+  `class extends` repro with a base constructor returning a Proxy works fine in plain Node; the discrepancy shows up
+  only with the real generated multi-level chain. Next step: reproduce with a *minimal* 2-3-class `gameClass`-wrapped
+  chain (not the real 6-level Void one) to isolate whether `gameClass`'s `construct` trap composes incorrectly across
+  levels, before touching the wrapping logic further.
+- **Where Void stops** — both versions run the character select and customization scenes without a runtime error in
+  the soak (7-20 dialogues) and the character select is visible (trainer sprites over the scene background; the
+  text drawn with the bitmap font has not been checked by eye); the pause menu (opt-in, see above) gets further than
+  before but still fails before any command can be picked. Everything beyond that (the Pokémon battle system, the
+  real menus) is untested. A person playing is the next real check.
 - **Timing** — snippets that do not wait on frames are synchronous; their dialogue/balloons/animations are queued and
   awaited in order after the snippet. Code that waits on frames is lifted to async (see above). Conditions and
   Control Variables scripts stay synchronous (never lifted). Not covered: VX/Ace *converters* (only XP `.rxdata`

@@ -113,7 +113,9 @@ function asyncNamesOf(parsed) {
       if (fn.name) totals.set(fn.name, (totals.get(fn.name) || 0) + 1);
     }
   }
-  const qualifies = call => call.name && all.has(call.name) && (call.kind !== 'member' || strong.has(call.name));
+  // Only a bare `name()` call is unambiguously "the" global function of that name; `this.name()` and `obj.name()` could
+  // both reach any class that defines `name`, so both require every definition to agree (`strong`), not just one.
+  const qualifies = call => call.name && all.has(call.name) && (call.kind === 'bare' || strong.has(call.name));
   let changed = true;
   while (changed) {
     changed = false;
@@ -136,7 +138,7 @@ function editsFor(entry, names, report) {
     const name = calleeName(node.callee);
     if (blockingCall(node.callee)) return true;
     if (!name || !names.all.has(name)) return false;
-    return calleeKind(node.callee) !== 'member' || names.strong.has(name);
+    return calleeKind(node.callee) === 'bare' || names.strong.has(name);
   };
   const handle = (bodyRoot, fn) => {
     const calls = [];
@@ -166,6 +168,8 @@ function editsFor(entry, names, report) {
 //  * `Object.defineProperties(X, Object.getOwnPropertyDescriptors(M))` (extend/include) becomes `__mixin(...)`: own methods win.
 //  * a setter `set _x` that assigns `this._x` is renamed `set x`.
 //  * a bare identifier naming a zero-parameter library function becomes a call (see bareFunctionCallEdits).
+//  * a method `x()` next to a setter `set x` is kept alongside it (methodSetterClashEdits).
+//  * `x.splice(a, n)` (Ruby's `slice!`) becomes `__splice(x, v => { x = v }, a, n)`.
 //  * `set x(v) { super.x(v) }` becomes `super.x = v` plus a delegating getter (setterSuperEdits).
 //  * ivar assignments ahead of `super(...)` in a constructor move after it (constructorOrderEdits).
 //  * `x?.name` for a name the game `def`s becomes `x?.name()` (see optionalReadEdits).
@@ -368,13 +372,107 @@ function setterSuperEdits(ast, js) {
   return edits;
 }
 
+// A Ruby module keeps state in its own instance variables (`@cache`) and its functions call each other. Ruby2JS emits an IIFE:
+// the top-level `this._cache = {}` runs against the IIFE's outer `this`, the exported functions run with `this` = the exports,
+// and bare calls between sibling functions lose `this` altogether. One shared self object fixes all three: it is the `this` of
+// the module's top level, it IS the exported object, and sibling calls carry `this` (`name.call(this, ...)`).
+function moduleSelfEdits(ast, js) {
+  const edits = [];
+  const usesThis = (node, deep) => {
+    const stack = [node];
+    while (stack.length) {
+      const current = stack.pop();
+      if (!current || typeof current.type !== 'string') continue;
+      if (current.type === 'ThisExpression') return true;
+      if (!deep && current !== node && (current.type === 'FunctionDeclaration' || current.type === 'FunctionExpression' || current.type === 'ClassDeclaration' || current.type === 'ClassExpression')) continue;
+      for (const key of Object.keys(current)) { const value = current[key]; if (Array.isArray(value)) stack.push(...value); else if (value && typeof value.type === 'string') stack.push(value); }
+    }
+    return false;
+  };
+  const iifes = [];
+  const find = node => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'CallExpression' && node.arguments.length === 0 && node.callee.type === 'ArrowFunctionExpression' && node.callee.params.length === 0) iifes.push(node);
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) find(child); else if (value && typeof value.type === 'string') find(value); }
+  };
+  find(ast);
+  for (const call of iifes) {
+    {
+      if (call.callee.body.type !== 'BlockStatement') continue;
+      const body = call.callee.body;
+      const last = body.body[body.body.length - 1];
+      if (last?.type !== 'ReturnStatement' || last.argument?.type !== 'ObjectExpression') continue;
+      const functions = new Map(body.body.filter(node => node.type === 'FunctionDeclaration' && node.id).map(node => [node.id.name, node]));
+      if (!functions.size || ![...functions.values()].some(fn => usesThis(fn.body, false)) && !body.body.some(node => node.type !== 'FunctionDeclaration' && node.type !== 'ReturnStatement' && usesThis(node, false))) continue;
+      // `this.constructor` on a Ruby module is the module's own singleton class: distinct per module, used to memoize
+      // module-level state (`this.constructor._cache ||= ...`). A plain `{}`'s `.constructor` is JS's `Object`, shared by
+      // every module in the game; giving each `__self` its own fake constructor keeps that state per module.
+      edits.push({ pos: body.start + 1, text: ' const __self = {}; Object.defineProperty(__self, "constructor", { value: __self, enumerable: false }); ' });
+      // Top-level `this` (module-level ivars) -> the shared self.
+      for (const node of body.body) {
+        if (node.type === 'FunctionDeclaration' || node.type === 'ReturnStatement') continue;
+        const stack = [node];
+        while (stack.length) {
+          const current = stack.pop();
+          if (!current || typeof current.type !== 'string') continue;
+          if (current.type === 'ThisExpression') { edits.push({ pos: current.start, del: current.end - current.start, text: '__self' }); continue; }
+          if (current.type === 'FunctionDeclaration' || current.type === 'FunctionExpression' || current.type === 'ClassDeclaration' || current.type === 'ClassExpression') continue;
+          for (const key of Object.keys(current)) { const value = current[key]; if (Array.isArray(value)) stack.push(...value); else if (value && typeof value.type === 'string') stack.push(value); }
+        }
+      }
+      // The export IS the shared self (getters kept).
+      edits.push({ pos: last.argument.start, text: 'Object.defineProperties(__self, Object.getOwnPropertyDescriptors(' }, { pos: last.argument.end, text: '))' });
+      // Sibling calls inside the module's functions carry `this`.
+      for (const fn of functions.values()) {
+        const stack = [fn.body];
+        while (stack.length) {
+          const current = stack.pop();
+          if (!current || typeof current.type !== 'string') continue;
+          if (current.type === 'FunctionDeclaration' || current.type === 'FunctionExpression' || current.type === 'ClassDeclaration' || current.type === 'ClassExpression') continue;
+          if (current.type === 'CallExpression' && current.callee.type === 'Identifier' && functions.has(current.callee.name) && !current.optional && usesThis(functions.get(current.callee.name).body, false)) {
+            edits.push({ pos: current.callee.end, del: 1, text: `.call(this${current.arguments.length ? ', ' : ''}` });
+          }
+          for (const key of Object.keys(current)) { const value = current[key]; if (Array.isArray(value)) stack.push(...value); else if (value && typeof value.type === 'string') stack.push(value); }
+        }
+      }
+    }
+  }
+  return edits;
+}
+
+// A Ruby class can define both `def columns` (a method) and `def columns=(v)` (a setter). In a JS class the accessor replaces
+// the method under the same key. The method is renamed and a getter returns a function that calls it, so `x.columns()` and
+// `x.columns = 2` both work.
+function methodSetterClashEdits(ast) {
+  const edits = [];
+  const visit = node => {
+    if (!node || typeof node.type !== 'string') return;
+    if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && node.body?.body) {
+      const members = node.body.body;
+      for (const setter of members) {
+        if (setter.type !== 'MethodDefinition' || setter.kind !== 'set' || setter.computed || setter.static || setter.key.type !== 'Identifier') continue;
+        const name = setter.key.name;
+        const hasGetter = members.some(other => other.type === 'MethodDefinition' && other.kind === 'get' && !other.static && other.key.type === 'Identifier' && other.key.name === name);
+        const method = members.find(other => other.type === 'MethodDefinition' && other.kind === 'method' && !other.static && !other.computed && other.key.type === 'Identifier' && other.key.name === name);
+        if (!method || hasGetter) continue;
+        edits.push({ pos: method.key.start, del: method.key.end - method.key.start, text: `__method_${name}` });
+        edits.push({ pos: setter.start, text: `get ${name}() { const self = this; return function () { return self.__method_${name}(...arguments) } }
+  ` });
+      }
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) visit(child); else if (value && typeof value.type === 'string') visit(value); }
+  };
+  visit(ast);
+  return edits;
+}
+
 export function lowerRuby(js, known = null, zeroArg = null) {
   js = repairCallAssignments(js);
   // `::Sprite` (a top-level constant, from inside a namespace) is emitted as `Function("return this")().Sprite`: the runtime's own globals.
   js = js.split('Function("return this")()').join('__global');
   let ast;
   try { ast = parse(js); } catch { return js; }
-  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js)];
+  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast)];
   const stack = [ast];
   while (stack.length) {
     const node = stack.pop();
@@ -446,6 +544,15 @@ export function lowerRuby(js, known = null, zeroArg = null) {
         for (const key of Object.keys(current)) { const value = current[key]; if (Array.isArray(value)) scan.push(...value); else if (value && typeof value.type === 'string') scan.push(value); }
       }
       if (assignsField) edits.push({ pos: node.key.start, del: 1, text: '' });
+    }
+    // Ruby's `str.slice!(start, len)` (removes and returns a piece of a String) arrives as `str.splice(start, len)`, which only Arrays
+    // have. Both forms go through `__splice`, which mutates an array in place and, for a string, returns the removed piece
+    // and reassigns the variable.
+    if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && !node.callee.computed && node.callee.property.name === 'splice'
+      && (node.callee.object.type === 'Identifier' || (node.callee.object.type === 'MemberExpression' && !node.callee.object.optional)) && node.arguments.length >= 1) {
+      const target = js.slice(node.callee.object.start, node.callee.object.end);
+      const args = node.arguments.map(argument => js.slice(argument.start, argument.end)).join(', ');
+      edits.push({ pos: node.start, del: node.end - node.start, text: `__splice(${target}, (__v) => { ${target} = __v }, ${args})` });
     }
     const list = node.type === 'BlockStatement' || node.type === 'Program' ? node.body : node.type === 'SwitchCase' ? node.consequent : null;
     if (list) {
