@@ -162,8 +162,10 @@ command is added or changed:
    pass straight through to `mw_games`'s own `Rpg.EventRunner`, which already understands that
    shape natively. `prepareEventCommands` is exported so `tools/test-smoke.mjs` can drive it
    in Node with a stub scene and assert every non-native command routes to a scene method.
-   `src/player/fallback-core.js` (the canvas fallback) instead re-interprets raw MV command codes
-   itself and does not go through this vocabulary at all — it's a separate, simpler code path.
+   `src/player/fallback-core.js` (the canvas fallback) consumes the same converted
+   vocabulary (`mwgEvents` + `Rpg.EventRunner`): its native subset runs unchanged, `transfer`
+   and choice `branches` are rewritten into `call` closures, and anything else warns once
+   per page — no raw MV command codes anywhere (T127).
 
 Asset decoding (`decodeTree`/`decodeNamedTree`) also does MV's asset "encryption": it XORs
 only the first 16 bytes of `.rpgmvp`/`.rpgmvo`/`.rpgmvm` files against the project's key from
@@ -200,8 +202,9 @@ manifest for `?id=`, then tries the real player and falls back on failure:
   `F5`/`F9` save/load slot 1 the same way.
 - `src/player/fallback-core.js` (`MwgPlayer`) — a minimal `<canvas>` 2D fallback with no asset
   dependency (flat-colored tiles), used only when the Pixi/mw_games 2D runtime is unavailable.
-  It duplicates a small, simplified slice of MV command interpretation directly rather than
-  sharing code with the converter or the Pixi player.
+  It runs the converted event vocabulary through `Rpg.EventRunner` (native subset plus
+  fallback-side `transfer`/choice-branch rewrites, loud once-per-page warnings for the rest)
+  rather than interpreting raw MV codes; still no pictures, audio, menus, or battles.
 
 ### Sound and music (all RPG Maker generations)
 

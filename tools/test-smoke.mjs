@@ -171,6 +171,32 @@ for (const dir of convertedDirs) {
   else notes.push('xp converter report classification ok (all translated codes supported/partial)');
 }
 
+// 2d: per-feature banner areas (T128) ÔÇö every supported/partial code from both
+// converters must sit in a named FEATURE_AREA, so the banner's "other" bucket
+// only ever carries genuinely unclassified codes, and the report rolls up and
+// silences correctly on synthetic and real-manifest input.
+{
+  const { featureReport, featureLines, FEATURE_AREAS } =
+    await import(pathToFileURL(join(root, 'src', 'player', 'compat-features.js')).href);
+  const mapped = new Set(FEATURE_AREAS.flatMap(area => area.codes.map(String)));
+  const unmapped = [];
+  for (const file of ['tools/convert-mv.js', 'tools/convert-rgss.js']) {
+    const converter = readFileSync(join(root, file), 'utf8');
+    const setOf = name => new Set([...converter.match(new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\);`))[1].matchAll(/\d+/g)].map(m => m[0]));
+    for (const code of new Set([...setOf('supported'), ...setOf('partial')])) {
+      if (!mapped.has(code)) unmapped.push(`${file.split('/')[1]}:${code}`);
+    }
+  }
+  if (unmapped.length) fail(`feature areas miss classified codes: ${unmapped.join(', ')}`);
+  else notes.push('feature areas cover every supported/partial code ok');
+  const karrynLike = featureReport({ commands: { 356: { count: 4178, status: 'partial' }, 355: { count: 466, status: 'partial' }, 101: { count: 50, status: 'supported' } }, plugins: { Tachie: { count: 3103, status: 'partial' } } });
+  if (karrynLike.map(entry => entry.area).join(',') !== 'plugins,scripts' || !featureLines(karrynLike)[0].startsWith('Plugins: partial (356├ù4178')) {
+    fail(`feature report misrolls Karryn-like input: ${JSON.stringify(karrynLike)}`);
+  } else notes.push('feature report rolls up worst-status-first by uses ok');
+  if (featureReport({ commands: { 101: { count: 5, status: 'supported' } } }).length) fail('feature report is not silent for a fully supported project');
+  else notes.push('feature report stays silent when nothing gaps ok');
+}
+
 // 3: player coverage of the validator's vocabulary
 const playerCore = readFileSync(join(root, 'src', 'player', 'player-core.js'), 'utf8');
 const uncovered = [...allowed].filter(key => !NATIVE.has(key) && !playerCore.includes(`command.${key}`));

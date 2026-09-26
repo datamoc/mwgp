@@ -94,28 +94,16 @@ async function showTitleScreen(project) {
   const onKey = event => { if (!root.isConnected) return; if (['ArrowDown','ArrowRight','ArrowUp','ArrowLeft'].includes(event.key)) { if (!buttons.length) return; event.preventDefault(); const delta = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1; const current = buttons.indexOf(document.activeElement); buttons[(current + delta + buttons.length) % buttons.length].focus(); menuSound('cursor'); } else if ((event.key === 'Enter' || event.key === ' ') && document.activeElement instanceof HTMLButtonElement) { event.preventDefault(); document.activeElement.click(); } else if (event.key === 'Escape') options.hidden = true; };
   window.addEventListener('keydown', onKey); (buttons[0] || root).focus(); await done; window.removeEventListener('keydown', onKey);
 }
-function showCompatibilityWarning(project) {
-  const commands = project.compatibility?.commands || {};
-  const plugins = project.compatibility?.plugins || {};
-  const scripts = project.compatibility?.scripts || {};
-  const byStatus = { unsupported: [], partial: [] };
-  for (const [code, entry] of Object.entries(commands)) {
-    if (entry?.count > 0 && byStatus[entry.status]) byStatus[entry.status].push(`${code}×${entry.count}`);
-  }
-  const pluginByStatus = { unsupported: [], partial: [] };
-  for (const [name, entry] of Object.entries(plugins)) {
-    if (entry?.count > 0 && pluginByStatus[entry.status]) pluginByStatus[entry.status].push(`${name}×${entry.count}`);
-  }
-  if (!byStatus.unsupported.length && !byStatus.partial.length && !pluginByStatus.unsupported.length && !pluginByStatus.partial.length && !scripts.failed?.length && !scripts.libraryFailed?.length) return;
-  const parts = [];
-  if (byStatus.unsupported.length) parts.push(`unsupported RPG Maker commands (${byStatus.unsupported.length} kind(s)): ${byStatus.unsupported.join(', ')}`);
-  if (byStatus.partial.length) parts.push(`partially supported: ${byStatus.partial.join(', ')}`);
-  if (pluginByStatus.unsupported.length) parts.push(`unsupported plugin families: ${pluginByStatus.unsupported.join(', ')}`);
-  if (pluginByStatus.partial.length) parts.push(`partially supported plugin families: ${pluginByStatus.partial.join(', ')}`);
-  if (scripts.failed?.length) parts.push(`failed RGSS event scripts: ${scripts.failed.length}`);
-  if (scripts.libraryFailed?.length) parts.push(`failed RGSS library units: ${scripts.libraryFailed.length}`);
-  if (scripts.libraryPartial?.length) parts.push(`partially transpiled RGSS library units: ${scripts.libraryPartial.length}`);
-  const message = `This project uses ${parts.join('; ')}. Those scenes may not play as in RPG Maker.`;
+async function showCompatibilityWarning(project) {
+  // Per-feature report (T128): areas with a concrete remaining gap, most-used
+  // first, instead of raw command counts. A fully supported project stays silent.
+  let lines = [];
+  try {
+    const { featureReport, featureLines } = await import('/compat-features.js');
+    lines = featureLines(featureReport(project.compatibility));
+  } catch (error) { console.warn('MWGP compatibility report unavailable', error); }
+  if (!lines.length) return;
+  const message = `This project still depends on RPG Maker behavior here — ${lines.join('; ')}. Those scenes may not play as in RPG Maker.`;
   console.warn(`MWGP compatibility: ${message}`);
   const banner = document.createElement('p');
   banner.setAttribute('role', 'note');

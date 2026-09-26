@@ -500,7 +500,7 @@ for (const project of projects) {
   const status = result.ok ? (result.errors.length ? 'PASS (with console errors)' : 'PASS') : 'FAIL';
   console.log(`  ${status}  ${project}${result.reason ? ` - ${result.reason}` : ''}`);
   for (const error of result.errors || []) console.log(`          ! ${error}`);
-  for (const note of (result.notes || []).slice(0, 2)) console.log(`          ~ ${note.slice(0, 160)}`);
+  for (const note of result.notes || []) console.log(`          ~ ${note.slice(0, 160)}`);
 }
 
 const mapsIndex = process.argv.indexOf('--maps');

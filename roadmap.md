@@ -110,6 +110,34 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
 
 ## Recent (coord-tracked)
 
+- **T158 — Browser harness prints every note (done).** One-line fix in `tools/test-browser.mjs`: the
+  PASS summary loop no longer truncates `result.notes` to the first 2, so battle/audio lines are visible
+  again (the per-note 160-char cap stays). Verified live (`--only Elementals`, audio/battle/menu probes
+  off: PASS, both notes printed) plus `node --check`.
+- **T128 — Per-feature compatibility report (done).** New pure module `src/player/compat-features.js`
+  rolls `compatibility.commands`/`.plugins`/`.scripts` into named areas (battles, menus, messages,
+  scripts, plugins, pictures, audio, movement, party/inventory/actors, screen, switches/variables/flow,
+  RGSS units, plus an honest "other" catch-all); the launch banner in `public/player.js` now prints
+  one line per gapped area, most-used first, and stays silent for fully supported projects (Elementals:
+  0 lines; Karryn: plugins + scripts; Voids: state + movement + party + RGSS units). Pinned in
+  `tools/test-smoke.mjs` (2d: every supported/partial code of both converters sits in an area; roll-up
+  and silence checks) and probed against all 5 shipped manifests; `npm test` green, `/compat-features.js`
+  served by the existing generic route (verified over HTTP), and a real Chromium Karryn boot logs the new
+  banner verbatim (`Plugins: partial (356×4178, Tachie×3103, …); Event scripts: partial (355×466)`) with PASS.
+- **T156 — mw_games `_getFinalPadding` confirm-spam errors (done).** Upstream repro note added to
+  `4MWG/` §18: ~90 rapid confirms on Elementals' "List other Controls" choice loop fills the console
+  with the null-texture `_updateGpuText` TypeError (non-fatal, 0 occurrences at harness/soak pacing).
+- **T127 — Reconcile fallback-core.js with the command vocabulary (done).** Took the "route it through
+  the vocabulary" option instead of deleting it: the canvas fallback now consumes `mwgEvents` only —
+  the native `EventRunner` subset (`say`/`ask`/`wait`/`setSwitch`/`setVariable`/`addVariable`/`if`/`goto`)
+  runs unchanged, `transfer` (direct and variable forms) and choice `branches`/`cancelBranch` are
+  rewritten into `call` closures, story pages run through `runStory`, and anything else (pictures,
+  audio, menus, scripts, move routes) warns once per page instead of silently dropping. Touch-trigger
+  parity kept (no autorun/parallel frame driver — residual gap). Raw-code paths (`toMwgCommands`,
+  `interpret`, `pageMatches`, the `map.events` scans) are gone; verified with a Node probe against
+  the real `GameState`/`activePage`/`EventRunner` (dialogue, choice pick → branch, conditional
+  transfer, story order, once-only gap warning, blocking tiles) plus an import check and a stale-
+  reference search. `AGENTS.md` fallback paragraphs updated to match.
 - **T113 — Play all 5 converted games through the manual checklist and log results (done).** The four
   remaining games (Karryn's Prison, Way of Corruption 0.33 A, Pokemon Void 0.1.4 and 0.1.5) were played
   in Chromium against `docs/play-checklist.md` and logged as dated rows, together with the common steps:
