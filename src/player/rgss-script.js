@@ -318,7 +318,13 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // Names the converter always reads as properties (JS-native members: `keys`, `length`, `map`, ...), even when the game defines a
   // method of that name: never wrapped as callable readers.
   const NATIVE_PROPERTY_NAMES = new Set(['length', 'size', 'map', 'filter', 'find', 'findIndex', 'includes', 'indexOf', 'lastIndexOf', 'slice', 'join', 'concat', 'reverse', 'sort', 'forEach', 'keys', 'values', 'entries', 'toString', 'valueOf', 'state']);
-  const callableMethods = new Set([...definedMethods].filter(name => !NATIVE_PROPERTY_NAMES.has(name)));
+  // Ruby's `[]`/`[]=` operator names: some unrelated class in the game defines them for real (a hash-like class), which
+  // put them in the global `definedMethods` set. But that set answers "does *some* class define this name", not "does
+  // *this* object" — and `[]='s own dedicated redirect (below) already checks the actual receiver. Treating `[]`/`[]=`
+  // as ordinary callable-reader names on top of that made ANY plain field write on ANY unrelated object look, from the
+  // generic "does this look like a method" checks, like it had a real `[]=` to redirect through, corrupting the write.
+  const OPERATOR_NAMES = new Set(['[]', '[]=']);
+  const callableMethods = new Set([...definedMethods].filter(name => !NATIVE_PROPERTY_NAMES.has(name) && !OPERATOR_NAMES.has(name)));
   // One browser frame: resolves on the next animation frame. A loop that never awaits it (an unlifted sync spin)
   // trips the counter, which only a real frame boundary resets.
   let framesSpun = 0;
