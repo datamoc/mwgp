@@ -1189,8 +1189,10 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // Ruby2JS exports a module's private helpers as `get name() { return name.call(this) }`; for a helper that takes
   // parameters the getter would run it with none at load time, so those are exported as the function itself.
   const hasParameters = (js, fn) => { const at = js.indexOf(`function ${fn}(`); return at >= 0 && js.slice(at + fn.length + 10).trimStart()[0] !== ")"; };
-  const fixExportedGetters = js => js.replace(/^(\s*)get (\w+)\(\) \{\s*return \2\.call\(this\)\s*\}/gm, (whole, indent, fn) =>
-    hasParameters(js, fn) ? `${indent}${fn}` : whole);
+  // No line-start anchor: several such getters commonly share one line in an object-literal return statement
+  // (`{register, get, try_get, keys, get exists() {...}}`), which a `^`-anchored match would silently never see.
+  const fixExportedGetters = js => js.replace(/\bget (\w+)\(\) \{\s*return \1\.call\(this\)\s*\}/g, (whole, fn) =>
+    hasParameters(js, fn) ? fn : whole);
   // Ruby's `hash.each { |pair| ... }` is emitted as `for (x of hash)`, and a plain object is not iterable: loops over a
   // simple expression go through `__each`, which yields [key, value] pairs for a plain object and passes anything
   // iterable (arrays, Maps, Sets, ranges) through untouched.
