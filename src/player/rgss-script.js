@@ -598,8 +598,12 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       get: (object, key) => {
         const value = Reflect.get(object, key, object);
         if (typeof value === 'function') return typeof key === 'string' && key !== 'constructor' ? value.bind(object) : value;
-        // Never for an underscore-prefixed key: that's a plain ivar field, never a method call.
-        return typeof key === 'string' && !key.startsWith('_') && definedMethods.has(key) ? () => value : value;
+        // Never for an underscore-prefixed key: that's a plain ivar field, never a method call. `value === undefined`
+        // still wraps (call-style access on a field that is genuinely unset, e.g. `sprite.bitmap()` before a bitmap is
+        // assigned, must keep working) - `callableMethods` (not the raw library-wide `definedMethods`) is what actually
+        // matters: it already excludes Ruby's `[]`/`[]=` operator names, which is what stops a name some *unrelated*
+        // class defines from making a plain field write elsewhere be misidentified as a real `[]=` to redirect through.
+        return typeof key === 'string' && !key.startsWith('_') && callableMethods.has(key) ? () => value : value;
       }
     })
   });

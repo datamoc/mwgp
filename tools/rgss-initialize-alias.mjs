@@ -27,6 +27,21 @@ export function resolveInitializeAliases(source) {
     let last = null, found;
     while ((found = defPattern.exec(before))) last = found;
     if (!last) { skipped.add(line); continue; }      // aliasing something inherited or built in: nothing to rename
+    // Ruby's `alias new old` only renames `old` to `new` when a REDEFINITION of `old` follows (the shadow-and-override
+    // idiom this function exists for): `old` is about to be overwritten, so its prior body must survive under `new`.
+    // Without a following redefinition, this is a PLAIN alias (Ruby's ordinary "give this method another name" idiom,
+    // e.g. `alias can_remove? has?` with `has?` never touched again): `original` must stay exactly as it is, under its
+    // own name, and `name` becomes a thin forwarder to it instead.
+    const afterAlias = source.slice(alias.index + line.length);
+    const redefines = new RegExp(`^${indent}def ${escapeName(original)}(?![\\w?!])`, 'm').test(afterAlias);
+    if (!redefines) {
+      // A forwarder written as Ruby (this rewrite runs before Ruby2JS, on Ruby source): `def new(*a); original(*a); end`.
+      // Plain positional forwarding only: Ruby2JS's self-host build lowers a trailing `&block` parameter by popping the
+      // last positional argument off the splat, which corrupts an ordinary call with no block.
+      source = source.slice(0, alias.index) + `${indent}def ${name}(*__mwgp_a)\n${indent}  ${original}(*__mwgp_a)\n${indent}end` + source.slice(alias.index + line.length);
+      methods.add(name.replace(/[?!]$/, ''));
+      continue;
+    }
     source = source.slice(0, alias.index) + `${indent}# alias ${name} of ${original} resolved` + source.slice(alias.index + line.length);
     // The def's block: up to the next line that is just `end` at the def's indentation (or the def line itself when one-line).
     const rest = source.slice(last.index + last[0].length);

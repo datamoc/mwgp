@@ -430,23 +430,28 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   share a name with an unrelated method elsewhere — silently turning a plain string field into a callable wrapper.
   Guarded with `!key.startsWith('_')` in all three call sites (`rgss-classes.js`'s display-object proxy and value-class
   `callable()`, `rgss-script.js`'s `gameInstance`/`callableAttributes`).
-  **Open, not yet root-caused**: with all of the above fixed, `SpriteWindow_Base`'s windowskin lookup *still* comes
-  back nil specifically when several independently-loaded classes in one inheritance chain (`SpriteWindow` →
-  `SpriteWindow_Base` → `SpriteWindow_Selectable` → `SpriteWindow_SelectableEx` → `Window_DrawableCommand` →
-  `Window_CommandPokemon`) are each individually wrapped by `gameClass`/`gameInstance` (every top-level class export
-  gets this wrapping independently at `unit()` load time) and one calls `super()` into another. A minimal 3-level
-  `class extends` repro with a base constructor returning a Proxy works fine in plain Node; the discrepancy shows up
-  only with the real generated multi-level chain. **Tried and ruled out**: a 6-level repro built to match the real
-  structure exactly (each level independently `gameClass`-wrapped, `super()` chaining through each, including the
-  real `gameInstance` `[]=`/`[]` fallback branches and the shim's `has` trap) still round-trips an underscore field
-  correctly — so the bug is not in `gameClass`/`gameInstance` composing across levels as such. The real difference is
-  something specific to the actual compiled `SpriteWindow*` classes not captured by that repro (candidates not yet
-  checked: a real ES6 accessor pair on one ancestor for an unrelated key that has a side effect reachable from this
-  path; the full `known`/`callableNames` method lists interacting, rather than the simplified repro's empty ones;
-  something in how `MessageConfig` itself — a separate `__self`-wrapped module, not a class in this chain — resolves
-  when called with `this` bound to a `gameInstance` proxy vs. a plain object). Next step if resumed: binary-search the
-  real `SpriteWindow_Base` unit source (comment out pieces / simplify) rather than a hand-written repro, since the
-  hand-written repro path is now a dead end.
+  **Root-caused and fixed**: the windowskin-nil bug traced to `callableAttributes` (`rgss-script.js`, wraps the shim's
+  own `Bitmap`/`Sprite`/`Window`/etc. classes) checking the library-wide `definedMethods` set **directly**, bypassing
+  the `callableMethods` filter used everywhere else, and with **no `value !== undefined` guard at all** — so a key some
+  *entirely unrelated* class happens to define (`[]=`, from a hash-like class like `HandlerHash`/`Game_Switches`) turned
+  a genuine absence on the shim instance into a real callable `() => undefined`. `typeof x === 'function'` then reads as
+  "yes, `[]=` exists here", and `gameInstance`'s set trap (added earlier this session for `options[name] = value`
+  index-assignment) redirected an ordinary field write (`this._curframe = ...`) through it instead of storing the
+  value — silently discarding it. Fixed: `callableAttributes` now uses the same `callableMethods` set as the other
+  call sites (not the raw `definedMethods`), and `[]`/`[]=` are excluded from `callableMethods` entirely (Ruby
+  operator names, already handled by their own dedicated redirects; letting them also match the generic "does this
+  look like a method" checks was never sound given the set is library-wide, not per-class). A first version of this
+  fix also added a `value !== undefined` guard to `callableAttributes`, matching the other call sites — that broke
+  call-style access to a genuinely-unset field (`sprite.bitmap()` before any bitmap is assigned must still work,
+  returning a callable `() => undefined`), caught by the soak regression and reverted; the `callableMethods` exclusion
+  alone is sufficient. Confirmed fixed
+  by retest: `SpriteWindow_Base` now correctly finds and applies its windowskin. The pause menu gets substantially
+  further after this (draws its window, evaluates menu-item availability) before hitting the next gap, an incomplete
+  Ruby `alias new old` (a **plain** alias, no redefinition follows — e.g. `PokemonBag`'s `alias can_remove? has?`) that
+  `resolveInitializeAliases` was wrongly treating like the shadow-and-override idiom, destructively renaming `has?` to
+  `can_remove?` and losing the original name; it now only renames when a redefinition of `old` genuinely follows, and
+  otherwise leaves `old` untouched and emits `new` as a thin forwarder (`def new(*a); old(*a); end`, positional-only:
+  Ruby2JS's self-host build mishandles a trailing `&block` param by popping it off the splat, corrupting a plain call).
 - **Where Void stops** — both versions run the character select and customization scenes without a runtime error in
   the soak (7-20 dialogues) and the character select is visible (trainer sprites over the scene background; the
   text drawn with the bitmap font has not been checked by eye); the pause menu (opt-in, see above) gets further than

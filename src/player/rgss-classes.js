@@ -172,6 +172,12 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     set_pixel() { loud('Bitmap', 'set_pixel')(); }
     get_pixel() { loud('Bitmap', 'get_pixel')(); return new Color(0, 0, 0, 0); }
     text_size(text) { loud('Bitmap', 'text_size')(); return new Rect(0, 0, String(text ?? '').length * Math.round((this.font?.size || 22) / 2), this.font?.size || 22); }
+    // Animated-GIF playback (mkxp's `Bitmap#animated?`/`play`/`goto_and_stop`, wrapped by the game's own `AnimatedBitmap`
+    // for both animated and plain images): nothing here is ever animated, so the game's own conditionals just skip it.
+    animated() { return false; }
+    play() {}
+    stop() {}
+    goto_and_stop() {}
   }
   // A real Bitmap where a canvas exists (the browser): pixels live in a 2D canvas, so `blt`, `fill_rect`, `draw_text`,
   // `get_pixel` and friends do what RGSS's do and drawing code runs to completion. A bitmap made from a file
