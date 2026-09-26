@@ -210,7 +210,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
 // prepareEventCommands is imported with a stub scene; each prepared `call`
 // is invoked and the receiving method is recorded.
 {
-  const { applyBuiltinPluginCommand, applyQuestPluginCommand, normalizeDialogueMarkup, prepareEventCommands, resolveGameDataOperand, resolveTransferTarget, runBattleFallback, sanitizeMapPosition } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
+  const { applyBuiltinPluginCommand, applyQuestPluginCommand, foregroundOrigin, normalizeDialogueMarkup, prepareEventCommands, resolveGameDataOperand, resolveTransferTarget, runBattleFallback, sanitizeMapPosition, selectForegroundLayer } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
   const calls = [];
   const stub = new Proxy({}, { get: (_, method) => (...args) => { calls.push([method, args]); } });
   const state = { game: { variable: () => 3, setVariable: () => {} } };
@@ -233,7 +233,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
     [{ resumeBgm: true }, 'resumeBgm'],
     [{ me: { name: 'Fanfare1', volume: 90, pitch: 100, pan: 0 } }, 'playMe'],
     [{ menu: 'menu' }, 'openMenu'],
-    [{ menu: 'save' }, 'saveGame'],
+    [{ menu: 'save' }, 'promptSaveGame'],
     [{ changeState: { scope: 1, actor: 2, add: true, state: 4 } }, 'applyActor'],
     [{ recoverAll: { scope: 1, actor: 2 } }, 'applyActor'],
     [{ changeSkill: { scope: 1, actor: 2, learn: true, skill: 7 } }, 'applyActor'],
@@ -308,6 +308,19 @@ else notes.push('RGSS label fallthrough order preserved ok');
     await prepared[0].call(state);
     if (calls[0]?.[0] !== expected) fail(`${Object.keys(command)[0]} routed to ${calls[0]?.[0] || 'nothing'}, expected ${expected}`);
   }
+  // An `if` without an `else` branch is normal vocabulary (MV omits the empty
+  // branch): preparing the missing list runs nothing and warns about nothing.
+  {
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => { warnings.push(args); };
+    let prepared;
+    try { prepared = prepareEventCommands(undefined, stub); }
+    finally { console.warn = originalWarn; }
+    if (!Array.isArray(prepared) || prepared.length !== 0) fail('a missing branch list did not prepare to an empty run');
+    else if (warnings.length) fail('a missing branch list warned like corrupt data');
+    else notes.push('missing branch list prepares to nothing quietly ok');
+  }
   const quests = {};
   const questChecks = [
     [applyQuestPluginCommand(quests, { name: 'Quest', args: ['Add', '7'] }), quests['7']?.active === true],
@@ -334,12 +347,20 @@ else notes.push('RGSS label fallthrough order preserved ok');
   else fail('built-in plugin state adapters did not preserve known command state');
   if (normalizeDialogueMarkup('a<br>b <i>c</i>') === 'a\nb *c*') notes.push('inline dialogue markup normalization ok');
   else fail('inline dialogue markup normalization changed styled text incorrectly');
+  if (!playerCore.includes("like Karryn's `\\#`")) fail('player-core.js prints unknown text escapes instead of consuming them');
+  else notes.push('unknown text escapes are consumed like the engine ok');
+  if (!playerCore.includes('convertExtraEscapeCharacters') || !playerCore.includes('gameTextConverter')) fail('player-core.js does not run the game text-code layer before the built-in escapes');
+  else notes.push('game text-code layer runs before built-in escapes ok');
+  if (!playerCore.includes('_saveCount') || !playerCore.includes('promptSaveGame')) fail('player-core.js does not count engine saves or prompt for the save file');
+  else notes.push('engine save count and save-file prompt ok');
+  if (!playerCore.includes('refreshAutorunEvents')) fail('player-core.js never refreshes autorun events after a page finishes');
+  else notes.push('autorun refresh after page completion ok');
   // Event-script runtime, end to end on a made-up game (no real game data): a Scripts.rxdata
   // stand-in defines an Interpreter class, a Game_Event class, a module and a helper def;
   // the library builder transpiles what the snippets reach and the runtime runs it.
   {
     const { setInterpreterMethods, transpileSnippet } = await import(pathToFileURL(join(root, 'tools', 'rgss-snippet.mjs')).href);
-    const { indexScripts, buildRgssLibrary } = await import(pathToFileURL(join(root, 'tools', 'rgss-library.mjs')).href);
+    const { indexScripts, buildRgssLibrary, transpileUnit } = await import(pathToFileURL(join(root, 'tools', 'rgss-library.mjs')).href);
     const { setKnownMethods } = await import(pathToFileURL(join(root, 'tools', 'rgss-call-filter.mjs')).href);
     const { createRgssRuntime } = await import(pathToFileURL(join(root, 'src', 'player', 'rgss-script.js')).href);
     const scripts = [
@@ -384,10 +405,31 @@ else notes.push('RGSS label fallthrough order preserved ok');
       const fileExtname = rgss.evaluateValue({ source: 'File.extname("portrait.png")', js: 'return File.extname("portrait.png");' }, { game }, events[0]);
       const rtpPath = rgss.evaluateValue({ source: 'RTP.eachPathFor("portrait.png") { |path| path }', js: 'let seen = null; RTP.eachPathFor("portrait.png", path => { seen = path; }); return seen;' }, { game }, events[0]);
       await run('PartialUnit.missing_method()');
+      // Ruby2JS strips `?`/`!` from method names, so the manifest's method list
+      // must carry the stripped form the player's shims look up at run time.
+      const strippedMethodNames = library.methods.includes('on_event') && !library.methods.includes('on_event?');
+      // A patch script redefining a helper reaches JS as duplicate top-level
+      // functions; Ruby's last definition wins and the unit must still load
+      // inside the runtime's `with (scope)` wrapper (pbExclaim in Pokemon Void).
+      const redefined = transpileUnit({ name: 'greet', kind: 'def', methods: new Set(), sends: new Set(), consts: new Set(), pieces: [{ script: 'A', text: 'def greet\n1\nend' }, { script: 'B', text: 'def greet\n2\nend' }] });
+      let redefinedLoadsLastWins = (redefined.match(/function greet/g) || []).length === 1;
+      try { redefinedLoadsLastWins &&= new Function('scope', `with (scope) {\n${redefined}\nreturn greet;\n}`)({})() === 2; }
+      catch { redefinedLoadsLastWins = false; }
       await run('pbStartQuest(:INTRO)');
       const questStarted = scene.rpgExtra.quests?.INTRO?.active === true && test('pbQuestComplete?(:INTRO)') === false;
       await run('pbCompleteQuest(:INTRO)');
       await run('pbItemBall(:POTION)\npbReceiveItem(:ANTIDOTE, 2)\npbAddPokemon(:EEVEE, 5)');
+      // The newest lowerings, end to end: `slice!`, Hash key membership, a module sharing `@cache`
+      // state across sibling calls (the `RPG::Cache` bitmap-cache shape), and a method kept callable next to a
+      // same-name setter. Handler-registry statements (`XHandlers.add`, `GameData::X.register`) index as boot units.
+      const { lowerRuby } = await import(pathToFileURL(join(root, 'tools', 'rgss-async.mjs')).href);
+      const spliceOk = await rgss.run({ source: 'slice!', js: 'let s = "hello"; const cut = __splice(s, (__v) => { s = __v }, 1, 2); const a = [1, 2, 3]; const head = __splice(a, null, 0, 1); $game_variables[9] = cut + "|" + s + "|" + head + "|" + a.join(",");' }, { game }, events[0]);
+      const hashIncludes = rgss.evaluateValue({ source: 'include?', js: 'return ({a: 1}).includes("a") && !({a: 1}).includes("z") && [1, 2].includes(2);' }, { game }, events[0]);
+      const cacheJs = lowerRuby('const Cache = (() => { this._cache = {}; function load(n) { return this._cache[n] ?? (this._cache[n] = n * 2) } function get(n) { return load(n) } return { load, get } })()');
+      const cacheHit = rgss.evaluateValue({ source: 'cache', js: `${cacheJs}; return Cache.get(21) + Cache.get(21);` }, { game }, events[0]);
+      const clashJs = lowerRuby('class W { columns() { return 3 } set columns(v) { this._c = v } }');
+      const clashHit = rgss.evaluateValue({ source: 'clash', js: `${clashJs}; const w = new W(); w.columns = 9; return w.columns() + w._c;` }, { game }, events[0]);
+      const bootIndex = indexScripts([{ name: 'Handlers', source: 'MenuHandlers.add(:pause_menu, :pokedex, { "name" => "Pokedex" })\n' }]);
       const checks = [
         [Object.keys(library.units).sort().join() === 'ForwardConst,Game_Event,HashProbe,Interpreter,PartialUnit,Pronoun,Shop,give_potion', 'library holds exactly the units the snippets reach'],
         [switches.get('7') === true && variables.get('2') === 3, 'built-in $game_switches / $game_variables'],
@@ -410,6 +452,13 @@ else notes.push('RGSS label fallthrough order preserved ok');
         , [fileExtname === '.png', 'RGSS File.extname is available to browser scripts']
         , [rtpPath === null, 'RTP path lookup degrades to not-found without filesystem access']
         , [warnings.some(w => String(w).includes('PartialUnit.missing_method')), 'missing library methods degrade to a loud callable stub']
+        , [strippedMethodNames, 'manifest method names are stripped of ?/! like the transpiled output']
+        , [redefinedLoadsLastWins, 'a redefined helper keeps only its last definition and loads under with(scope)']
+        , [spliceOk === true && variables.get('9') === 'el|hlo|1|2,3', 'Ruby slice! removes and returns through __splice (string and array)']
+        , [hashIncludes === true, 'Hash#include? reads key membership without shadowing Array#includes']
+        , [cacheHit === 84, 'a module IIFE shares its @cache across sibling calls through one self']
+        , [clashHit === 12, 'a method next to a same-name setter stays callable and the setter still assigns']
+        , [(bootIndex.bootStatementNames || []).length === 1, 'handler-registry statements index as boot units']
       ];
       for (const [ok, label] of checks) if (!ok) fail(`rgss runtime: ${label}`);
       if (checks.every(([ok]) => ok)) notes.push(`rgss script runtime ok (${checks.length} checks)`);
@@ -707,6 +756,10 @@ else notes.push('RGSS label fallthrough order preserved ok');
     const bitmap = new o.Bitmap(32, 16); const size = bitmap.text_size('abc');
     checks.push(bitmap.width === 32 && bitmap.rect.height === 16 && size.width > 0 && bitmap.get_pixel(0, 0).alpha === 0 && warned.includes('Bitmap.get_pixel') && warned.includes('Bitmap.text_size'));
     const sprite = new o.Sprite(); sprite.x = 5; sprite.visible = false; sprite.dispose(); checks.push(sprite.x === 5 && sprite.visible === false && sprite.disposed() === true && sprite.zoom_x === 1);
+    // An accessor a game subclass defines (`columns`, ...) reads as a call when the game `def`s that name.
+    const oc = createRgssClasses({ warnOnce: key => warned.push(key), files, uptime: () => now, keys, reopened, callableNames: new Set(['columns']) });
+    class SubWindow extends oc.Window { get columns() { return 4; } }
+    const sub = new SubWindow(); checks.push(typeof sub.columns === 'function' && sub.columns() === 4);
     if (checks.every(Boolean)) notes.push(`rgss objects ok (${checks.length} checks: Input, System, Marshal, files, Color/Rect/Tone, Bitmap, display classes)`); else fail(`rgss objects: ${JSON.stringify(checks)}`);
   }
   // MV-style troop battle (T115): turn order, skills with MP, states, items, escape, rewards and level-ups,
@@ -900,7 +953,14 @@ else notes.push('RGSS label fallthrough order preserved ok');
     const frames = [];
     const run = new (Object.getPrototypeOf(async function () {}).constructor)('Graphics', `${lifted.units.Screen}; return await new Screen.Scene().pbMain();`);
     checks.push((await run({ update: async () => { frames.push(1); } })) === 3 && frames.length === 3);
-    if (checks.every(Boolean)) notes.push(`async lift ok (${checks.length} checks: transitive async/await, snippets flagged async, Ruby modulo, hoisted block locals, lifted code runs)`); else fail(`async lift: ${JSON.stringify(checks)}\n${lifted.units.Screen}`);
+    // Ruby `slice!` (emitted as `.splice`) goes through `__splice`; a method next to a same-name setter is kept
+    // callable alongside it; a module IIFE sharing `@cache` state gets one shared self; optional sibling calls stay optional.
+    checks.push(lowerRuby('s = s.splice(0, 1);').includes('__splice(s, (__v) => { s = __v }, 0, 1)'));
+    const clash = lowerRuby('class W { columns() { return 3 } set columns(v) { this._c = v } }');
+    checks.push(clash.includes('__method_columns') && clash.includes('get columns()') && clash.includes('set columns(v)'));
+    const mod = lowerRuby('const M = (() => { this._cache = {}; function load(n) { return this._cache[n] } function get(n) { return load(n) } function maybe(n) { return load?.(n) } return { load, get, maybe } })()');
+    checks.push(mod.includes('const __self = {};') && mod.includes('__self._cache') && mod.includes('load.call(this, n)') && mod.includes('load?.(n)'));
+    if (checks.every(Boolean)) notes.push(`async lift ok (${checks.length} checks: transitive async/await, snippets flagged async, Ruby modulo, hoisted block locals, lifted code runs, slice!/method-setter/module-self lowerings)`); else fail(`async lift: ${JSON.stringify(checks)}\n${lifted.units.Screen}`);
   }
   // Control-flow sentinels and native passthrough.
   for (const command of [[{ breakLoop: true }], [{ exitEvent: true }]]) {
@@ -1070,6 +1130,30 @@ else notes.push('RGSS label fallthrough order preserved ok');
     for (const [ok, label] of transferChecks) if (!ok) fail(`transfer validation: ${label}`);
     if (transferChecks.every(([ok]) => ok)) notes.push(`transfer/save validation ok (${transferChecks.length} checks)`);
   }
+  // Foreground.js mist: the layer pick follows the plugin's switch gates and
+  // the tiling origin follows its zero/loop scroll rates (Karryn's <fgName>).
+  {
+    const A = { name: 'Mist_1', zero: false, loopX: true, loopY: false, sx: -1.4, sy: 0, switch: 22, notSwitch: 0, notSwitch2: 0 };
+    const B = { name: 'Mist_2', zero: false, loopX: true, loopY: false, sx: -1.4, sy: 0, switch: 11, notSwitch: 30, notSwitch2: 0 };
+    const switches = new Map();
+    const isOn = id => switches.get(Number(id)) === true;
+    const fgChecks = [
+      [selectForegroundLayer(null, null, isOn) === null, 'no layers selects nothing'],
+      [selectForegroundLayer({ ...A, switch: 0 }, null, isOn) === 'a', 'ungated A layer shows'],
+      [selectForegroundLayer(A, null, isOn) === null, 'gated A layer hides while its switch is off'],
+      [selectForegroundLayer(A, null, id => true) === 'a', 'gated A layer shows once its switch is on'],
+      [selectForegroundLayer(A, B, id => id === 11) === 'b', 'B layer shows when A is off and B is on'],
+      [selectForegroundLayer(A, B, () => false) === null, 'both layers hide when both switches are off'],
+      [selectForegroundLayer(A, B, id => id === 11 || id === 30) === 'a', 'B hide-switch falls back to A like the plugin else-branch'],
+      [selectForegroundLayer(null, B, id => id === 11) === 'b', 'B-only map shows B while its switch is on'],
+      [selectForegroundLayer(null, B, () => false) === null, 'B-only map hides everything while its switch is off'],
+      [foregroundOrigin(false, true, 4, 1, 48) === 240, '`!` zero-foreground scrolls at the full map rate'],
+      [foregroundOrigin(true, false, 4, 1, 48) === 120, 'loop axis scrolls at the half map rate'],
+      [foregroundOrigin(false, false, 4, 1, 48) === 0, 'unflagged axis stays screen-fixed']
+    ];
+    for (const [ok, label] of fgChecks) if (!ok) fail(`foreground mist: ${label}`);
+    if (fgChecks.every(([ok]) => ok)) notes.push(`foreground mist selection and scroll ok (${fgChecks.length} checks)`);
+  }
   // MZ end to end: a minimal synthetic MZ project (flat root, rmmz_core.js,
   // one MZ 357 plugin call, one MZ-format Effekseer animation entry) converts
   // to a valid manifest with engine rpg-maker-mz, the 357 call lands in the
@@ -1087,6 +1171,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
     writeJson('data/Map001.json', {
       width: 5, height: 5, tilesetId: 1, autoplayBgm: false, autoplayBgs: false,
       bgm: { name: '', volume: 90, pitch: 100, pan: 0 }, bgs: { name: '', volume: 90, pitch: 100, pan: 0 },
+      note: '<fgName:Mist_1>\n<fgLoopX:1>\n<fgSx:-1.4>\n<fgName_b:Mist_2>\n<fgLoopX_b:1>\n<fgSwitch_b:11>',
       data: [...emptyLayer, ...emptyLayer, ...emptyLayer, ...emptyLayer, ...emptyLayer, ...emptyLayer],
       events: [null, {
         id: 1, name: 'EV001', note: '', x: 2, y: 2,
@@ -1099,6 +1184,9 @@ else notes.push('RGSS label fallthrough order preserved ok');
             { code: 212, indent: 0, parameters: [-1, 1, false] },
             { code: 101, indent: 0, parameters: ['', 0, 0, 2] },
             { code: 401, indent: 0, parameters: ['Hello'] },
+            { code: 111, indent: 0, parameters: [0, 1, 0] },
+            { code: 401, indent: 1, parameters: ['Then line'] },
+            { code: 412, indent: 0, parameters: [] },
             { code: 0, indent: 0, parameters: [] }
           ],
           moveFrequency: 3, moveRoute: { list: [{ code: 0, parameters: [] }], repeat: false, skippable: false, wait: false },
@@ -1108,6 +1196,12 @@ else notes.push('RGSS label fallthrough order preserved ok');
     });
     writeJson('data/Tilesets.json', [null, { id: 1, mode: 0, name: 'Outside', tilesetNames: ['', '', '', '', '', '', '', '', ''], flags: [0] }]);
     writeJson('data/Animations.json', [null, { id: 1, name: 'Hit', effectName: 'Hit' }]);
+    // Foreground art the map note references: a minimal 1x1 PNG each, so the
+    // referenced-only parallaxes decode runs and flags assets.parallaxes.
+    mkdirSync(join(mzDir, 'img', 'parallaxes'), { recursive: true });
+    const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    writeFileSync(join(mzDir, 'img', 'parallaxes', 'Mist_1.png'), tinyPng);
+    writeFileSync(join(mzDir, 'img', 'parallaxes', 'Mist_2.png'), tinyPng);
     const mzOut = join(mzDir, 'out');
     let mzManifest;
     try {
@@ -1118,12 +1212,17 @@ else notes.push('RGSS label fallthrough order preserved ok');
     }
     if (mzManifest) {
       const mzEventText = JSON.stringify(mzManifest.maps?.[0]?.mwgEvents || []);
+      const mzFg = mzManifest.maps?.[0]?.data?.settings || {};
       const mzChecks = [
         [mzManifest.source?.engine === 'rpg-maker-mz', 'probe detected as MZ'],
         [mzEventText.includes('"pluginCommand"'), 'MZ 357 converts to pluginCommand'],
         [!mzEventText.includes('"unsupported"'), 'MZ probe has no loud markers'],
+        [mzEventText.includes('"else":[]'), 'branch without else keeps an empty else list'],
         [mzManifest.compatibility?.commands?.['357']?.status === 'partial', 'MZ 357 classified partial'],
-        [mzManifest.compatibility?.plugins?.['MessageRows']?.status === 'partial', 'MZ plugin census covers 357 names']
+        [mzManifest.compatibility?.plugins?.['MessageRows']?.status === 'partial', 'MZ plugin census covers 357 names'],
+        [mzFg.foreground?.name === 'Mist_1' && mzFg.foreground?.loopX === true && mzFg.foreground?.sx === -1.4, 'map <fgName> note parses to settings.foreground'],
+        [mzFg.foregroundB?.name === 'Mist_2' && mzFg.foregroundB?.switch === 11, 'map <fgName_b> note parses to settings.foregroundB with its switch'],
+        [mzManifest.assets?.parallaxes === true, 'referenced foreground art flags assets.parallaxes']
       ];
       for (const [ok, label] of mzChecks) if (!ok) fail(`MZ probe: ${label}`);
       if (mzChecks.every(([ok]) => ok)) notes.push(`MZ probe conversion ok (${mzChecks.length} checks)`);

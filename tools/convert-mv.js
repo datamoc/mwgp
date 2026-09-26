@@ -83,6 +83,7 @@ const OPERATION_NAMES = ['set', 'add', 'subtract', 'multiply', 'divide', 'modulo
 const characterNames = new Set();
 const scriptSources = new Set();
 const pictureNames = new Set();
+const foregroundNames = new Set();
 const soundNames = new Set();
 const musicNames = new Set();
 const animationIds = new Set();
@@ -161,6 +162,33 @@ function normalizeMZMapData(data) {
   return data;
 }
 
+// Foreground.js (Sasuke KANNAZUKI, ed. Remtairy) draws an over-map tiling
+// layer from the map note, the same way $dataMap.meta reads it: <fgName:name>
+// with <fgLoopX/Y>, <fgSx/Sy> and an optional <fgSwitch:N> gate, plus a second
+// _b-suffixed layer with its own gate (<fgSwitch_b:N>) and hide-switches
+// (<fgNotSwitch_b(:2):N>). Stored on data.settings next to the XP converter's
+// map settings so the player reads one shape.
+function parseForegroundLayer(note, suffix, switchTags) {
+  const text = String(note || '');
+  const tag = name => { const match = new RegExp(`<${name}${suffix}:([^>]+)>`).exec(text); return match ? match[1].trim() : ''; };
+  const named = tagName => { const match = new RegExp(`<${tagName}:([^>]+)>`).exec(text); return match ? match[1].trim() : ''; };
+  const name = tag('fgName');
+  if (!name) return null;
+  const num = raw => { const value = Number(raw); return raw !== '' && Number.isFinite(value) ? value : 0; };
+  return {
+    name, zero: name.startsWith('!'),
+    loopX: text.includes(`<fgLoopX${suffix}:`), loopY: text.includes(`<fgLoopY${suffix}:`),
+    sx: num(tag('fgSx')), sy: num(tag('fgSy')), switch: num(named(switchTags.on)),
+    notSwitch: num(named(switchTags.off)), notSwitch2: num(named(switchTags.off2))
+  };
+}
+function parseForegroundNote(note) {
+  const primary = parseForegroundLayer(note, '', { on: 'fgSwitch', off: 'fgNotSwitch', off2: 'fgNotSwitch2' });
+  const secondary = parseForegroundLayer(note, '_b', { on: 'fgSwitch_b', off: 'fgNotSwitch_b', off2: 'fgNotSwitch_b2' });
+  if (!primary && !secondary) return null;
+  return { ...(primary ? { foreground: primary } : {}), ...(secondary ? { foregroundB: secondary } : {}) };
+}
+
 const maps = [];
 for (const name of readdirSync(dataDir).filter(name => /^Map\d+\.json$/i.test(name)).sort()) {
   const id = Number(name.match(/\d+/)[0]);
@@ -168,6 +196,11 @@ for (const name of readdirSync(dataDir).filter(name => /^Map\d+\.json$/i.test(na
   if (engineKind === 'rpg-maker-mz') normalizeMZMapData(data);
   if (data.bgm?.name) musicNames.add(data.bgm.name);
   if (data.bgs?.name) musicNames.add(data.bgs.name);
+  const foreground = parseForegroundNote(data.note);
+  if (foreground) {
+    data.settings = { ...(data.settings || {}), ...foreground };
+    for (const layer of [foreground.foreground, foreground.foregroundB]) if (layer) foregroundNames.add(layer.name);
+  }
   for (const event of data.events || []) for (const page of event?.pages || []) for (const command of page.list || []) {
     commandCounts.set(command.code, (commandCounts.get(command.code) || 0) + 1);
     tallyPluginCommand(command);
@@ -338,7 +371,7 @@ function convertCommands(list, context = {}) {
         }
         // convertBranchCondition never returns null (unknown kinds become an
         // explicit unsupported marker), so the block is always preserved.
-        result.push({ if: condition, then: thenBlock.commands, ...(elseCommands ? { else: elseCommands } : {}) });
+        result.push({ if: condition, then: thenBlock.commands, else: elseCommands || [] });
         if (list[index]?.code === 412 && list[index].indent === command.indent) index++;
         continue;
       }
@@ -791,8 +824,12 @@ function convertCommand(command, context = {}) {
   if (command.code === 335) return [{ enemyAppear: { index: Number(command.parameters?.[0] || 0) } }];
   if (command.code === 356 && command.parameters?.[0]) {
     const raw = String(command.parameters[0]);
-    const parts = raw.trim().split(/\s+/);
-    return [{ pluginCommand: { raw, name: parts[0] || '', args: parts.slice(1) } }];
+    // Split first: a table entry can hold spaces, and resolving before the
+    // split would shatter it into extra positional args. Text args (Tachie
+    // portrait names, etc.) resolve like say/choice text; other args pass
+    // through unchanged.
+    const parts = raw.trim().split(/\s+/).map(part => resolveTextTables(part));
+    return [{ pluginCommand: { raw: resolveTextTables(raw), name: parts[0] || '', args: parts.slice(1) } }];
   }
   // MZ plugin commands (code 357, [pluginName, commandName, label, args]): the
   // same pluginCommand vocabulary as MV's 356 above. The player matches on the
@@ -805,8 +842,9 @@ function convertCommand(command, context = {}) {
     const values = argsObject ? Object.values(argsObject) : [];
     const name = String(sub || plugin || '').trim();
     if (!name) return [unsupportedCommand(Number(command.code), 0, context)];
-    const raw = [String(plugin || '').trim(), name, ...values.map(value => String(value ?? ''))].filter(Boolean).join(' ');
-    return [{ pluginCommand: { raw, name, args: values.map(value => String(value ?? '')) } }];
+    const args = values.map(value => resolveTextTables(String(value ?? '')));
+    const raw = [String(plugin || '').trim(), name, ...args].filter(Boolean).join(' ');
+    return [{ pluginCommand: { raw, name, args } }];
   }
   // Keep common-event calls as runtime references. Inlining made valid
   // diamond-shaped call graphs explode and forced a depth-8 truncation;
@@ -1062,6 +1100,9 @@ function pngDimensions(path, file) {
 }
 
 await mkdir(join(output, 'data'), { recursive: true });
+// Foreground art follows files actually present, so the validator's
+// decoded-root check stays honest when the source folder is absent.
+const foregroundParallaxesAvailable = foregroundNames.size > 0 && (copyAssets || existsSync(join(gameRoot, 'img', 'parallaxes')));
 const manifest = {
   format: 'MWGP',
   version: 1,
@@ -1069,7 +1110,7 @@ const manifest = {
   display: { title: system.gameTitle || basename(source), width: system.advanced?.screenWidth || 816, height: system.advanced?.screenHeight || 624 },
   initialMapId: startMap?.id || null,
   player: startMap ? { mapId: startMap.id, x: startMap.id === system.startMapId ? system.startX : 1, y: startMap.id === system.startMapId ? system.startY : 1 } : null,
-  assets: { root: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size ? 'assets' : gameRoot, kind: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size ? 'decoded' : 'source', tilesets: copyTilesets, characters: copyCharacters, faces: copyFaces, pictures: copyPictures, audio: copyAudio, system: balloonUsed, animations: animationSpriteNames.size > 0, encryption: system.encryptionKey ? 'rpgm' : 'none' },
+  assets: { root: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size || foregroundParallaxesAvailable ? 'assets' : gameRoot, kind: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size || foregroundParallaxesAvailable ? 'decoded' : 'source', tilesets: copyTilesets, characters: copyCharacters, faces: copyFaces, pictures: copyPictures, audio: copyAudio, system: balloonUsed, animations: animationSpriteNames.size > 0, parallaxes: foregroundParallaxesAvailable, encryption: system.encryptionKey ? 'rpgm' : 'none' },
   tilesets: database.tilesets,
   playerSprite,
   initialParty: Array.isArray(system.partyMembers) ? system.partyMembers.map(Number).filter(Number.isInteger) : [],
@@ -1105,6 +1146,9 @@ if (copyFaces) await decodeTree(join(gameRoot, 'img', 'faces'), join(output, 'as
 if (balloonUsed && !copyAssets) await decodeTree(join(gameRoot, 'img', 'system'), join(output, 'assets', 'img', 'system'), system.encryptionKey);
 if (animationSpriteNames.size && !copyAssets) await decodeNamedTree(join(gameRoot, 'img', 'animations'), join(output, 'assets', 'img', 'animations'), animationSpriteNames, system.encryptionKey);
 if (copyPictures && !copyAssets) await decodeNamedTree(join(gameRoot, 'img', 'pictures'), join(output, 'assets', 'img', 'pictures'), pictureNames, system.encryptionKey);
+// Foreground art lives in img/parallaxes; like balloon/system art it is small,
+// so decode what the map notes reference even without a copy flag.
+if (foregroundParallaxesAvailable && !copyAssets) await decodeNamedTree(join(gameRoot, 'img', 'parallaxes'), join(output, 'assets', 'img', 'parallaxes'), foregroundNames, system.encryptionKey);
 if (copyAudio && !copyAssets) {
   await decodeNamedTree(join(gameRoot, 'audio', 'se'), join(output, 'assets', 'audio', 'se'), soundNames, system.encryptionKey);
   await decodeNamedTree(join(gameRoot, 'audio', 'bgm'), join(output, 'assets', 'audio', 'bgm'), musicNames, system.encryptionKey);

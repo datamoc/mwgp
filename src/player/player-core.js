@@ -200,11 +200,15 @@ export async function startMwgPlayer(canvas, project) {
   const mapSettings = map.settings || {};
   const initialPanoramaUrl = isXp && assetRoot && mapSettings.panoramaName ? `${assetRoot}/graphics/Panoramas/${encodeURIComponent(mapSettings.panoramaName)}.png` : null;
   const initialFogUrl = isXp && assetRoot && mapSettings.fogName ? `${assetRoot}/graphics/Fogs/${encodeURIComponent(mapSettings.fogName)}.png` : null;
+  // Foreground.js over-map mist (MV/MZ map notes, converter: data.settings).
+  const foregroundUrlFor = settings => project.assets?.parallaxes && assetRoot && settings?.name ? `${assetRoot}/img/parallaxes/${encodeURIComponent(settings.name)}.png` : null;
+  const initialForegroundUrl = foregroundUrlFor(mapSettings.foreground);
+  const initialForegroundBUrl = foregroundUrlFor(mapSettings.foregroundB);
   const balloonUrl = project.assets?.system ? `${project.assets.root}/img/system/Balloon.png` : null;
   const animationSheetNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectAnimationSheetNames(page.commands, project.database?.animations))))];
   const animationUrls = project.assets?.animations ? animationSheetNames.map(name => `${project.assets.root}/img/animations/${encodeURIComponent(name)}.png`) : [];
   const meNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectMeNames(page.commands))))];
-  const optionalUrls = [...new Set([...(playerUrl ? [playerUrl] : []), ...eventUrls, ...portraitUrls, ...pictureUrls, ...(balloonUrl ? [balloonUrl] : []), ...animationUrls, ...(initialPanoramaUrl ? [initialPanoramaUrl] : []), ...(initialFogUrl ? [initialFogUrl] : [])])];
+  const optionalUrls = [...new Set([...(playerUrl ? [playerUrl] : []), ...eventUrls, ...portraitUrls, ...pictureUrls, ...(balloonUrl ? [balloonUrl] : []), ...animationUrls, ...(initialPanoramaUrl ? [initialPanoramaUrl] : []), ...(initialFogUrl ? [initialFogUrl] : []), ...(initialForegroundUrl ? [initialForegroundUrl] : []), ...(initialForegroundBUrl ? [initialForegroundBUrl] : [])])];
   // A project can reference an optional/plugin-generated image that is absent
   // from the distributed archive. Load each asset independently so one stale
   // reference does not discard the complete Pixi renderer.
@@ -305,6 +309,17 @@ export async function startMwgPlayer(canvas, project) {
       this.aboveMap.zIndex = 1000000000;
       this.fog = initialFogUrl && loadedUrls.has(initialFogUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialFogUrl), width: game.width, height: game.height }) : null;
       if (this.fog) { this.fog.alpha = Math.max(0, Math.min(1, Number(mapSettings.fogOpacity ?? 0) / 255)); this.stage.addChild(this.fog); }
+      // Foreground.js mist sits above the whole world (characters included)
+      // like the engine's _baseSprite layer; updateForeground picks A/B by
+      // switch and scrolls the origin with the map. A referenced file that did
+      // not decode warns once here instead of failing the scene silently.
+      const makeForeground = (settings, url) => settings && url && loadedUrls.has(url) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(url), width: game.width, height: game.height }) : null;
+      this.foregroundA = makeForeground(mapSettings.foreground, initialForegroundUrl);
+      this.foregroundB = makeForeground(mapSettings.foregroundB, initialForegroundBUrl);
+      if (this.foregroundA) this.stage.addChild(this.foregroundA);
+      if (this.foregroundB) this.stage.addChild(this.foregroundB);
+      this.foregroundDrift = { ax: 0, ay: 0, bx: 0, by: 0 };
+      if ((mapSettings.foreground || mapSettings.foregroundB) && !this.foregroundA && !this.foregroundB) console.warn(`MWGP foreground ${mapSettings.foreground?.name || mapSettings.foregroundB?.name} on map ${mapEntry.id} did not load; reconvert with foreground art decoded`);
       // Placed directly above the map, below every sprite/window layer added further down,
       // so a fade or flash washes the world without obscuring dialogue text on top of it.
       this.screenEffects = mwg.ScreenEffects ? new mwg.ScreenEffects({ width: game.width, height: game.height }) : null;
@@ -387,9 +402,6 @@ export async function startMwgPlayer(canvas, project) {
       this.pendingRuntimeState = null;
       this.eventRunning = false;
       this.parallelTimer = 0;
-      this.windows = new mwg.WindowStack();
-      this.stage.addChild(this.windows);
-      this.windows.setViewport(game.width, game.height);
       const playerIndex = Number(project.playerSprite?.index) || 0;
       const initialPlayerTexture = playerSheet?.get(characterCellIndex(playerGeom, playerIndex, 2, 1));
       this.player = playerSheet ? new mwg.AnimatedSprite({ texture: initialPlayerTexture }) : new mwg.TintedSprite({ texture: mwg.Resources.texture(fallbackSheetUrl) });
@@ -401,6 +413,12 @@ export async function startMwgPlayer(canvas, project) {
       world.addChild(this.aboveMap);
       this.pictureLayer = new mwg.Container2D();
       this.stage.addChild(this.pictureLayer);
+      // RPG Maker draws pictures below the message/choice windows: the window
+      // stack joins the stage after the picture layer, so a fullscreen splash
+      // can never cover the question text (Pokemon Void intro).
+      this.windows = new mwg.WindowStack();
+      this.stage.addChild(this.windows);
+      this.windows.setViewport(game.width, game.height);
       this.pictureSprites = new Map();
       this.pictureTweens = new Map();
       this.overlayLayer = new mwg.Container2D();
@@ -559,6 +577,7 @@ export async function startMwgPlayer(canvas, project) {
       // even though GridMover changes the walk/idle animation name correctly.
       this.player?.update(dt);
       this.updatePictures(dt);
+      this.updateForeground(dt);
       this.updateOverlayAnims(dt);
       this.updateCameraPan(dt);
       if (nativeAutotilesReady) {
@@ -695,6 +714,14 @@ export async function startMwgPlayer(canvas, project) {
         } catch (error) { console.warn('MWGP autorun event failed to start; skipping it', event?.id, error); }
       }
     }
+    // MV refreshes the map when an event finishes: an autorun page whose
+    // conditions just became true (a door choice setting its switch) starts
+    // now, not only at map boot. Skipped while a cross-map transfer unloads
+    // the page, where queued runs would die anyway.
+    refreshAutorunEvents() {
+      if (this.transferring) return;
+      this.runAutorunEvents();
+    }
     runParallelEvents() {
       // This runs inside the frame loop: one corrupt event must never throw
       // into it and freeze the game. Warn and continue instead.
@@ -715,7 +742,7 @@ export async function startMwgPlayer(canvas, project) {
         const order = Array.isArray(page.story.order) ? page.story.order : Object.keys(passages);
         this.eventQueue = this.eventQueue.then(() => { this.eventRunning = true; this.currentEvent = event; return this.runStoryLoop(passages, page.story.start || 'main', order); })
           .catch(error => { if (!(error instanceof ExitEventSignal) && !(error instanceof BreakLoopSignal)) console.error('MWGP event failed', error); })
-          .finally(() => { this.eventRunning = false; this.currentEvent = null; this.refreshEventSprites(); });
+          .finally(() => { this.eventRunning = false; this.currentEvent = null; this.refreshEventSprites(); this.refreshAutorunEvents(); });
         return this.eventQueue;
       }
       const commands = prepareEventCommands(page.commands, this);
@@ -726,7 +753,7 @@ export async function startMwgPlayer(canvas, project) {
         // return value, since EventRunner.run() offers no other way to stop mid-list; that
         // is expected control flow, not a failure, so only a genuine error is logged.
         .catch(error => { if (!(error instanceof ExitEventSignal) && !(error instanceof BreakLoopSignal)) console.error('MWGP event failed', error); })
-        .finally(() => { this.eventRunning = false; this.currentEvent = null; this.refreshEventSprites(); });
+        .finally(() => { this.eventRunning = false; this.currentEvent = null; this.refreshEventSprites(); this.refreshAutorunEvents(); });
       return this.eventQueue;
     }
     async runStoryLoop(passages, start, order = Object.keys(passages)) {
@@ -785,6 +812,7 @@ export async function startMwgPlayer(canvas, project) {
         if (typeof inlined === 'string') resolvedText = inlined;
         else (this.disabledTextFilters ||= new Set()).add(filter);
       }
+      if (resolvedText.includes('\\')) resolvedText = this.convertGameText(resolvedText);
       if (!resolvedText.includes('\\')) return resolvedText;
       const escaped = resolvedText.replace(/\\\\/g, '\0');
       const actorName = id => project.database?.actors?.[Number(id)]?.name || '';
@@ -798,8 +826,40 @@ export async function startMwgPlayer(canvas, project) {
         .replace(/\\I\[\d+\]/gi, '')
         .replace(/\\[.\|^\!<>]/g, '')
         .replace(/\\[{}]/g, '')
-        .replace(/\\\$/g, '');
+        .replace(/\\\$/g, '')
+        // RPG Maker consumes an unknown `\X` escape (a plugin code from
+        // another project, like Karryn's `\#`) instead of printing it. This
+        // runs while `\\` literals are still NUL-protected, so only real
+        // unknown codes are dropped.
+        .replace(/\\./g, '');
       return resolved.replace(/\0/g, '\\');
+    }
+    // A game whose plugins override the message-code layer (Karryn's
+    // `TextManager.convertExtraEscapeCharacters`, resolving dynamic \REM_xxx[n]
+    // codes from live party state) runs first, exactly like the engine: stock
+    // conversion, then the game's extra pass. The engine form uses ESC (\x1b)
+    // for escapes, mapped back to `\` for the generic MV pass above; a literal
+    // backslash comes back doubled, like the source. Games without that layer
+    // keep the generic pass: the probe is quiet (typeof cannot throw) and the
+    // hook disables itself after one loud warning on failure, never silently.
+    convertGameText(text) {
+      if (this.gameTextConverter === false || !this.rgss) return text;
+      const state = { game: this.gameState };
+      if (this.gameTextConverter === undefined) {
+        const probe = this.rgss.evaluateValue({ source: 'typeof TextManager.convertExtraEscapeCharacters', mv: true, js: "return (typeof TextManager !== 'undefined' && TextManager.convertExtraEscapeCharacters && TextManager.convertEscapeCharacters) ? 1 : 0;" }, state, this.currentEvent);
+        this.gameTextConverter = probe === 1;
+        if (!this.gameTextConverter) return text;
+      }
+      try {
+        const literal = JSON.stringify(text);
+        const out = this.rgss.evaluateValue({ source: `TextManager.convertExtraEscapeCharacters(TextManager.convertEscapeCharacters(${literal}))`, mv: true, js: `return TextManager.convertExtraEscapeCharacters(TextManager.convertEscapeCharacters(${literal}));` }, state, this.currentEvent);
+        if (typeof out !== 'string') throw new Error(`game text converter returned ${typeof out}`);
+        return out.replace(/\x1b\x1b/g, '\\\\').replace(/\x1b/g, '\\');
+      } catch (error) {
+        console.warn(`MWGP game text codes unavailable (${String(error?.message || error).slice(0, 120)}); using built-in escapes`);
+        this.gameTextConverter = false;
+        return text;
+      }
     }
     messageAnchor() {
       return ['top', 'center', 'bottom'][Number(this.messageOptions?.position)] || 'bottom';
@@ -1417,6 +1477,30 @@ export async function startMwgPlayer(canvas, project) {
         if (t >= 1) { this.pictureTweens.delete(id); tween.resolve?.(); }
       }
     }
+    // Foreground.js per-frame update; the pick and the origin math live in the
+    // pure selectForegroundLayer/foregroundOrigin below so tests can pin them.
+    // Map scroll in px is the negated world offset; shake/pan ride along,
+    // invisibly for mist.
+    updateForeground(dt) {
+      const a = mapSettings.foreground || null, b = mapSettings.foregroundB || null;
+      const show = (sprite, on) => { if (sprite) sprite.visible = !!on; };
+      const isOn = id => !id || this.gameState.switch(String(id));
+      const active = selectForegroundLayer(a, b, isOn);
+      show(this.foregroundA, active === 'a');
+      show(this.foregroundB, active === 'b');
+      const settings = active === 'a' ? a : active === 'b' ? b : null;
+      const sprite = active === 'a' ? this.foregroundA : active === 'b' ? this.foregroundB : null;
+      if (!settings || !sprite) return;
+      const drift = this.foregroundDrift;
+      if (settings.loopX) drift[`${active}x`] += settings.sx * 0.625 * dt;
+      if (settings.loopY) drift[`${active}y`] += settings.sy * 0.625 * dt;
+      const scrollTX = (this.camera ? -(this.world?.x || 0) : -(this.tileMap?.x || 0)) / tileSize;
+      const scrollTY = (this.camera ? -(this.world?.y || 0) : -(this.tileMap?.y || 0)) / tileSize;
+      sprite.tilePosition = {
+        x: foregroundOrigin(settings.loopX, settings.zero, scrollTX, drift[`${active}x`], tileSize),
+        y: foregroundOrigin(settings.loopY, settings.zero, scrollTY, drift[`${active}y`], tileSize)
+      };
+    }
     // ---- audio (BGM/BGS/ME/SE): thin wrappers over the AudioManager -------------------
     applyMapAudio() {
       const track = entry => ({ name: entry?.name || '', volume: entry?.volume ?? 90, pitch: entry?.pitch ?? 100, pan: entry?.pan ?? 0 });
@@ -1893,6 +1977,7 @@ export async function startMwgPlayer(canvas, project) {
       try {
         this.saves.save('runtime-transition', this.runtimeState({ mapId, x, y, facing: this.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }), { mapId, x, y });
       } catch (error) { console.warn('MWGP transfer save failed; continuing without carried state', error); }
+      this.transferring = true;
       const params = new URLSearchParams(location.search);
       params.set('map', String(mapId)); params.set('x', String(x)); params.set('y', String(y));
       location.href = `${location.pathname}?${params}`;
@@ -1911,10 +1996,29 @@ export async function startMwgPlayer(canvas, project) {
       const key = `slot-${slot}`;
       this.lastSlot = slot;
       try {
+        this.noteEngineSave();
         this.saves.save(key, this.runtimeState({ mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, facing: this.mover.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }), { mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, gold: this.rpgExtra.gold, leader: this.slotLeader() });
         console.info(`MWGP saved ${key} on map ${mapEntry.id} at (${this.mover.x}, ${this.mover.y})`);
         this.flashTitle(`✓ Saved (file ${slot})`);
       } catch (error) { console.error('MWGP save failed', error); this.flashTitle('✗ Save failed — see console (F12)'); }
+    }
+    // MV counts every successful save on `$gameSystem._saveCount` and events
+    // gate on it (Karryn's door scene loops its save prompt until the count is
+    // nonzero). evaluateValue snapshots the engine synchronously, so the count
+    // rides inside the save written above and across transfers like the engine.
+    noteEngineSave() {
+      if (!this.rgss || this.engineSaveCounted === false) return;
+      const count = { game: this.gameState };
+      const probe = this.rgss.evaluateValue({ source: 'typeof $gameSystem', mv: true, js: "return (typeof $gameSystem !== 'undefined' && $gameSystem) ? 1 : 0;" }, count, this.currentEvent);
+      if (!probe) { this.engineSaveCounted = false; return; }
+      this.engineSaveCounted = true;
+      this.rgss.evaluateValue({ source: '$gameSystem._saveCount = ($gameSystem._saveCount || 0) + 1;', mv: true, js: 'return ($gameSystem._saveCount = ($gameSystem._saveCount || 0) + 1);' }, count, this.currentEvent);
+    }
+    // MV's Open Save Screen (code 352) shows the file window: the player picks
+    // a slot and cancelling saves nothing. Never a silent write to the last slot.
+    async promptSaveGame() {
+      const slot = await this.pickSlot(request => this.presentDialogue(request), { forSave: true });
+      if (slot) this.saveGame(slot);
     }
     // ---- save files: SLOT_COUNT numbered slots, each with a one-line summary ---------------------------------
     slotLeader() {
@@ -2434,6 +2538,34 @@ export function resolveRouteStep(step, facing, origin = null, target = null) {
   return null;
 }
 
+// Foreground.js layer pick, pure so tools/test-smoke.mjs can pin it in Node:
+// 'a' when the A switch is on, 'b' when it is off but B is on and neither
+// hide-switch is, 'a' again otherwise, null when every all-off combination
+// hides both. Mirrors the plugin's updateForeground gates exactly.
+export function selectForegroundLayer(a, b, isOn) {
+  if (!a && !b) return null;
+  const on = id => !id || !!isOn(id);
+  const aOn = on(a?.switch), bOn = on(b?.switch);
+  const bClear = !!b && bOn && !(b.notSwitch && isOn(b.notSwitch)) && !(b.notSwitch2 && isOn(b.notSwitch2));
+  // A set id of 0/undefined counts as unset: on() already treats it as on, so
+  // compare the raw ids (not the resolved states) for the gate combinations.
+  const hidden = (a?.switch && b?.switch && !aOn && !bOn) || (a?.switch && !b?.switch && !aOn) || (b?.switch && !a?.switch && !bOn && !a?.name);
+  if (hidden) return null;
+  if (aOn && a) return 'a';
+  if (bClear) return 'b';
+  return a ? 'a' : null;
+}
+
+// Tiling origin in px for one Foreground.js axis: full map-scroll rate for `!`
+// zero-foregrounds, half rate for loop flags, screen-fixed otherwise. Scroll
+// and drift arrive in tiles; tilePx scales back to px like the plugin's
+// display * tileWidth(/2) origins.
+export function foregroundOrigin(loop, zero, scrollTiles, driftTiles, tilePx) {
+  if (zero) return (scrollTiles + driftTiles) * tilePx;
+  if (loop) return (scrollTiles + driftTiles) * tilePx / 2;
+  return 0;
+}
+
 class BreakLoopSignal extends Error {}
 class ExitEventSignal extends Error {}
 // Thrown by a prepared { goto } marker (see prepareEventCommands) and caught by
@@ -2473,6 +2605,9 @@ export function resolveGameDataOperand(extra, context, spec) {
 export function prepareEventCommands(commands, scene) {
   // A malformed list (hand-edited manifest, corrupt data) must never throw
   // synchronously into the caller's frame loop: warn loudly and run nothing.
+  // A missing list is the normal "no else branch" shape older manifests omit,
+  // not corruption: run nothing without the warning.
+  if (commands === undefined) return [];
   if (!Array.isArray(commands)) {
     console.warn('MWGP event list is not an array; skipping it', commands);
     return [];
@@ -2633,7 +2768,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.saveBgm) return { call: () => scene.saveBgm(command.saveBgm === 'both') };
     if (command.resumeBgm) return { call: () => scene.resumeBgm(command.resumeBgm === 'both') };
     if (command.me) return { call: () => scene.playMe(command.me) };
-    if (command.menu === 'save') return { call: () => scene.saveGame() };
+    if (command.menu === 'save') return { call: () => scene.promptSaveGame() };
     if (command.menu === 'menu') return { call: () => scene.openMenu() };
     if (command.menu) return { call: () => scene.unimplementedScene(command.menu) };
     if (command.sound) return { call: () => scene.playSound(command.sound) };
