@@ -1441,6 +1441,37 @@ try {
   fail(`--scan failed: ${String(error.message).slice(0, 300)}`);
 }
 
+// 6: lazy per-map index (T119) - stubs keep id+info and drop data/mwgEvents,
+// every stub resolves back to its full entry, and the index is far smaller.
+try {
+  const { buildMapIndex, findMapEntry, spliceMapEntry } = await import(pathToFileURL(join(root, 'src', 'map-index.js')).href);
+  const fake = { maps: [{ id: 3, info: { name: 'Town' }, data: { width: 20 }, mwgEvents: [1] }, { id: 7, info: null, data: {}, mwgEvents: [] }] };
+  const fakeIndex = buildMapIndex(fake);
+  if (fakeIndex.maps.length !== 2 || fakeIndex.maps.some(stub => stub.data !== undefined || stub.mwgEvents !== undefined)) fail('map index stubs must drop data/mwgEvents');
+  if (fakeIndex.maps[0].id !== 3 || fakeIndex.maps[0].info?.name !== 'Town' || fakeIndex.maps[1].info !== null) fail('map index stubs must keep id+info');
+  if (findMapEntry(fake, 3) !== fake.maps[0] || findMapEntry(fake, '7') !== fake.maps[1]) fail('findMapEntry must return the manifest entry');
+  if (findMapEntry(fake, 999) !== undefined || findMapEntry(fake, 'x') !== undefined) fail('findMapEntry must miss unknown maps');
+  const spliced = spliceMapEntry(fakeIndex, fake.maps[0]);
+  if (spliced.maps.length !== 2 || spliced.maps[0].data === undefined) fail('spliceMapEntry must replace the stub with the full entry');
+  for (const dir of convertedDirs) {
+    const manifestPath = join(root, 'MWGP_versions', dir, 'mwgp.json');
+    if (!existsSync(manifestPath)) continue;
+    const full = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const realIndex = buildMapIndex(full);
+    if ((full.maps || []).length !== realIndex.maps.length) { fail(`${dir}: map index drops maps`); continue; }
+    if (realIndex.maps.some(stub => stub.data !== undefined || stub.mwgEvents !== undefined)) fail(`${dir}: map index stub leaks data/mwgEvents`);
+    if (realIndex.maps.some(stub => stub.id === undefined)) fail(`${dir}: map index stub is missing its id`);
+    const fullBytes = Buffer.byteLength(JSON.stringify(full));
+    const indexBytes = Buffer.byteLength(JSON.stringify(realIndex));
+    if (indexBytes >= fullBytes) fail(`${dir}: map index is not smaller than the manifest`);
+    else notes.push(`${dir}: map index ${(indexBytes / 1048576).toFixed(1)} MB vs manifest ${(fullBytes / 1048576).toFixed(1)} MB`);
+    const sample = (full.maps || []).find(map => map?.data);
+    if (sample && findMapEntry(full, sample.id) !== sample) fail(`${dir}: findMapEntry misses map ${sample.id}`);
+  }
+} catch (error) {
+  fail(`map index check failed: ${String(error.message).slice(0, 200)}`);
+}
+
 if (failures.length) {
   console.error(`smoke test FAILED (${failures.length}):\n- ${failures.join('\n- ')}`);
   process.exit(1);

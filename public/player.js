@@ -12,12 +12,41 @@ try {
   runtime.src = '/mwg.js';
   await new Promise((resolve, reject) => { runtime.onload = resolve; runtime.onerror = () => reject(new Error('mw_games runtime failed to load')); document.head.append(runtime); });
   const { MwgPlayer } = await import('/fallback-core.js');
-  const response = await fetch(`/api/mwgp/${encodeURIComponent(id || '')}`);
-  if (!response.ok) throw new Error(`MWGP project not found (${response.status})`);
-  const project = await response.json();
+  // T119: boot from the lightweight index (map stubs only) instead of the
+  // whole manifest, then fetch just the booted map. The single-file on-disk
+  // manifest and the full-manifest route are unchanged.
+  const projectId = encodeURIComponent(id || '');
+  const indexResponse = await fetch(`/api/mwgp/${projectId}/index`);
+  if (!indexResponse.ok) throw new Error(`MWGP project not found (${indexResponse.status})`);
+  const project = await indexResponse.json();
   const query = new URLSearchParams(location.search);
   if (query.has('map')) project.initialMapId = Number(query.get('map'));
   if (query.has('x') && query.has('y')) project.player = { ...(project.player || {}), mapId: project.initialMapId, x: Number(query.get('x')), y: Number(query.get('y')) };
+  // On-demand map loader: replaces the index stub with the full entry
+  // (tile data + converted events), kept in project.maps so transfer
+  // validation, save-slot names and the boot fallback chain keep working.
+  project.mapRoot = `/api/mwgp/${projectId}/maps`;
+  project.loadMap = async mapId => {
+    const wanted = Number(mapId);
+    const cached = project.maps.find(map => Number(map?.id) === wanted && map?.data);
+    if (cached) return cached;
+    const mapResponse = await fetch(`${project.mapRoot}/${wanted}`);
+    if (!mapResponse.ok) throw new Error(`MWGP map ${wanted} not found (${mapResponse.status})`);
+    const full = await mapResponse.json();
+    const at = project.maps.findIndex(map => Number(map?.id) === Number(full?.id));
+    if (at >= 0) project.maps[at] = full;
+    else project.maps.push(full);
+    return full;
+  };
+  // Same fallback chain as startMwgPlayer: requested map, start map, first.
+  const hasMap = value => Number.isFinite(value) && project.maps.some(map => Number(map?.id) === value);
+  const requestedMapId = query.has('map') ? Number(query.get('map')) : NaN;
+  const bootMapId = hasMap(requestedMapId) ? requestedMapId
+    : hasMap(Number(project.initialMapId)) ? Number(project.initialMapId)
+    : Number(project.maps[0]?.id);
+  if (!Number.isFinite(bootMapId)) throw new Error('MWGP project has no map');
+  loading.textContent = 'Loading map…';
+  await project.loadMap(bootMapId);
   if (project.assets?.kind === 'decoded') project.assets.root = `/api/mwgp/${id}/assets`;
   if (project.pluginLibrary?.files) project.pluginLibrary.root = `/api/mwgp/${id}/assets`;
   if (project.titleScreen?.assets?.kind === 'decoded') project.titleScreen.assets.root = `/api/mwgp/${id}/assets`;

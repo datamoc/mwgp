@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { buildMapIndex, findMapEntry } from './map-index.js';
 
 // Text responses (manifests, plugin/engine sources) are large and compress ~8x: gzip them for clients that
 // accept it, keeping the compressed copy per file version so the cost is paid once.
@@ -79,6 +80,35 @@ function json(res, status, body) {
   res.end(payload);
 }
 
+// Lazy per-map loading (T119): the on-disk manifest stays a single file, but
+// the browser boots from a small index (map stubs only) and fetches one full
+// map entry per visited map. Parsing a tens-of-MB manifest per request would
+// spike the server, so parsed manifests are cached per file version.
+const parsedManifests = new Map();
+async function loadManifest(file) {
+  const fs = await import('node:fs/promises');
+  const stat = await fs.stat(file);
+  const key = `${file}:${stat.mtimeMs}:${stat.size}`;
+  let entry = parsedManifests.get(file);
+  if (!entry || entry.key !== key) {
+    entry = { key, manifest: JSON.parse(await fs.readFile(file, 'utf8')) };
+    parsedManifests.set(file, entry);
+  }
+  return entry.manifest;
+}
+
+// Same one-time gzip pattern as sendFile, for generated JSON payloads.
+async function sendJson(req, res, text, cacheKey) {
+  const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' };
+  if (/\bgzip\b/.test(String(req.headers['accept-encoding'] || '')) && text.length > 4096) {
+    if (!gzipped.has(cacheKey)) gzipped.set(cacheKey, promisify(gzip)(text));
+    res.writeHead(200, { ...headers, 'content-encoding': 'gzip', vary: 'accept-encoding' });
+    return res.end(await gzipped.get(cacheKey));
+  }
+  res.writeHead(200, headers);
+  return res.end(text);
+}
+
 function launchGame(id) {
   const game = listGames().find(item => item.id === id);
   if (!game) return { error: 'Game not found' };
@@ -103,13 +133,34 @@ const server = createServer(async (req, res) => {
       const type = assetTypes[extname(assetFile).toLowerCase()] || 'application/octet-stream';
       return sendFile(req, res, assetFile, type);
     }
-    const id = rest;
-    const folder = listMwgp().find(item => item.id === id);
-    if (!folder) return json(res, 404, { error: 'MWGP project not found' });
-    const name = Buffer.from(id, 'base64url').toString('utf8');
-    const manifest = join(mwgpRoot, name, 'mwgp.json');
-    if (!existsSync(manifest)) return json(res, 404, { error: 'MWGP manifest not found' });
-    return sendFile(req, res, manifest, 'application/json; charset=utf-8');
+    const resolveProject = id => {
+      if (!listMwgp().some(item => item.id === id)) return { error: 'MWGP project not found' };
+      const name = Buffer.from(id, 'base64url').toString('utf8');
+      const manifest = join(mwgpRoot, name, 'mwgp.json');
+      if (!existsSync(manifest)) return { error: 'MWGP manifest not found' };
+      return { manifest };
+    };
+    // Project ids are base64url (never contain '/'), so a '/maps/' or
+    // '/index' suffix unambiguously marks a lazy-loading route (T119).
+    const mapMarker = '/maps/';
+    if (rest.includes(mapMarker)) {
+      const [mapIdPart, mapIdRaw] = rest.split(mapMarker);
+      const resolved = resolveProject(mapIdPart);
+      if (resolved.error) return json(res, 404, { error: resolved.error });
+      const entry = findMapEntry(await loadManifest(resolved.manifest), mapIdRaw);
+      if (!entry) return json(res, 404, { error: 'MWGP map not found' });
+      return sendJson(req, res, JSON.stringify(entry), `${resolved.manifest}:map:${entry.id}`);
+    }
+    if (rest.endsWith('/index')) {
+      const resolved = resolveProject(rest.slice(0, -'/index'.length));
+      if (resolved.error) return json(res, 404, { error: resolved.error });
+      const stat = statSafe(resolved.manifest);
+      const payload = JSON.stringify(buildMapIndex(await loadManifest(resolved.manifest)));
+      return sendJson(req, res, payload, `${resolved.manifest}:${stat?.mtimeMs}:${stat?.size}:index`);
+    }
+    const resolved = resolveProject(rest);
+    if (resolved.error) return json(res, 404, { error: resolved.error });
+    return sendFile(req, res, resolved.manifest, 'application/json; charset=utf-8');
   }
   if (url.pathname === '/api/launch' && req.method === 'POST') {
     let body = '';

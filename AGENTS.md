@@ -86,6 +86,9 @@ from `src/player/`, and `/mwg.js` reads the prebuilt `mw_games` global bundle st
 effect on browser refresh with no compile step.
 
 API surface: `GET /api/games` (catalog), `GET /api/mwgp/:id` (manifest JSON),
+`GET /api/mwgp/:id/index` (manifest with maps replaced by lightweight `{id, info}` stubs —
+the browser boots from this, then fetches one full map per visited map via
+`GET /api/mwgp/:id/maps/:mapId`; parsed manifests are cached per file version),
 `GET /api/mwgp/:id/assets/*` (decoded asset bytes, also path-traversal-guarded against the
 project's own `assets/` root), and `POST /api/launch` (spawns a native `Game.exe` detached).
 
