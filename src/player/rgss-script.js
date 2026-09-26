@@ -701,6 +701,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     // Ruby's `$~` (English: `$MATCH`): the last `str =~ /re/` match.
     get $MATCH() { return lastMatch ? { pre_match: lastMatch.text.slice(0, lastMatch.index), post_match: lastMatch.text.slice(lastMatch.index + lastMatch.groups[0].length), to_a: lastMatch.groups, ...lastMatch.groups } : null; },
     __mixin: (target, descriptors) => { for (const key of Reflect.ownKeys(descriptors)) if (!Object.prototype.hasOwnProperty.call(target, key)) Object.defineProperty(target, key, descriptors[key]); return target; },
+    // Ruby's `!x`: only nil/false are falsy (the converter rewrites `!x` to `__falsy(x)` for a bare value read).
+    __falsy: value => value === null || value === undefined || value === false,
     __values: value => (value != null && typeof value === 'object' && typeof value[Symbol.iterator] !== 'function' ? Object.values(value) : value),
     __each: value => (value != null && typeof value[Symbol.iterator] !== 'function' && typeof value === 'object' ? Object.entries(value) : value),
     ...Object.fromEntries(Object.entries(rgssClasses).map(([name, Class]) => [name, callableAttributes(Class)])),

@@ -168,6 +168,8 @@ function editsFor(entry, names, report) {
 //  * `Object.defineProperties(X, Object.getOwnPropertyDescriptors(M))` (extend/include) becomes `__mixin(...)`: own methods win.
 //  * a setter `set _x` that assigns `this._x` is renamed `set x`.
 //  * a bare identifier naming a zero-parameter library function becomes a call (see bareFunctionCallEdits).
+//  * `!x` (a bare identifier/member read, no call, no comparison) becomes `__falsy(x)`: Ruby's nil/false-only
+//    falsiness, not JS's (0/""/[] are truthy in Ruby).
 //  * a method `x()` next to a setter `set x` is kept alongside it (methodSetterClashEdits).
 //  * `x.splice(a, n)` (Ruby's `slice!`) becomes `__splice(x, v => { x = v }, a, n)`.
 //  * `set x(v) { super.x(v) }` becomes `super.x = v` plus a delegating getter (setterSuperEdits).
@@ -466,13 +468,43 @@ function methodSetterClashEdits(ast) {
   return edits;
 }
 
+// Ruby's `!x` (and the implicit truthiness of `if x`/`x ? a : b`/`x && y`/`x || y`) is true only for `nil`/`false`; every
+// other value, including 0, "", [] and {}, is truthy. Ruby2JS's self-host build emits a literal `!x`/`if (x)`, using JS's
+// own falsy rules instead - wrong whenever `x` can hold a Ruby value that is falsy in JS but truthy in Ruby (0 most often:
+// a valid id/index/count read as "nothing there"). Scoped to a bare identifier or a simple, call-free member/ivar read
+// (`x`, `this._x`, `a.b.c`), never a call or comparison result (`x.nil?`, `x == y`) - those already return a real
+// boolean under both languages' rules, so rewriting them would be pure risk for no correctness gain.
+function isPlainRubyValue(node) {
+  if (node.type === 'Identifier') return true;
+  if (node.type === 'ThisExpression') return false;
+  if (node.type === 'MemberExpression' && !node.computed) return isPlainRubyValue(node.object) || node.object.type === 'ThisExpression';
+  return false;
+}
+function rubyTruthinessEdits(ast, js) {
+  const edits = [];
+  const visit = node => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'UnaryExpression' && node.operator === '!' && isPlainRubyValue(node.argument)) {
+      // Wrap the operator only (`del`s the `!` and inserts the closing paren around the untouched argument text)
+      // rather than re-slicing and replacing the whole span: the argument may itself be the target of another edit
+      // (e.g. `moduleSelfEdits` rewriting a `this` inside it), and replacing the whole span would either drop that
+      // edit or corrupt the output when both are applied against the same original positions.
+      edits.push({ pos: node.start, del: node.argument.start - node.start, text: '__falsy(' });
+      edits.push({ pos: node.argument.end, del: node.end - node.argument.end, text: ')' });
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) visit(child); else if (value && typeof value.type === 'string') visit(value); }
+  };
+  visit(ast);
+  return edits;
+}
+
 export function lowerRuby(js, known = null, zeroArg = null) {
   js = repairCallAssignments(js);
   // `::Sprite` (a top-level constant, from inside a namespace) is emitted as `Function("return this")().Sprite`: the runtime's own globals.
   js = js.split('Function("return this")()').join('__global');
   let ast;
   try { ast = parse(js); } catch { return js; }
-  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast)];
+  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js)];
   const stack = [ast];
   while (stack.length) {
     const node = stack.pop();
