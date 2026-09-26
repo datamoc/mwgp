@@ -16,6 +16,7 @@
     "bundle:rgss": "node tools/bundle-rgss-scripts.mjs",
     "rgss:api": "node tools/rgss-api-dump.mjs",
     "rgss:coverage": "node tools/rgss-coverage.mjs",
+    "compat:review": "node tools/compat-review.mjs",
     "test": "node tools/test-smoke.mjs"
   },
   "dependencies": {
