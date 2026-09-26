@@ -239,7 +239,7 @@ function convertCommands(list, context = {}) {
         }
         // convertBranchCondition never returns null (unknown types become an
         // explicit unsupported marker), so the block is always preserved.
-        result.push({ if: condition, then: thenBlock.commands, ...(elseCommands ? { else: elseCommands } : {}) });
+        result.push({ if: condition, then: thenBlock.commands, else: elseCommands || [] });
         if (list[index]?.code === 412 && list[index].indent === command.indent) index++;
         continue;
       }
