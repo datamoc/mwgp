@@ -107,3 +107,11 @@ render without the tile glitch from the Pokémon Essentials screenshot.
 
 Non-goals: RGSS script *execution* (own plan later), plugin emulation
 (`script`/`pluginCommand` stay loud warnings), new test frameworks.
+
+## Recent (coord-tracked)
+
+- **T141 — RGSS API surface -> shim coverage report (done).** `tools/rgss-api-dump.mjs` extracts the RGSS
+  class/method surface from a runtime binary's strings (`docs/rgss-api-xp.json`, from Pokemon Void's
+  `Game.exe`; its `RGSS104E.dll` is packed and exposes no names), `tools/rgss-coverage.mjs` compares it with
+  what the transpiled Ruby calls and what the shim implements (`docs/rgss-shim-coverage.md`). Feeds T125 and
+  T123. VX Ace (RGSS3) binaries were not available locally, so the tool is unverified on them.

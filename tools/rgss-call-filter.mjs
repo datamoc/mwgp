@@ -13,8 +13,24 @@ import { Filter } from '../transpilers/ruby2js-master/demo/selfhost/ruby2js.js';
 
 // RGSS-native zero-arg calls with no Ruby `def` anywhere in a project's own scripts.
 const BUILTIN_ZERO_ARG_METHODS = ['transition', 'freeze', 'frame_reset', 'dir4', 'dir8'];
+// Ruby2JS represents Array#length (and a number of other JS-native members)
+// as a property. Do not turn these into calls merely because a game happens
+// to define a Ruby method with the same name somewhere in its script corpus.
+// Otherwise unrelated code such as `parts.length` becomes `parts.length()`.
+export const JS_NATIVE_ZERO_ARG_PROPERTIES = new Set([
+  'length', 'size', 'map', 'filter', 'find', 'findIndex', 'includes', 'indexOf',
+  'lastIndexOf', 'slice', 'join', 'concat', 'reverse', 'sort', 'forEach',
+  'keys', 'values', 'entries', 'toString', 'valueOf',
+  // RPGM libraries commonly expose mutable state through a zero-argument
+  // reader plus `state = value`. Keep that Ruby property shape intact: a
+  // method call on the left-hand side would become invalid JavaScript.
+  'state'
+]);
 
 let knownMethods = new Set(BUILTIN_ZERO_ARG_METHODS);
+
+// Methods invented by a source rewrite (renamed `initialize`s) join the set so they compile as methods, not getters.
+export function addKnownMethods(names) { for (const name of names) knownMethods.add(name); }
 
 export function setKnownMethods(names) {
   knownMethods = new Set([...BUILTIN_ZERO_ARG_METHODS, ...names]);
@@ -32,18 +48,42 @@ export function collectDefNames(ast, names = new Set()) {
   return names;
 }
 
+// Instance methods of the class being transpiled: a receiver-less call to one is a call on `self` (`this.name(...)`).
+// Handled here rather than by a separate filter: a filter that returns without passing the node on ends the chain, so a
+// second filter placed before this one made the zero-argument heuristic below unreachable for every class with methods.
+let selfMethods = new Set();
+export function setSelfMethods(names) { selfMethods = new Set(names || []); }
+
 export class RgssCalls extends Filter.Processor {
   on_send(node) {
     const [receiver, method, ...args] = node.children;
-    if (node.type === 'send' && receiver != null && args.length === 0 && knownMethods.has(method)) {
+    if (node.type === 'send' && receiver == null && selfMethods.has(String(method))) {
+      return this.process_children(node.updated(args.length ? 'send' : 'call', [this.s('self'), method, ...args]));
+    }
+    if (node.type === 'send' && args.length === 0 && knownMethods.has(method) && !JS_NATIVE_ZERO_ARG_PROPERTIES.has(String(method))) {
+      // Ruby permits receiver-less zero-argument method calls (current_gender)
+      // and receiver calls (gender.capitalize) without parentheses. Ruby2JS
+      // otherwise emits a function reference for the former, which then leaks
+      // into string interpolation or method chaining. A synthetic call node
+      // preserves Ruby semantics for both forms.
       return this.process_children(node.updated('call', node.children));
+    }
+    return this.process_children(node);
+  }
+
+  // `def self.name` with no parameters and no parentheses is emitted as a static getter, but every paren-less `X.name` of a
+  // known method name is a call (above): dropping the source location makes Ruby2JS treat the definition as a method.
+  on_defs(node) {
+    const name = node.children[1];
+    if (node.type === 'defs' && knownMethods.has(name) && !JS_NATIVE_ZERO_ARG_PROPERTIES.has(String(name)) && node.is_method?.() === false) {
+      return this.process_children(node.updated(null, node.children, { location: null }));
     }
     return this.process_children(node);
   }
 
   on_def(node) {
     const [name] = node.children;
-    if (node.type === 'def' && knownMethods.has(name) && !node.is_method()) {
+    if (node.type === 'def' && knownMethods.has(name) && !JS_NATIVE_ZERO_ARG_PROPERTIES.has(String(name)) && !node.is_method()) {
       return this.process_children(node.updated('defm', node.children));
     }
     return this.process_children(node);

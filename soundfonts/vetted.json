@@ -1,0 +1,16 @@
+{
+  "policy": "See README.md. An entry is required for every .sf2/.sf3 in this directory or tracked by git: file, name, license, licenseFile, source, sha256, vettedBy, vettedOn.",
+  "fonts": [
+    {
+      "file": "GeneralUser-GS.sf2",
+      "name": "GeneralUser GS v2.0.3 (S. Christian Collins)",
+      "license": "GeneralUser GS License v2.0: free use in software projects, redistribution and modification allowed, no attribution required (author asks to link to https://schristiancollins.com/generaluser rather than to the download)",
+      "licenseFile": "GeneralUser-GS.LICENSE.txt",
+      "source": "https://github.com/mrbumpy409/GeneralUser-GS (blob 298b552d2e9d1307e03e5c5c99d2c046aaed9ec3 of GeneralUser-GS.sf2 at commit 684543d5e5efaef08d02be50dcda8d552478fa60)",
+      "sha256": "9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe",
+      "vettedBy": "michel (accepted the provenance risk on 2026-09-25); licence research by Claude",
+      "vettedOn": "2026-09-25",
+      "notes": "The licence states the author cannot be 100% sure where every sample originated (none from commercially published SoundFont packages or sample CDs; no complaint since 2000). That residual provenance risk was accepted knowingly. If a restricted sample is ever reported, replace the file and bump this entry."
+    }
+  ]
+}

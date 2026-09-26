@@ -18,7 +18,7 @@
 //
 // Because it is one Ruby2JS `convert()` call over the entire project, this is all-or-nothing:
 // a single unsupported construct anywhere in the bundle fails the whole build. That is a real,
-// current limitation — see CLAUDE.md / the RGSS runtime notes for known gaps still to close.
+// current limitation — see AGENTS.md / the RGSS runtime notes for known gaps still to close.
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -28,7 +28,7 @@ import Functions from '../transpilers/ruby2js-master/demo/selfhost/filters/funct
 // into one combined declaration BEFORE conversion, so class.rb never sees a "reopened" class
 // at all - the narrower, harder-to-get-right alternative (teaching the converter itself to
 // detect and correctly re-merge reopening after the fact) is what tools/rgss-call-filter.mjs's
-// sibling fixes upstream (see CLAUDE.md) were chasing before this was found. It is not a full
+// sibling fixes upstream (see AGENTS.md) were chasing before this was found. It is not a full
 // fix on its own: a merged class body can't express "alias the CURRENT method, then redefine
 // it" (RGSS's own most common hotfix idiom) the way sequential prototype assignments can,
 // since JS class bodies don't execute member-by-member - a later same-named method silently

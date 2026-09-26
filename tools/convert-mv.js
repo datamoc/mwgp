@@ -1,5 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { buildPluginLibrary, externalizePluginLibrary } from './mv-plugins.mjs';
+import { buildAudioIndex, missingAudio } from './audio-index.mjs';
 import { basename, extname, join, resolve, sep } from 'node:path';
 
 const [, , sourceArg, outputArg] = process.argv;
@@ -20,52 +22,72 @@ const copyFaces = copyAssets || process.argv.includes('--copy-faces');
 const copyPictures = copyAssets || process.argv.includes('--copy-pictures');
 const copyAudio = copyAssets || process.argv.includes('--copy-audio');
 // Some MV projects keep dialogue in sidecar localization tables instead of
-// the event list — Karryn's Prison (Remtairy) references www/loc/RemMap_EN.json
-// entries as \REM_MAP[key] text codes (plus \REM_EFF / \REM_DESC from their own
-// tables), resolved by the plugin at display time. The converter resolves them
-// the same way: each entry's text lines join with \n, a missing key becomes
-// 'REM_MAP <id>' with one warning — exactly what the engine itself prints
-// (RemtairyMisc.js TextManager.remMiscMapText / getLocalizedText fallback).
-// Only activates when the files exist; anything else is untouched.
+// the event list: plugins resolve `\CODE[key]` text codes against JSON files
+// under www/loc/ whose entries look like `{ "key": { "text": ["line", ...] } }`.
+// The converter discovers those tables generically (no plugin or game names):
+// a non-standard escape code is looked up in the table whose file name best
+// matches the code (e.g. code `ABC_MAP` -> `AbcMap_EN.json`), else in any table
+// holding the key. Entry lines join with newlines. Unresolvable codes stay literal
+// (loud, MV-faithful) with one warning. Only active when loc/*.json exist.
+const BUILTIN_TEXT_CODES = new Set(['V', 'N', 'P', 'C', 'I', 'PN', 'FS', 'FN', 'FB', 'FI']);
 const textTables = (() => {
   const tables = [];
-  for (const [code, file] of [['REM_MAP', 'RemMap_EN.json'], ['REM_EFF', 'RemEff.json'], ['REM_DESC', 'RemDesc_EN.json']]) {
-    const path = join(gameRoot, 'loc', file);
-    if (!existsSync(path)) continue;
+  const dir = join(gameRoot, 'loc');
+  if (!existsSync(dir)) return tables;
+  for (const file of readdirSync(dir).filter(name => /\.json$/i.test(name))) {
     try {
-      tables.push({ code, data: JSON.parse(readFileSync(path, 'utf8')) });
+      const data = JSON.parse(readFileSync(join(dir, file), 'utf8').replace(/^﻿/, ''));
+      if (data && typeof data === 'object' && Object.values(data).some(entry => Array.isArray(entry?.text))) {
+        tables.push({ file, tag: file.replace(/\.json$/i, '').toLowerCase().replace(/[^a-z0-9]/g, ''), data });
+      }
     } catch (error) { console.warn(`MWGP convert: unreadable text table ${file}: ${error.message}`); }
   }
-  if (tables.length) console.log(`MWGP convert: resolving text codes from ${tables.map(table => table.code).join(', ')}`);
+  if (tables.length) console.log(`MWGP convert: text tables available: ${tables.map(table => table.file).join(', ')}`);
   return tables;
 })();
 const missingTextKeys = new Set();
+function lookupTextTable(code, key) {
+  const tag = code.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const holders = textTables.filter(table => Array.isArray(table.data[key]?.text));
+  return (holders.find(table => table.tag.startsWith(tag) || tag.startsWith(table.tag)) || holders[0])?.data[key];
+}
 function resolveTextTables(text) {
   if (!text || !textTables.length || !text.includes('\\')) return text;
   // The engine re-runs escape conversion over substituted text, so nested
-  // codes resolve too; the iteration cap mirrors the story-jump guard style
-  // and only bounds malformed self-referential tables.
-  for (let round = 0; round < 5 && /\\REM_(MAP|EFF|DESC)\[/i.test(text); round++) {
-    text = text.replace(/\\REM_(MAP|EFF|DESC)\[(\w+)\]/gi, (match, code, key) => {
-      // The capture is the suffix (MAP/EFF/DESC); table codes carry the REM_ prefix.
-      const fullCode = `REM_${code.toUpperCase()}`;
-      const entry = textTables.find(table => table.code === fullCode)?.data[key];
-      if (!entry?.text) {
-        if (!missingTextKeys.has(match)) { missingTextKeys.add(match); console.warn(`MWGP convert: no text-table entry for ${match}; using the engine's missing-key text`); }
-        return `${fullCode} ${key}`;
+  // codes resolve too; the cap only bounds malformed self-referential tables.
+  for (let round = 0; round < 5; round++) {
+    let changed = false;
+    text = text.replace(/\\([A-Za-z][A-Za-z0-9_]*)\[(\w+)\]/g, (match, code, key) => {
+      if (BUILTIN_TEXT_CODES.has(code.toUpperCase())) return match;
+      const entry = lookupTextTable(code, key);
+      if (!entry) {
+        if (!missingTextKeys.has(match)) { missingTextKeys.add(match); console.warn(`MWGP convert: no text-table entry for ${match}; leaving it literal`); }
+        return match;
       }
+      changed = true;
       return entry.text.join('\n');
     });
+    if (!changed) break;
   }
   return text;
 }
 const commandCounts = new Map();
+// Fallback counters must initialize before the map loop below runs (top-level
+// execution order): the converters call them during conversion.
+const unsupportedBranchFallbacks = new Map();
+const unsupportedOperandFallbacks = new Map();
+const unsupportedCommandFallbacks = new Map();
+// Operation names shared by the constant/variable/random 122 path and the
+// extended operands ('set' is new: the engine's operateVariable case 0).
+const OPERATION_NAMES = ['set', 'add', 'subtract', 'multiply', 'divide', 'modulo'];
 const characterNames = new Set();
+const scriptSources = new Set();
 const pictureNames = new Set();
 const soundNames = new Set();
 const musicNames = new Set();
 const animationIds = new Set();
 const meNames = new Set();
+const systemAudioReferences = [];
 let balloonUsed = false;
 // MV encrypts assets under a distinct extension (.rpgmvp/.rpgmvo/.rpgmvm); MZ instead
 // appends an underscore to the original extension (.png_/.ogg_/.m4a_). Both use the
@@ -90,25 +112,82 @@ async function readJson(name, optional = false) {
 }
 
 const system = await readJson('System.json');
+// Audio the engine itself plays (title/battle music, jingles, the 24 system sound effects, vehicle
+// music) never appears in an event command, so it is collected from System.json. Same field names
+// in MV and MZ.
+const SYSTEM_SOUND_KEYS = ['cursor', 'ok', 'cancel', 'buzzer', 'equip', 'save', 'load', 'battleStart', 'escape', 'enemyAttack', 'enemyDamage',
+  'enemyCollapse', 'bossCollapse1', 'bossCollapse2', 'actorDamage', 'actorCollapse', 'recovery', 'miss', 'evasion', 'magicEvasion', 'magicReflection',
+  'shop', 'useItem', 'useSkill'];
+const audioParams = entry => entry?.name ? { name: String(entry.name), volume: Number(entry.volume ?? 90), pitch: Number(entry.pitch ?? 100), pan: Number(entry.pan || 0) } : null;
+const systemAudio = {
+  titleBgm: audioParams(system.titleBgm), battleBgm: audioParams(system.battleBgm),
+  victoryMe: audioParams(system.victoryMe), defeatMe: audioParams(system.defeatMe), gameoverMe: audioParams(system.gameoverMe),
+  vehicles: Object.fromEntries(['boat', 'ship', 'airship'].map(key => [key, audioParams(system[key]?.bgm)]).filter(([, value]) => value)),
+  sounds: Object.fromEntries(SYSTEM_SOUND_KEYS.map((key, index) => [key, audioParams(system.sounds?.[index])]).filter(([, value]) => value))
+};
+const titleAssetsAvailable = existsSync(join(gameRoot, 'img', 'titles1')) || existsSync(join(gameRoot, 'img', 'titles2'));
 const mapInfos = await readJson('MapInfos.json');
 const commonEvents = await readJson('CommonEvents.json', true) || [];
+// Plugin-command families at source level (pre-inline: inlining repeats one
+// source call at every call site, so counting here is the honest priority
+// list for what to convert next). Reported once at the end, below.
+const pluginFamilyCounts = new Map();
+function tallyPluginCommand(command) {
+  // MZ tallies under the command name so 357 calls meet the same
+  // supported/partial families as their MV 356 equivalents.
+  if (command?.code === 357 && Array.isArray(command.parameters)) {
+    const name = String(command.parameters[1] || command.parameters[0] || '').trim() || '(empty)';
+    pluginFamilyCounts.set(name, (pluginFamilyCounts.get(name) || 0) + 1);
+    return;
+  }
+  if (command?.code !== 356 || !command.parameters?.[0]) return;
+  const name = String(command.parameters[0]).trim().split(/\s+/)[0] || '(empty)';
+  pluginFamilyCounts.set(name, (pluginFamilyCounts.get(name) || 0) + 1);
+}
+for (const commonEvent of commonEvents) for (const command of commonEvent?.list || []) {
+  commandCounts.set(command.code, (commandCounts.get(command.code) || 0) + 1);
+  tallyPluginCommand(command);
+}
+function normalizeMZMapData(data) {
+  const expected = Math.max(0, Number(data.width) * Number(data.height) * 6);
+  const source = Array.isArray(data.data) ? data.data : [];
+  // MZ reads exactly six width-major layers. Some exported projects append
+  // plugin data after those layers and may contain signed sentinel values;
+  // the native Tilemap rejects those values as invisible tiles.
+  data.data = Array.from({ length: expected }, (_, index) => {
+    const tile = Number(source[index] ?? 0);
+    return Number.isInteger(tile) && tile > 0 && tile < 8192 ? tile : 0;
+  });
+  return data;
+}
+
 const maps = [];
 for (const name of readdirSync(dataDir).filter(name => /^Map\d+\.json$/i.test(name)).sort()) {
   const id = Number(name.match(/\d+/)[0]);
   const data = await readJson(name);
+  if (engineKind === 'rpg-maker-mz') normalizeMZMapData(data);
   if (data.bgm?.name) musicNames.add(data.bgm.name);
   if (data.bgs?.name) musicNames.add(data.bgs.name);
-  for (const event of data.events || []) for (const page of event?.pages || []) for (const command of page.list || []) commandCounts.set(command.code, (commandCounts.get(command.code) || 0) + 1);
+  for (const event of data.events || []) for (const page of event?.pages || []) for (const command of page.list || []) {
+    commandCounts.set(command.code, (commandCounts.get(command.code) || 0) + 1);
+    tallyPluginCommand(command);
+  }
   maps.push({ id, info: mapInfos[id] || null, data, mwgEvents: data.events.filter(Boolean).map(event => convertEvent(event, id)) });
 }
 
-const configuredStartMap = maps.find(map => map.id === system.startMapId);
-const startMap = configuredStartMap?.data?.data?.some(tile => tile > 0)
-  ? configuredStartMap
-  : maps.find(map => map.data?.data?.some(tile => tile > 0)) || configuredStartMap;
+const configuredStartMap = maps.find(map => map.id === Number(system.startMapId));
+// The configured start map may be an intentionally blank bootstrap map whose
+// autorun transfers to the real opening scene (a mode selector is a common
+// example). Never replace it merely because its tile data is empty.
+const startMap = configuredStartMap
+  || maps.find(map => map.data?.data?.some(tile => tile > 0))
+  || null;
+const convertedCommonEvents = Object.fromEntries(commonEvents
+  .map((entry, id) => entry?.list ? [String(id), convertCommands(entry.list, { commonEventId: id })] : null)
+  .filter(Boolean));
 
 function convertEvent(event, mapId) {
-  return { id: String(event.id), x: event.x, y: event.y, pages: (event.pages || []).map(page => {
+  return { id: String(event.id), name: String(event.name || ''), x: event.x, y: event.y, pages: (event.pages || []).map(page => {
     // A labeled list converts to { story } instead of a flat array; the player
     // drives it with runStoryLoop (see runPage).
     const converted = convertCommands(page.list || [], { mapId, eventId: event.id });
@@ -139,8 +218,8 @@ function syntaxError(body) {
   try { new Function(body); return {}; }
   catch (error) { return { error: String(error.message).slice(0, 160) }; }
 }
-function scriptBody(source) { return syntaxError(source); }
-function conditionBody(source) { return syntaxError(`return (${source}\n);`); }
+function scriptBody(source) { scriptSources.add(source); return syntaxError(source); }
+function conditionBody(source) { scriptSources.add(source); return syntaxError(`return (${source}\n);`); }
 
 function convertConditions(conditions = {}, mapId, eventId) {
   const result = [];
@@ -151,19 +230,66 @@ function convertConditions(conditions = {}, mapId, eventId) {
   return result;
 }
 
+// MV's Jump to Label finds a label anywhere in the event list, including inside if/loop/choice
+// blocks, and execution continues from there through the rest of that block and then whatever
+// follows the enclosing blocks. The tree model cannot jump into a block, so each label nested
+// in a block becomes its own passage holding exactly that continuation: the block's tail, then
+// for each enclosing statement (innermost first) the loop again if it was a loop, then the
+// commands after that statement, and finally the next top-level passage (sequential fall-through).
+// Nested passages stay out of `order`, so they end instead of falling through a second time.
+function addNestedLabelPassages(story, order) {
+  const childArrays = command => {
+    const arrays = [];
+    for (const key of ['then', 'else', 'loop', 'cancelBranch']) if (Array.isArray(command[key])) arrays.push(command[key]);
+    if (Array.isArray(command.branches)) for (const branch of command.branches) if (Array.isArray(branch)) arrays.push(branch);
+    return arrays;
+  };
+  const nested = {};
+  const build = (ancestors, array, index, topName) => {
+    const tail = array.slice(index + 1);
+    for (let level = ancestors.length - 1; level >= 0; level--) {
+      const { array: parentArray, index: statementIndex, command } = ancestors[level];
+      if (Array.isArray(command.loop)) tail.push(command);
+      tail.push(...parentArray.slice(statementIndex + 1));
+    }
+    const next = order[order.indexOf(topName) + 1];
+    if (next !== undefined) tail.push({ goto: next });
+    return tail;
+  };
+  const visit = (array, ancestors, topName) => {
+    array.forEach((command, index) => {
+      if (command?.__label) {
+        if (nested[command.__label] || story.passages[command.__label]) console.warn(`MWGP convert: duplicate label "${command.__label}"; later passage wins`);
+        nested[command.__label] = build(ancestors, array, index, topName);
+      }
+      for (const child of childArrays(command || {})) visit(child, [...ancestors, { array, index, command }], topName);
+    });
+  };
+  for (const name of [...order]) if (Array.isArray(story.passages[name])) visit(story.passages[name], [], name);
+  if (!Object.keys(nested).length) return;
+  const strip = array => {
+    for (let index = array.length - 1; index >= 0; index--) if (array[index]?.__label) array.splice(index, 1);
+    for (const command of array) for (const child of childArrays(command || {})) strip(child);
+  };
+  Object.assign(story.passages, nested);
+  for (const array of Object.values(story.passages)) strip(array);
+}
+
 function convertCommands(list, context = {}) {
-  const { mapId, eventId, depth = 0 } = context;
+  const { mapId, eventId, depth = 0, stack = [] } = context;
   // Labels (118) split the top-level list into named story passages; jumps
   // (119) become { goto } markers the player's story driver follows. Labels
   // nested inside blocks are dropped with a warning: splitting there would
   // break the block structure, and no corpus project uses one.
   const story = { start: 'main', passages: {} };
+  const order = ['main'];
   let current = 'main';
   // Inlined common events (depth > 0) must stay flat arrays for spreading, so
   // only page-level lists split into passages.
   const parsed = parseBlock(0, -1, depth === 0);
   story.passages[current] = parsed.commands;
-  if (Object.keys(story.passages).length > 1) return { story };
+  if (depth === 0) addNestedLabelPassages(story, order);
+  if (Object.keys(story.passages).length > 1) return { story: { ...story, order } };
   return parsed.commands;
 
   // Terminators are recognised by (code, indent) alone, the same convention RPG Maker's own
@@ -180,11 +306,14 @@ function convertCommands(list, context = {}) {
       }
       if (command.code === 118) {
         const name = String(command.parameters?.[0] || 'label');
-        if (!topLevel) console.warn(`MWGP convert: label "${name}" nested in a block (map ${mapId}, event ${eventId}) cannot split passages; dropping it`);
+        // Inlined common events stay flat arrays, so their nested labels cannot become passages.
+        if (!topLevel && depth > 0) console.warn(`MWGP convert: label "${name}" in an inlined common event (map ${mapId}, event ${eventId}) cannot split passages; dropping it`);
+        else if (!topLevel) result.push({ __label: name });
         else {
           if (story.passages[name]) console.warn(`MWGP convert: duplicate label "${name}" (map ${mapId}, event ${eventId}); later passage wins`);
           story.passages[current] = result;
           current = name;
+          if (!order.includes(name)) order.push(name);
           result = [];
         }
         index++;
@@ -198,7 +327,7 @@ function convertCommands(list, context = {}) {
       if (command.code === 111) {
         const condition = command.parameters?.[0] === 12
           ? { script: { source: String(command.parameters[1] ?? ''), ...conditionBody(String(command.parameters[1] ?? '')) } }
-          : convertBranchCondition(command.parameters || []);
+          : convertBranchCondition(command.parameters || [], { mapId, eventId });
         const thenBlock = parseBlock(index + 1, command.indent);
         index = thenBlock.index;
         let elseCommands;
@@ -207,7 +336,9 @@ function convertCommands(list, context = {}) {
           elseCommands = elseBlock.commands;
           index = elseBlock.index;
         }
-        if (condition) result.push({ if: condition, then: thenBlock.commands, ...(elseCommands ? { else: elseCommands } : {}) });
+        // convertBranchCondition never returns null (unknown kinds become an
+        // explicit unsupported marker), so the block is always preserved.
+        result.push({ if: condition, then: thenBlock.commands, ...(elseCommands ? { else: elseCommands } : {}) });
         if (list[index]?.code === 412 && list[index].indent === command.indent) index++;
         continue;
       }
@@ -249,8 +380,32 @@ function convertCommands(list, context = {}) {
         });
         continue;
       }
+      if (command.code === 302) {
+        const goods = [command.parameters || []];
+        while (index + 1 < list.length && list[index + 1].code === 605) {
+          index++;
+          goods.push(list[index].parameters || []);
+        }
+        result.push({ shop: {
+          goods: goods.map(entry => ({
+            kind: Number(entry[0] ?? 0),
+            id: Number(entry[1] ?? 0),
+            priceType: Number(entry[2] ?? 0),
+            price: Number(entry[3] ?? 0)
+          })),
+          purchaseOnly: command.parameters?.[4] === true
+        } });
+        index++;
+        continue;
+      }
+      if (command.code === 303) {
+        const [actor, maxLength] = command.parameters || [];
+        result.push({ inputName: { target: 'player', actorId: Number(actor || 0), maxLength: Number(maxLength || 12) } });
+        index++;
+        continue;
+      }
       if (command.code === 301) {
-        const battle = convertCommand(command, { portrait, depth, mapId, eventId })?.[0]?.battle;
+        const battle = convertCommand(command, { portrait, depth, mapId, eventId, stack })?.[0]?.battle;
         const branches = {};
         index++;
         while (index < list.length) {
@@ -295,7 +450,7 @@ function convertCommands(list, context = {}) {
         continue;
       }
       if (command.code === 101 && command.parameters?.[0]) portrait = { name: command.parameters[0], index: Number(command.parameters[1] || 0) };
-      const converted = convertCommand(command, { portrait, depth, mapId, eventId });
+      const converted = convertCommand(command, { portrait, depth, mapId, eventId, stack });
       if (converted) result.push(...converted);
       index++;
     }
@@ -327,8 +482,8 @@ function convertCommand(command, context = {}) {
     const operation = Number(command.parameters[2] || 0);
     const operandType = Number(command.parameters[3] || 0);
     // Constant (0), a copy from another variable (1), and a random range (2) all resolve at
-    // runtime; game-data (3) and script (4) operands need engine evaluation, so those are skipped.
-    if (operandType > 2) return [];
+    // runtime; game-data (3) and script (4) operands go through convertExtendedOperand below.
+    if (operandType > 2) return convertExtendedOperand(command.parameters || [], context);
     return Array.from({ length: last - first + 1 }, (_, offset) => {
       const id = String(first + offset);
       let operand;
@@ -349,15 +504,18 @@ function convertCommand(command, context = {}) {
   // Step codes are MV's Game_Character.ROUTE_* constants (see rpg_objects.js in
   // any MV project). Steps needing runtime state (facing/position) are emitted
   // as descriptors ({ random, forward, backward, jump }) that the player's
-  // resolveRouteStep interprets; speed/frequency/animation/fix/image/blend
-  // steps (29-36, 41, 43) have no player-side equivalent and stay dropped,
-  // while through (37/38), transparency and SE retain their side effects.
+  // resolveRouteStep interprets; speed/frequency/animation/fix/blend steps
+  // (29-36, 43) remain partial, while through, transparency, image changes,
+  // scripts, and SE retain their observable side effects.
   if (command.code === 205) {
     const rawTarget = Number(command.parameters?.[0]);
     const routeTarget = rawTarget === -1 ? 'player'
       : rawTarget === 0 && context.eventId != null ? `event:${context.eventId}`
+        : rawTarget === 0 ? 'self'
         : rawTarget > 0 ? `event:${rawTarget}` : null;
-    if (!routeTarget) return [];
+    // No resolvable target: the whole route (including real steps) would
+    // vanish, so it stays a loud marker.
+    if (!routeTarget) return [unsupportedCommand(Number(command.code), 2, context)];
     const route = command.parameters?.[1] || {};
     const commands = [];
     const repeatableSteps = [];
@@ -380,6 +538,12 @@ function convertCommand(command, context = {}) {
       else if (turn) { commands.push(routeTarget === 'player' ? { turn } : { turn: { target: routeTarget, direction: turn } }); repeatableSteps.push({ turn }); }
       else if (step.code === 15) { const wait = { wait: Number(step.parameters?.[0] || 0) / 60 }; commands.push(wait); repeatableSteps.push(wait); }
       else if (step.code === 27 || step.code === 28) { routeOnly = false; commands.push({ setSwitch: String(step.parameters?.[0] ?? 0), value: step.code === 27 }); }
+      else if ([29, 30, 31, 32, 33, 34, 35, 36].includes(Number(step.code))) {
+        routeOnly = false;
+        const option = { 29: 'speed', 30: 'frequency', 31: 'walkAnimation', 32: 'walkAnimation', 33: 'stepAnimation', 34: 'stepAnimation', 35: 'directionFix', 36: 'directionFix' }[Number(step.code)];
+        const value = [29, 30].includes(Number(step.code)) ? Number(step.parameters?.[0] || 0) : ![32, 34, 36].includes(Number(step.code));
+        commands.push({ routeOption: { target: routeTarget, option, value } });
+      }
       else if (step.code === 37 || step.code === 38) { routeOnly = false; commands.push({ routeThrough: { target: routeTarget, value: step.code === 37 } }); }
       else if (step.code === 39 || step.code === 40 || step.code === 42) {
         routeOnly = false;
@@ -388,6 +552,17 @@ function convertCommand(command, context = {}) {
           : step.code === 39;
         commands.push({ setTransparent: routeTarget === 'player' ? value : { target: routeTarget, value } });
       }
+      else if (step.code === 41 && step.parameters?.[0] !== undefined) {
+        routeOnly = false;
+        const image = {
+          name: String(step.parameters[0] || ''),
+          index: Number(step.parameters[1] || 0),
+          direction: Number(step.parameters[2] || 2),
+          pattern: Number(step.parameters[3] || 1)
+        };
+        if (image.name) characterNames.add(image.name);
+        commands.push({ routeImage: { target: routeTarget, image } });
+      }
       else if (step.code === 44) {
         routeOnly = false;
         const se = step.parameters?.[0];
@@ -395,11 +570,24 @@ function convertCommand(command, context = {}) {
           soundNames.add(se.name);
           commands.push({ sound: { name: se.name, volume: Number(se.volume ?? 90), pitch: Number(se.pitch ?? 100), pan: Number(se.pan || 0) } });
         }
-      } else if (step.code === 45 && step.parameters?.[0]) { routeOnly = false; commands.push({ script: String(step.parameters[0]) }); }
+      } else if (step.code === 45 && step.parameters?.[0]) {
+        routeOnly = false;
+        const script = String(step.parameters[0]);
+        // ROUTE_SCRIPT is MV JavaScript, just like command 355. Preserve the
+        // mv marker and syntax diagnostic so prepareEventCommands sends it
+        // through the bounded globals bridge instead of dropping it as an
+        // untyped/unsupported script.
+        commands.push({ script, mv: true, ...scriptBody(script) });
+      }
       else if (step.code !== 0) routeOnly = false;
     }
     if (route.repeat && routeOnly && repeatableSteps.length) return [{ move: { target: routeTarget, steps: repeatableSteps, repeat: true, skippable: route.skippable === true, wait: route.wait === true } }];
     if (commands.length) return commands;
+    // Only dropped steps (speed/frequency/animation/appearance) remain: the
+    // route moves nothing and completes instantly, so skipping it is faithful
+    // — except a repeating waiter, which the engine would wait on indefinitely.
+    if (route.repeat && route.wait) return [unsupportedCommand(Number(command.code), 1, context)];
+    return [];
   }
   if (command.code === 231) {
     const p = command.parameters || [];
@@ -485,9 +673,21 @@ function convertCommand(command, context = {}) {
   }
   // 204 is Scroll Map (engine command204: [direction, distance, speed]), a
   // non-blocking camera pan the player owns (see scene.scrollMap).
+  if (command.code === 236) {
+    const [type, power, duration, wait] = command.parameters || [];
+    return [{ weather: { type: String(type || 'none'), power: Number(power || 0), duration: Number(duration || 0) / 60, wait: wait === true } }];
+  }
   if (command.code === 204) {
     const [direction, distance, speed] = command.parameters || [];
     return [{ scrollMap: { direction: Number(direction || 2), distance: Number(distance || 0), speed: Number(speed ?? 4) } }];
+  }
+  // 202 params are [vehicle, designation, map, x, y]. Vehicle ids follow
+  // RPG Maker: 0 boat, 1 ship, 2 airship. Variable designation is preserved.
+  if (command.code === 202) {
+    const [vehicle, designation, a, b, c] = command.parameters || [];
+    if (Number(designation || 0) === 0) return [{ vehicleLocation: { vehicle: Number(vehicle || 0), mapId: Number(a || 0), x: Number(b || 0), y: Number(c || 0) } }];
+    if (Number(designation) === 1) return [{ vehicleLocation: { vehicle: Number(vehicle || 0), mapVar: String(a ?? 0), xVar: String(b ?? 0), yVar: String(c ?? 0) } }];
+    return [unsupportedCommand(Number(command.code), Number(designation), context)];
   }
   // 203 params are [target, designation, x, y(, direction)]: -1 player,
   // 0 running event, N map event. Designation 1 reads x/y from variables at
@@ -499,11 +699,18 @@ function convertCommand(command, context = {}) {
     if (Number(designation) === 1) {
       return [{ relocate: { target: resolved, varX: String(a ?? 0), varY: String(b ?? 0), ...(facing ? { facing } : {}) } }];
     }
-    if (Number(designation || 0) !== 0) return [];
+    // Designation 2 swaps two events' positions; the player has no read of
+    // another event's live position, so it stays a loud marker, never a skip.
+    if (Number(designation || 0) !== 0) return [unsupportedCommand(Number(command.code), Number(designation), context)];
     return [{ relocate: { target: resolved, x: Number(a || 0), y: Number(b || 0), ...(facing ? { facing } : {}) } }];
   }
   // Actor commands address MV's iterateActorEx scope: 0 = entire party,
   // 1 = specific actor id, 2 = actor id read from a variable at runtime.
+  if (command.code === 311) {
+    const [scope, actor, operation, operandType, operand, allowDeath] = command.parameters || [];
+    const amount = operandType === 0 ? Number(operand || 0) : { variable: String(operand ?? 0) };
+    return [{ changeHp: { scope: Number(scope || 0), actor: Number(actor || 0), amount, sign: Number(operation || 0) === 0 ? 1 : -1, allowDeath: allowDeath === true } }];
+  }
   if (command.code === 313) {
     const [scope, actor, mode, state] = command.parameters || [];
     return [{ changeState: { scope: Number(scope || 0), actor: Number(actor || 0), add: Number(mode || 0) === 0, state: Number(state || 0) } }];
@@ -511,6 +718,15 @@ function convertCommand(command, context = {}) {
   if (command.code === 314) {
     const [scope, actor] = command.parameters || [];
     return [{ recoverAll: { scope: Number(scope || 0), actor: Number(actor || 0) } }];
+  }
+  if (command.code === 316) {
+    const [scope, actor, operation, operandType, operand, show] = command.parameters || [];
+    const amount = operandType === 0 ? Number(operand || 0) : { variable: String(operand ?? 0) };
+    return [{ changeLevel: { scope: Number(scope || 0), actor: Number(actor || 0), amount, sign: Number(operation || 0) === 0 ? 1 : -1, show: show === true } }];
+  }
+  if (command.code === 321) {
+    const [actor, classId, keepExp] = command.parameters || [];
+    return [{ changeClass: { actor: Number(actor || 0), classId: Number(classId || 0), keepExp: keepExp === true } }];
   }
   if (command.code === 318) {
     const [scope, actor, mode, skill] = command.parameters || [];
@@ -535,6 +751,7 @@ function convertCommand(command, context = {}) {
   // 351/352 open the menu/save scenes, which have no player equivalent.
   if (command.code === 351) return [{ menu: 'menu' }];
   if (command.code === 352) return [{ menu: 'save' }];
+  if (command.code === 353) return [{ gameOver: true }];
   if (command.code === 211) return [{ setTransparent: command.parameters?.[0] === 0 }];
   if (command.code === 214) return [{ eraseEvent: true }];
   if (command.code === 223) {
@@ -562,24 +779,146 @@ function convertCommand(command, context = {}) {
   }
   if (command.code === 246) return [{ fadeoutBgs: { duration: Number(command.parameters?.[0] || 1) } }];
   if (command.code === 251) return [{ stopSound: true }];
+  // Troop-event commands on the enemies of the running battle (index -1 = the whole troop).
+  if (command.code === 331 || command.code === 332 || command.code === 333) {
+    const [index, operation, operandType, operand, allowDeath] = command.parameters || [];
+    const amount = operandType === 0 ? Number(operand || 0) : { variable: String(operand ?? 0) };
+    const key = { 331: 'changeEnemyHp', 332: 'changeEnemyMp', 333: 'changeEnemyTp' }[command.code];
+    return [{ [key]: { index: Number(index ?? 0), amount, sign: Number(operation || 0) === 0 ? 1 : -1, ...(command.code === 331 ? { allowDeath: allowDeath === true } : {}) } }];
+  }
+  if (command.code === 334) return [{ changeEnemyState: { index: Number(command.parameters?.[0] ?? 0), add: Number(command.parameters?.[1] || 0) === 0, state: Number(command.parameters?.[2] || 0) } }];
+  if (command.code === 336) return [{ enemyTransform: { index: Number(command.parameters?.[0] ?? 0), enemyId: Number(command.parameters?.[1] || 0) } }];
+  if (command.code === 335) return [{ enemyAppear: { index: Number(command.parameters?.[0] || 0) } }];
   if (command.code === 356 && command.parameters?.[0]) {
     const raw = String(command.parameters[0]);
     const parts = raw.trim().split(/\s+/);
     return [{ pluginCommand: { raw, name: parts[0] || '', args: parts.slice(1) } }];
   }
-  if (command.code === 117 && context.depth < 8) {
-    const commonEvent = commonEvents[Number(command.parameters?.[0])];
-    return commonEvent?.list ? convertCommands(commonEvent.list, { ...context, depth: context.depth + 1 }) : [];
+  // MZ plugin commands (code 357, [pluginName, commandName, label, args]): the
+  // same pluginCommand vocabulary as MV's 356 above. The player matches on the
+  // command name, so an MZ call reaches the same state adapters; the args
+  // object flattens to positional string args like the MV split. Malformed
+  // params fall through to the loud marker below, never a skip.
+  if (command.code === 357 && Array.isArray(command.parameters)) {
+    const [plugin = '', sub = ''] = command.parameters;
+    const argsObject = command.parameters.find(param => param && typeof param === 'object' && !Array.isArray(param));
+    const values = argsObject ? Object.values(argsObject) : [];
+    const name = String(sub || plugin || '').trim();
+    if (!name) return [unsupportedCommand(Number(command.code), 0, context)];
+    const raw = [String(plugin || '').trim(), name, ...values.map(value => String(value ?? ''))].filter(Boolean).join(' ');
+    return [{ pluginCommand: { raw, name, args: values.map(value => String(value ?? '')) } }];
+  }
+  // Keep common-event calls as runtime references. Inlining made valid
+  // diamond-shaped call graphs explode and forced a depth-8 truncation;
+  // the player executes the converted list with a cycle guard instead.
+  if (command.code === 117) {
+    const ceId = Number(command.parameters?.[0]);
+    const commonEvent = commonEvents[ceId];
+    if (commonEvent?.list) return [{ commonEvent: String(ceId) }];
+    return [unsupportedCommand(Number(command.code), 0, context)];
+  }
+  if (command.code === 103) {
+    const [variable, digits] = command.parameters || [];
+    return [{ inputNumber: { variable: String(variable ?? 0), digits: Number(digits || 1) } }];
   }
   if (command.code === 201 && command.parameters?.[0] === 0) return [{ transfer: { mapId: command.parameters[1], x: command.parameters[2], y: command.parameters[3] } }];
-  return [];
+  // Designation 1 reads map/x/y from variables at runtime (MV editor: "Designation
+  // with variables"); the player already resolves mapVar/xVar/yVar (see
+  // scene.transfer). Dropping these silently strands the player, so preserve them.
+  if (command.code === 201 && command.parameters?.[0] === 1) return [{ transfer: { mapVar: String(command.parameters[1]), xVar: String(command.parameters[2]), yVar: String(command.parameters[3]) } }];
+  // Engine-faithful no-ops stay silent: 0 (empty slot), 101 (Show Text header —
+  // parseBlock already took the portrait, the 401 lines carry the text),
+  // 108/408 (comments), 135 (menu access — the player has no menu scene),
+  // 405 outside scrolling text (plugin data), 505 (a route step's
+  // editor-only sibling, folded into 205). Anything else unmapped is a real
+  // gap: loud marker, never a skip.
+  if ([0, 101, 108, 135, 405, 408, 505].includes(Number(command.code))) return [];
+  return [unsupportedCommand(Number(command.code), 0, context)];
 }
 
-function convertBranchCondition(parameters) {
+// Catch-all loud fallback for unmapped event commands. Warns once per code
+// (first location kept; common-event inlining would repeat it) with the rest
+// in the end-of-conversion summary; every site is marked in the manifest so
+// the player warns at runtime instead of skipping silently.
+function unsupportedCommand(code, kind, context = {}) {
+  const key = `${code}:${kind}`;
+  const seen = unsupportedCommandFallbacks.get(key);
+  if (!seen) {
+    unsupportedCommandFallbacks.set(key, { count: 1, first: `map ${context.mapId}, event ${context.eventId}` });
+    console.warn(`MWGP convert: event command ${code} has no converted equivalent; it warns at runtime and is skipped (first seen at map ${context.mapId}, event ${context.eventId})`);
+  } else seen.count++;
+  return { unsupported: { code, kind } };
+}
+
+// Control Variables with a game-data (3) or script (4) operand. Every shape the
+// player can resolve exactly becomes a modifyVariable (or a plain setVariable
+// for static strings); anything else becomes an explicit unsupported marker —
+// the pre-existing behavior of returning [] silently dropped the assignment.
+function convertExtendedOperand(parameters, context = {}) {
+  const first = Number(parameters[0]);
+  const last = Number(parameters[1] ?? first);
+  const operation = OPERATION_NAMES[Number(parameters[2] || 0)];
+  const operandType = Number(parameters[3] || 0);
+  const range = build => Array.from({ length: last - first + 1 }, (_, offset) => build(String(first + offset)));
+  if (!operation) return range(() => unsupportedOperand(operandType, context));
+  if (operandType === 3) {
+    const gameData = gameDataOperandShape(Number(parameters[4]), parameters[5], parameters[6]);
+    if (!gameData) return range(() => unsupportedOperand(operandType, context));
+    return range(id => ({ modifyVariable: { target: id, operation, operand: { gameData } } }));
+  }
+  if (operandType === 4) {
+    const source = String(parameters[4] ?? '');
+    const fixed = staticScriptValue(source);
+    return range(id => {
+      if (fixed && operation === 'set') return { setVariable: id, value: fixed.value };
+      return { modifyVariable: { target: id, operation, operand: { script: { source, ...scriptBody(source) } } } };
+    });
+  }
+  return range(() => unsupportedOperand(operandType, context));
+}
+
+// Game-data operands (engine gameDataOperand) that read player-held state:
+// item/weapon/armor counts, the player's map position, party membership,
+// and the map/gold/party-size counters. Actor stats, enemies, screen
+// coordinates, steps, and playtime/save/battle counters have no player-side
+// model and return null (loud marker, never a silent drop).
+function gameDataOperandShape(type, p1, p2) {
+  if (type === 0) return { kind: 'itemCount', id: String(p1 ?? 0) };
+  if (type === 1) return { kind: 'weaponCount', id: String(p1 ?? 0) };
+  if (type === 2) return { kind: 'armorCount', id: String(p1 ?? 0) };
+  if (type === 5 && Number(p1) === -1 && Number(p2) === 0) return { kind: 'playerX' };
+  if (type === 5 && Number(p1) === -1 && Number(p2) === 1) return { kind: 'playerY' };
+  if (type === 6) return { kind: 'partyMember', index: Number(p1 ?? 0) };
+  if (type === 7 && Number(p1) === 0) return { kind: 'mapId' };
+  if (type === 7 && Number(p1) === 1) return { kind: 'partySize' };
+  if (type === 7 && Number(p1) === 2) return { kind: 'gold' };
+  return null;
+}
+
+// Scripts with a statically known value assign directly instead of depending
+// on the runtime shim: string literals.
+// Anything else returns null for the shim path.
+function staticScriptValue(source) {
+  const text = String(source ?? '').trim();
+  const literal = text.match(/^('([^']*)'|"([^"]*)")$/);
+  if (literal) return { value: literal[2] ?? literal[3] };
+  return null;
+}
+
+function unsupportedOperand(operandType, context = {}) {
+  const seen = unsupportedOperandFallbacks.get(operandType);
+  if (!seen) {
+    unsupportedOperandFallbacks.set(operandType, { count: 1, first: `map ${context.mapId}, event ${context.eventId}` });
+    console.warn(`MWGP convert: variable operand type ${operandType} has no converted equivalent; it warns at runtime and reads as 0 (first seen at map ${context.mapId}, event ${context.eventId})`);
+  } else seen.count++;
+  return { unsupported: { code: 122, kind: Number(operandType) } };
+}
+
+function convertBranchCondition(parameters, context = {}) {
   if (parameters[0] === 0) return { switch: String(parameters[1]), equals: parameters[2] === 0 };
   if (parameters[0] === 1) {
     const operator = { 0: 'gte', 1: 'lte', 2: 'eq', 3: 'gt', 4: 'lt', 5: 'neq' }[Number(parameters[4] ?? 0)];
-    if (!operator) return null;
+    if (!operator) return unsupportedCondition(parameters, context);
     if (Number(parameters[2] || 0) === 0) {
       return operator === 'gte'
         ? { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) }
@@ -587,15 +926,87 @@ function convertBranchCondition(parameters) {
     }
     return { variable: String(parameters[1]), operator, compareVariable: String(parameters[3]) };
   }
-  return null;
+  // Self switch (engine command111 case 2: key [mapId, eventId, letter], ON is
+  // params[2] === 0) reuses the synthesized self-switch namespace, exactly like
+  // code 123 sets and page conditions do.
+  if (parameters[0] === 2 && context.mapId != null && context.eventId != null) {
+    return { switch: selfSwitchKey(context.mapId, context.eventId, parameters[1] || 'A'), equals: parameters[2] === 0 };
+  }
+  // Actor checks (engine case 4) read the player-held actor records: sub 0 is
+  // party membership, sub 3 a learned skill, sub 6 an affecting state. Like the
+  // engine (`if (actor)` guard), an unknown actor id evaluates as false.
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 0) return { partyMember: Number(parameters[1] || 0) };
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 1) return { actorName: { actor: Number(parameters[1] || 0), name: String(parameters[3] ?? '') } };
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 2) return { actorClass: { actor: Number(parameters[1] || 0), classId: Number(parameters[3] || 0) } };
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 3) return { actorSkill: { actor: Number(parameters[1] || 0), skill: Number(parameters[3] || 0) } };
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 4) return { actorWeapon: { actor: Number(parameters[1] || 0), weapon: Number(parameters[3] || 0) } };
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 5) return { actorArmor: { actor: Number(parameters[1] || 0), armor: Number(parameters[3] || 0) } };
+  if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 6) return { actorState: { actor: Number(parameters[1] || 0), state: Number(parameters[3] || 0) } };
+  // Enemy (engine case 5, troop events): sub 0 = the enemy is alive/appeared, sub 1 = it is affected by a state.
+  if (parameters[0] === 5 && Number(parameters[2] ?? -1) === 0) return { enemyAlive: { index: Number(parameters[1] || 0) } };
+  if (parameters[0] === 5 && Number(parameters[2] ?? -1) === 1) return { enemyState: { index: Number(parameters[1] || 0), state: Number(parameters[3] || 0) } };
+  if (parameters[0] === 9) return { weapon: { id: Number(parameters[1] || 0), includeEquipped: parameters[2] === true } };
+  if (parameters[0] === 10) return { armor: { id: Number(parameters[1] || 0), includeEquipped: parameters[2] === true } };
+  // Vehicle state (engine case 13): true while the player is riding the
+  // requested boat, ship, or airship. MV stores a numeric type; MZ can use
+  // the type name directly.
+  if (parameters[0] === 13) {
+    const vehicle = typeof parameters[1] === 'string' ? parameters[1] : ['boat', 'ship', 'airship'][Number(parameters[1])];
+    if (vehicle) return { vehicle };
+  }
+  // Character facing (engine case 6: direction() === params[2], keypad
+  // 2/4/6/8). -1 is the player, 0 the running event; other event ids have no
+  // tracked facing at condition time and stay unsupported.
+  if (parameters[0] === 6) {
+    const facing = { 2: 'down', 4: 'left', 6: 'right', 8: 'up' }[Number(parameters[2])];
+    if (facing && Number(parameters[1]) === -1) return { facing };
+    if (facing && Number(parameters[1]) === 0) return { eventFacing: facing };
+  }
+  // Gold (engine case 7: only >=, <=, <) reads the player-held gold count.
+  if (parameters[0] === 7) {
+    const operator = { 0: 'gte', 1: 'lte', 2: 'lt' }[Number(parameters[2] ?? -1)];
+    if (operator) return { gold: { operator, value: Number(parameters[1] || 0) } };
+  }
+  // Item in possession (engine case 8: hasItem) reads the player-held inventory.
+  if (parameters[0] === 8) return { item: String(parameters[1] ?? 0) };
+  return unsupportedCondition(parameters, context);
 }
 
-const databaseFiles = ['Actors.json', 'Classes.json', 'Skills.json', 'Items.json', 'Weapons.json', 'Armors.json', 'Enemies.json', 'Troops.json', 'States.json', 'Animations.json', 'Tilesets.json', 'CommonEvents.json'];
+// Conditions with no engine-free equivalent (timer, enemies, buttons,
+// vehicles, actor name/class/skill checks, ...) must never vanish silently:
+// they convert to an explicit marker the player warns on at runtime and
+// evaluates as false (the else-branch runs), so the gap is loud instead of
+// a missing event page. Always returns an object — parseBlock keeps the block.
+function unsupportedCondition(parameters, context = {}) {
+  // Common-event inlining repeats one source branch at every call site, so the
+  // warning fires once per kind (first location kept) and the rest collapse
+  // into the end-of-conversion summary below — every site stays marked in the
+  // manifest itself.
+  const kind = Number(parameters[0]);
+  const seen = unsupportedBranchFallbacks.get(kind);
+  if (!seen) {
+    unsupportedBranchFallbacks.set(kind, { count: 1, first: `map ${context.mapId}, event ${context.eventId}` });
+    console.warn(`MWGP convert: conditional branch type ${kind} has no converted equivalent; it warns at runtime and takes the else-branch (first seen at map ${context.mapId}, event ${context.eventId})`);
+  } else seen.count++;
+  return { unsupported: { code: 111, kind } };
+}
+
+const databaseFiles = ['Actors.json', 'Classes.json', 'Skills.json', 'Items.json', 'Weapons.json', 'Armors.json', 'Enemies.json', 'Troops.json', 'States.json', 'Animations.json', 'Tilesets.json', 'CommonEvents.json', 'System.json'];
 const database = {};
 for (const name of databaseFiles) database[name.replace('.json', '').toLowerCase()] = await readJson(name, true);
 
+const troopEvents = Object.fromEntries((database.troops || []).map((troop, troopId) => [String(troop?.id ?? troopId), (troop?.pages || []).map((page, pageIndex) => {
+  const converted = convertCommands(page.list || [], { troopId: Number(troop?.id ?? troopId), troopPage: pageIndex });
+  return { conditions: page.conditions || {}, span: Number(page.span || 0), commands: Array.isArray(converted) ? converted : [], ...(converted?.story ? { story: converted.story } : {}) };
+}).filter(page => page.commands.length || page.story)]));
+database.troopEvents = troopEvents;
+
 const pluginsPath = join(gameRoot, 'js', 'plugins.js');
 const pluginsText = existsSync(pluginsPath) ? await readFile(pluginsPath, 'utf8') : '';
+for (const track of [systemAudio.titleBgm, systemAudio.battleBgm, ...Object.values(systemAudio.vehicles)]) if (track) { musicNames.add(track.name); systemAudioReferences.push({ kind: 'bgm', name: track.name }); }
+for (const track of [systemAudio.victoryMe, systemAudio.defeatMe, systemAudio.gameoverMe]) if (track) { meNames.add(track.name); systemAudioReferences.push({ kind: 'me', name: track.name }); }
+for (const track of Object.values(systemAudio.sounds)) { soundNames.add(track.name); systemAudioReferences.push({ kind: 'se', name: track.name }); }
+const pluginLibrary = await buildPluginLibrary(gameRoot, pluginsText, scriptSources, { log: message => console.log(`MWGP convert: ${message}`) });
 const pluginNames = [...pluginsText.matchAll(/"name"\s*:\s*"([^"]+)"/g)].map(match => match[1]);
 
 // Animation sprite sheets resolve only now that the database is loaded.
@@ -661,14 +1072,25 @@ const manifest = {
   assets: { root: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size ? 'assets' : gameRoot, kind: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size ? 'decoded' : 'source', tilesets: copyTilesets, characters: copyCharacters, faces: copyFaces, pictures: copyPictures, audio: copyAudio, system: balloonUsed, animations: animationSpriteNames.size > 0, encryption: system.encryptionKey ? 'rpgm' : 'none' },
   tilesets: database.tilesets,
   playerSprite,
+  initialParty: Array.isArray(system.partyMembers) ? system.partyMembers.map(Number).filter(Number.isInteger) : [],
+  titleScreen: { title1: String(system.title1Name || ''), title2: String(system.title2Name || ''), titleBgm: system.titleBgm ? { name: String(system.titleBgm.name || ''), volume: Number(system.titleBgm.volume ?? 100), pitch: Number(system.titleBgm.pitch ?? 100), pan: Number(system.titleBgm.pan ?? 0) } : null, commands: { newGame: system.titleCommandWindow?.newGame !== false, continue: system.titleCommandWindow?.continue_ !== false, options: system.titleCommandWindow?.options !== false }, assets: titleAssetsAvailable ? { root: 'assets', kind: 'decoded' } : null },
+  vehicles: {
+    boat: system.boat ? { characterName: system.boat.characterName || 'Vehicle', characterIndex: Number(system.boat.characterIndex || 0), mapId: Number(system.boat.startMapId || 0), x: Number(system.boat.startX || 0), y: Number(system.boat.startY || 0) } : null,
+    ship: system.ship ? { characterName: system.ship.characterName || 'Vehicle', characterIndex: Number(system.ship.characterIndex || 1), mapId: Number(system.ship.startMapId || 0), x: Number(system.ship.startX || 0), y: Number(system.ship.startY || 0) } : null,
+    airship: system.airship ? { characterName: system.airship.characterName || 'Vehicle', characterIndex: Number(system.airship.characterIndex || 2), mapId: Number(system.airship.startMapId || 0), x: Number(system.airship.startX || 0), y: Number(system.airship.startY || 0) } : null
+  },
   characterFrames,
   plugins: pluginNames,
-  compatibility: { source: engineKind, commands: buildCompatibilityReport(commandCounts) },
+  ...(pluginLibrary ? { pluginLibrary } : {}),
+  compatibility: { source: engineKind, commands: buildCompatibilityReport(commandCounts), plugins: buildPluginCompatibilityReport(pluginFamilyCounts) },
+  commonEvents: convertedCommonEvents,
   maps,
   database
 };
-// Compact: pretty-printing pushes the largest projects past V8's maximum string length.
-await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest));
+if (titleAssetsAvailable) {
+  await decodeTree(join(gameRoot, 'img', 'titles1'), join(output, 'assets', 'img', 'titles1'), system.encryptionKey);
+  await decodeTree(join(gameRoot, 'img', 'titles2'), join(output, 'assets', 'img', 'titles2'), system.encryptionKey);
+}
 if (copyAssets) {
   await decodeTree(join(gameRoot, 'img'), join(output, 'assets', 'img'), system.encryptionKey);
   await decodeTree(join(gameRoot, 'audio'), join(output, 'assets', 'audio'), system.encryptionKey);
@@ -689,7 +1111,36 @@ if (copyAudio && !copyAssets) {
   await decodeNamedTree(join(gameRoot, 'audio', 'bgs'), join(output, 'assets', 'audio', 'bgs'), musicNames, system.encryptionKey);
   await decodeNamedTree(join(gameRoot, 'audio', 'me'), join(output, 'assets', 'audio', 'me'), meNames, system.encryptionKey);
 }
+// Audio index: which file (and format) each named track resolved to in the converted tree.
+const audioRoot = join(output, 'assets', 'audio');
+if (existsSync(audioRoot)) {
+  const index = buildAudioIndex(audioRoot);
+  manifest.audio = { index, system: systemAudio };
+  const inMusic = name => name in index.bgm || name in index.bgs;
+  const missing = [...new Set([
+    ...[...musicNames].filter(name => !inMusic(name)).map(name => `bgm|bgs/${name}`),
+    ...missingAudio(index, [...meNames].map(name => ({ kind: 'me', name })).concat([...soundNames].map(name => ({ kind: 'se', name }))))
+  ])];
+  if (missing.length) console.warn(`MWGP convert: ${missing.length} referenced audio file(s) not found in the project: ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ', ...' : ''}`);
+}
+if (manifest.pluginLibrary) manifest.pluginLibrary = await externalizePluginLibrary(manifest.pluginLibrary, output);
+// Compact: pretty-printing pushes the largest projects past V8's maximum string length.
+await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest));
 console.log(`Converted ${maps.length} maps and ${pluginNames.length} plugins to ${join(output, 'mwgp.json')}${copyAssets ? ' with assets' : ''}`);
+for (const [kind, info] of [...unsupportedBranchFallbacks].sort((a, b) => a[0] - b[0])) {
+  if (info.count > 1) console.warn(`MWGP convert: branch type ${kind} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
+}
+for (const [kind, info] of [...unsupportedOperandFallbacks].sort((a, b) => a[0] - b[0])) {
+  if (info.count > 1) console.warn(`MWGP convert: variable operand type ${kind} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
+}
+for (const [key, info] of [...unsupportedCommandFallbacks].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))) {
+  if (info.count > 1) console.warn(`MWGP convert: event command ${key} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
+}
+if (pluginFamilyCounts.size) {
+  const top = [...pluginFamilyCounts].sort((a, b) => b[1] - a[1]);
+  const shown = top.slice(0, 10).map(([name, count]) => `${name} (${count})`).join(', ');
+  console.log(`MWGP convert: plugin command families: ${shown}${top.length > 10 ? ` +${top.length - 10} more` : ''}; known native/state adapters run, unknown families warn at runtime`);
+}
 
 async function decodeTree(input, destination, encryptionKey) {
   if (!existsSync(input)) return;
@@ -734,10 +1185,10 @@ function decodeRpgmAsset(bytes, name, encryptionKey) {
 
 function buildCompatibilityReport(counts) {
   const supported = new Set([
-    0, 101, 102, 105, 108, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129,
-    201, 203, 204, 211, 212, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
-    244, 245, 246, 249, 250, 251, 313, 314, 318, 319, 322,
-    401, 402, 403, 404, 405, 408, 411, 412, 413, 352, 505, 601, 602, 603, 604, 655
+    301, 331, 332, 333, 334, 336, 351, 0, 101, 102, 105, 108, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129, 135,
+    201, 202, 203, 204, 211, 212, 335, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
+    244, 245, 246, 249, 250, 251, 311, 313, 314, 316, 318, 319, 321, 322,
+    103, 401, 402, 403, 404, 405, 408, 411, 412, 413, 236, 302, 303, 352, 353, 505, 601, 602, 603, 604, 605, 655
   ]);
   // 108 (Comment) and 505 (a Set Movement Route step's editor-only sibling entry, already
   // folded into code 205's own parameters.list) are correctly handled by doing nothing.
@@ -748,16 +1199,46 @@ function buildCompatibilityReport(counts) {
   // 405 lines under a 105 convert into the scroll command (unit F); orphaned
   // 405s are plugin data lines and stay dropped.
   // 135 (menu access) has nothing to act on — the player has no menu scene —
-  // so doing nothing is the correct conversion.
-  // 111 is partial: switch and variable conditions are preserved, while timer,
-  // actor, item, and other engine-specific condition kinds remain unsupported.
-  // 355/356 are preserved as loud runtime warnings, but arbitrary RPG Maker
-  // JavaScript and plugin APIs cannot execute outside the original engine.
-  // 135/351 request menu scenes that the browser player does not implement;
+  // so doing nothing is the correct conversion, classified supported like the
+  // other correct no-ops (108/408/505).
+  // 111 is partial: switch, variable, self-switch, actor-in-party, player/own
+  // facing, gold, and item conditions are preserved (verified against the
+  // shipped command111), while timer, enemy, button, vehicle, and other
+  // engine-specific condition kinds convert to an explicit unsupported marker
+  // the player warns on and evaluates as false instead of dropping the block.
+  // 355 is preserved and executed through the bounded MV globals shim; it is
+  // partial because arbitrary RPG Maker JavaScript/API calls may still fail.
+  // 356 remains partial for unknown plugin APIs; the player has state-only
+  // adapters for common plugin families and native adapters for known effects.
+  // 357 is MZ's structured equivalent and converts to the same vocabulary.
+  // 351 opens the player's menu (Item/Skill/Equip/Status/Save/Options), 301 runs the troop battle runner
+  // (src/player/battle.js), 331-334/336 act on the battle's enemies: all supported, within the limits
+  // documented in AGENTS.md (no battle graphics, no plugin damage engines).
   // 352 is supported through the player's slot-1 save path.
-  const partial = new Set([111, 122, 205, 301]);
+  const partial = new Set([111, 122, 205, 355, 356, 357]);
+  // Keep the report honest for each project. These command families are only
+  // partial when this conversion actually had to emit a loud fallback for one
+  // of their shapes; otherwise a game that uses only the supported subset
+  // should not warn about scenes that are fully executable here.
+  if (!unsupportedBranchFallbacks.size) { partial.delete(111); supported.add(111); }
+  if (!unsupportedOperandFallbacks.size) { partial.delete(122); supported.add(122); }
+  if (![...unsupportedCommandFallbacks.keys()].some(key => key.startsWith('205:'))) { partial.delete(205); supported.add(205); }
   return Object.fromEntries([...counts].sort((a, b) => a[0] - b[0]).map(([code, count]) => [String(code), {
     count,
     status: supported.has(code) ? 'supported' : partial.has(code) ? 'partial' : 'unsupported'
+  }]));
+}
+
+function buildPluginCompatibilityReport(counts) {
+  const supported = new Set(['quest', 'te_call_map_event', '指定位置にアニメーション表示']);
+  const partial = new Set([
+    'tachie', 'disableautosave', 'enableautosave', 'autosave', 'mapscrolldisable',
+    'hideminilabel', 'showminilabel', 'sfc_rem_enable', 'sfc_rem_disable',
+    'mwl_reset_lines', 'mwl_change_lines', 'messagerows', 'choicerect', 'animelight'
+    , 'fd_start_site', 'refreshminilabel', 'sts'
+  ]);
+  return Object.fromEntries([...counts].sort((a, b) => b[1] - a[1]).map(([name, count]) => [name, {
+    count,
+    status: supported.has(name.toLowerCase()) ? 'supported' : partial.has(name.toLowerCase()) ? 'partial' : 'unsupported'
   }]));
 }

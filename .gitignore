@@ -1,4 +1,6 @@
 /4MWG/
+# SoundFonts have their own licences: soundfonts/vetted.json gates what may be committed (checked by
+# npm test). A game's own soundfont is copied only into the gitignored MWGP_versions/ output.
 /node_modules/
 /notes/
 /RPGM_versions/

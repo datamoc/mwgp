@@ -5,6 +5,10 @@ import { decodeMarshal } from '@datamoc/mw_games/rpg';
 import { transpileSnippet, setInterpreterMethods } from './rgss-snippet.mjs';
 import { readRgssScripts } from './rgss-scripts.mjs';
 import { indexScripts, buildRgssLibrary } from './rgss-library.mjs';
+import { buildAudioIndex } from './audio-index.mjs';
+import { convertRgssDatabase } from './rgss-database.mjs';
+import { liftBlocking } from './rgss-async.mjs';
+import { exportRubyData, buildFileIndex, readTextFiles } from './rgss-data.mjs';
 import { setKnownMethods } from './rgss-call-filter.mjs';
 
 const [, , extractedArg, outputArg, ...flags] = process.argv;
@@ -14,7 +18,7 @@ if (!extractedArg || !outputArg) {
 }
 // --library-depth N: how many reference hops from the event scripts into the game's own Ruby
 // library get transpiled (default 3); --no-library skips the library (event scripts only).
-const libraryDepth = flags.includes('--no-library') ? 0 : Number(flags[flags.indexOf('--library-depth') + 1]) || 3;
+const libraryDepth = flags.includes('--no-library') ? 0 : Number(flags[flags.indexOf('--library-depth') + 1]) || 8;
 const source = resolve(extractedArg), output = resolve(outputArg), dataDir = join(source, 'Data');
 const XP_AUTOTILE_PATTERNS = 48;
 const XP_AUTOTILE_IMAGES = 8;
@@ -49,6 +53,17 @@ function tableData(value) {
 // cancel branch, and 118/119 are labels/jumps. The parser below mirrors
 // convert-mv.js's parseBlock, including its terminator-by-(code, indent) rule.
 const commandCounts = new Map();
+// Loud-fallback counter, initialized before the map loop runs (top-level order).
+const unsupportedCommandFallbacks = new Map();
+function unsupportedCommand(code, kind, mapId, eventId) {
+  const key = `${code}:${kind}`;
+  const seen = unsupportedCommandFallbacks.get(key);
+  if (!seen) {
+    unsupportedCommandFallbacks.set(key, { count: 1, first: `map ${mapId}, event ${eventId}` });
+    console.warn(`MWGP convert: XP event command ${code} has no converted equivalent; it warns at runtime and is skipped (first seen at map ${mapId}, event ${eventId})`);
+  } else seen.count++;
+  return { unsupported: { code, kind } };
+}
 
 // Ruby embedded in events (355/655 Call Script, 111 branch type 12) is
 // transpiled to JS once per unique source; the manifest keeps the Ruby text
@@ -70,6 +85,28 @@ function convertScript(ruby, kind) {
 }
 const commonEvents = new Map();
 
+// XP game-data variable operands verified against command_122 in the shipped
+// scripts. Kind 6 (character: player x/y) and kind 7 (map id, Pokémon count,
+// money) read player-held state; directions, screen coordinates, terrain tags,
+// steps, playtime, timer, and save counts have no model and stay loud markers.
+function convertXpGameDataOperand(p, operation, context = {}) {
+  const operationName = ['set', 'add', 'subtract', 'multiply', 'divide', 'modulo'][Number(operation || 0)];
+  const first = Number(p[0]);
+  const last = Number(p[1] ?? first);
+  const range = build => Array.from({ length: last - first + 1 }, (_, offset) => build(String(first + offset)));
+  const kind = Number(p[3] || 0);
+  let gameData = null;
+  if (kind === 6 && Number(p[4]) === -1 && Number(p[5]) === 0) gameData = { kind: 'playerX' };
+  else if (kind === 6 && Number(p[4]) === -1 && Number(p[5]) === 1) gameData = { kind: 'playerY' };
+  else if (kind === 7 && Number(p[4]) === 0) gameData = { kind: 'mapId' };
+  else if (kind === 7 && Number(p[4]) === 1) gameData = { kind: 'pokemonCount' };
+  else if (kind === 7 && Number(p[4]) === 2) gameData = { kind: 'gold' };
+  if (!gameData || !operationName) {
+    console.warn(`MWGP convert: XP game-data operand ${kind}/${p[4]}/${p[5]} has no converted equivalent; it warns at runtime and reads as 0 (map ${context.mapId}, event ${context.eventId})`);
+    return range(() => ({ unsupported: { code: 122, kind } }));
+  }
+  return range(id => ({ modifyVariable: { target: id, operation: operationName, operand: { gameData } } }));
+}
 function selfSwitchKey(mapId, eventId, ch) {
   return `self:${mapId}:${eventId}:${ch}`;
 }
@@ -89,13 +126,14 @@ function convertPageConditions(condition, mapId, eventId) {
 // shipped scripts): 0 switch (parameters[2] picks ON vs OFF), 1 variable with
 // [varId, const?(0)/var(1), valueOrVarId, op(0==,1>=,2<=,3>,4<,5!=)] of which
 // only a constant >= maps onto MWGP's atLeast, 2 self switch (same ON/OFF
-// flag). Type 3+ (timer etc.) has no MWGP condition equivalent and drops the
-// branch.
+// flag). Type 6 (character facing) and 7 (gold) map onto the same MWGP
+// conditions MV uses; anything else becomes a loud unsupported marker.
+
 function convertBranchCondition(parameters, mapId, eventId) {
   if (parameters[0] === 0) return { switch: String(parameters[1]), equals: parameters[2] === 0 };
   if (parameters[0] === 1) {
     const operator = { 0: 'eq', 1: 'gte', 2: 'lte', 3: 'gt', 4: 'lt', 5: 'neq' }[Number(parameters[4] ?? 0)];
-    if (!operator) return null;
+    if (!operator) { console.warn(`MWGP convert: XP variable comparison operator ${parameters[4]} has no converted equivalent; it warns at runtime and takes the else-branch (map ${mapId}, event ${eventId})`); return { unsupported: { code: 111, kind: 1 } }; }
     if (Number(parameters[2] || 0) === 0) {
       return operator === 'gte'
         ? { variable: String(parameters[1]), atLeast: Number(parameters[3] || 0) }
@@ -107,7 +145,18 @@ function convertBranchCondition(parameters, mapId, eventId) {
   // Type 12 is a Ruby expression ("Script" in the branch dialog); it runs in
   // the player's RGSS shim rather than mapping onto a fixed MWGP condition.
   if (parameters[0] === 12) return { script: convertScript(String(parameters[1] ?? ''), 'cond') };
-  return null;
+  if (parameters[0] === 6) {
+    const facing = { 2: 'down', 4: 'left', 6: 'right', 8: 'up' }[Number(parameters[2])];
+    if (facing && Number(parameters[1]) === -1) return { facing };
+    if (facing && Number(parameters[1]) === 0) return { eventFacing: facing };
+  }
+  if (parameters[0] === 7) {
+    return { gold: { operator: Number(parameters[2] || 0) === 0 ? 'gte' : 'lte', value: Number(parameters[1] || 0) } };
+  }
+  // Types without an engine-free equivalent must stay loud instead of dropping
+  // the whole branch: the player warns on the marker and takes the else-branch.
+  console.warn(`MWGP convert: XP branch type ${parameters[0]} has no converted equivalent; it warns at runtime and takes the else-branch (map ${mapId}, event ${eventId})`);
+  return { unsupported: { code: 111, kind: Number(parameters[0]) } };
 }
 
 function convertEvent(event, mapId) {
@@ -133,22 +182,23 @@ function convertEvent(event, mapId) {
       image: field(graphic, 'character_name', '') ? { name: field(graphic, 'character_name', ''), index: 0, direction: Number(field(graphic, 'direction', 2)), pattern: Number(field(graphic, 'pattern', 1)) } : null
     };
   });
-  return { id: String(eventId), x: Number(field(event, 'x', 0)), y: Number(field(event, 'y', 0)), pages };
+  return { id: String(eventId), name: String(field(event, 'name', '') || ''), x: Number(field(event, 'x', 0)), y: Number(field(event, 'y', 0)), pages };
 }
 
 function convertCommands(list, context = {}) {
-  const { mapId, eventId, depth = 0 } = context;
+  const { mapId, eventId, depth = 0, stack = [] } = context;
   // Labels (118) split the top-level list into named story passages; jumps
   // (119) become { goto } markers the player's story driver follows. Labels
   // nested inside blocks are dropped with a warning: splitting there would
   // break the block structure.
   const story = { start: 'main', passages: {} };
+  const order = ['main'];
   let current = 'main';
   // Inlined common events (depth > 0) must stay flat arrays for spreading, so
   // only page-level lists split into passages.
   const parsed = parseBlock(0, -1, depth === 0);
   story.passages[current] = parsed.commands;
-  if (Object.keys(story.passages).length > 1) return { story };
+  if (Object.keys(story.passages).length > 1) return { story: { ...story, order } };
   return parsed.commands;
 
   function parseBlock(start, parentIndent, topLevel = false) {
@@ -156,7 +206,7 @@ function convertCommands(list, context = {}) {
     let index = start;
     while (index < list.length) {
       const command = list[index];
-      if ([402, 403, 404, 411, 412, 413].includes(command.code) && command.indent === parentIndent) {
+      if ([402, 403, 404, 411, 412, 413, 601, 602, 603, 604].includes(command.code) && command.indent === parentIndent) {
         return { commands: result, index, marker: command.code };
       }
       if (command.code === 118) {
@@ -166,6 +216,7 @@ function convertCommands(list, context = {}) {
           if (story.passages[name]) console.warn(`MWGP convert: duplicate label "${name}" (map ${mapId}, event ${eventId}); later passage wins`);
           story.passages[current] = result;
           current = name;
+          if (!order.includes(name)) order.push(name);
           result = [];
         }
         index++;
@@ -186,7 +237,9 @@ function convertCommands(list, context = {}) {
           elseCommands = elseBlock.commands;
           index = elseBlock.index;
         }
-        if (condition) result.push({ if: condition, then: thenBlock.commands, ...(elseCommands ? { else: elseCommands } : {}) });
+        // convertBranchCondition never returns null (unknown types become an
+        // explicit unsupported marker), so the block is always preserved.
+        result.push({ if: condition, then: thenBlock.commands, ...(elseCommands ? { else: elseCommands } : {}) });
         if (list[index]?.code === 412 && list[index].indent === command.indent) index++;
         continue;
       }
@@ -227,6 +280,21 @@ function convertCommands(list, context = {}) {
         });
         continue;
       }
+      // 301 Battle Processing owns its following Win/Escape/Lose blocks (601-603, closed by 604).
+      if (command.code === 301) {
+        const [troop, canEscape, canLose] = command.parameters || [];
+        const branches = {};
+        index++;
+        while (index < list.length) {
+          const marker = list[index];
+          const name = { 601: 'win', 602: 'escape', 603: 'lose' }[marker.code];
+          if (name && marker.indent === command.indent) { const block = parseBlock(index + 1, command.indent); branches[name] = block.commands; index = block.index; continue; }
+          if (marker.code === 604 && marker.indent === command.indent) { index++; break; }
+          break;
+        }
+        result.push({ battle: { troopId: Number(troop || 0), canEscape: canEscape === true, canLose: canLose === true, ...(Object.keys(branches).length ? { branches } : {}) } });
+        continue;
+      }
       if (command.code === 355) {
         let script = command.parameters?.[0] || '';
         // The engine keeps appending while the next line is 355 or 655.
@@ -234,7 +302,10 @@ function convertCommands(list, context = {}) {
           index++;
           script += '\n' + (list[index].parameters?.[0] || '');
         }
-        result.push({ script, ...(({ js, error }) => js !== undefined ? { js } : { error })(convertScript(script, 'call')) });
+        const trainerName = /^\s*(?:this\.)?pbTrainerName\s*(?:\(\s*\))?\s*;?\s*$/i.test(script);
+        result.push(trainerName
+          ? { inputName: { target: 'player', maxLength: 12 } }
+          : { script, ...(({ js, error }) => js !== undefined ? { js } : { error })(convertScript(script, 'call')) });
         index++;
         continue;
       }
@@ -261,7 +332,7 @@ function convertCommands(list, context = {}) {
         while (index < list.length && list[index].code === 509) index++;
         continue;
       }
-      const converted = convertCommand(command, { depth, mapId, eventId });
+      const converted = convertCommand(command, { depth, mapId, eventId, stack });
       if (converted) result.push(...converted);
       index++;
     }
@@ -339,23 +410,36 @@ function convertCommand(command, context = {}) {
   if (command.code === 108 || command.code === 408 || command.code === 0) return [];
   if (command.code === 113) return [{ breakLoop: true }];
   if (command.code === 115) return [{ exitEvent: true }];
-  // 117 inlines the common event's list (depth-limited to 8 against cycles),
-  // the same treatment MV's converter gives its code 117.
-  if (command.code === 117 && context.depth < 8) {
-    const body = commonEvents.get(Number(p[0]));
-    return body ? convertCommands(body, { ...context, depth: context.depth + 1 }) : [];
+  // 117 inlines the common event's list, the same treatment MV's converter
+  // gives its code 117: true recursion (kind 1) and the depth-8 backstop
+  // against diamond reuse (kind 2) stay loud markers, as does a dangling id
+  // (kind 0) — never a silent skip.
+  if (command.code === 117) {
+    const ceId = Number(p[0]);
+    const body = commonEvents.get(ceId);
+    const inlineStack = Array.isArray(context.stack) ? context.stack : [];
+    const inlineDepth = Number(context.depth ?? 0);
+    if (body && !inlineStack.includes(ceId) && inlineDepth < 8) {
+      return convertCommands(body, { ...context, depth: inlineDepth + 1, stack: [...inlineStack, ceId] });
+    }
+    return [unsupportedCommand(Number(command.code), !body ? 0 : inlineStack.includes(ceId) ? 1 : 2, context.mapId, context.eventId)];
   }
   if (command.code === 121) return Array.from({ length: p[1] - p[0] + 1 }, (_, offset) => ({ setSwitch: String(p[0] + offset), value: p[2] === 0 }));
   // 122 params are [first, last, op, kind, operand]: kind 0 constant, 1 another
   // variable, 2 a random range; op 0 set, 1 add, 2 subtract, 3 multiply,
-  // 4 divide, 5 modulo. Game-data/script operands would need runtime
-  // evaluation this static manifest can't express.
+  // 4 divide, 5 modulo. Kinds 6/7 go through convertXpGameDataOperand above;
+  // anything the operand mapper rejects stays a loud unsupported marker
+  // (same rule as MV's convertExtendedOperand fallback).
   if (command.code === 122) {
     const first = Number(p[0]);
     const last = Number(p[1] ?? first);
     const operation = Number(p[2] || 0);
     const operandType = Number(p[3] || 0);
-    if (operandType > 2) return [];
+    if (operandType === 6 || operandType === 7) return convertXpGameDataOperand(p, operation, { mapId: context.mapId, eventId: context.eventId });
+    if (operandType > 2) {
+      console.warn(`MWGP convert: XP variable operand kind ${operandType} has no converted equivalent; it warns at runtime and reads as 0 (map ${context.mapId}, event ${context.eventId})`);
+      return Array.from({ length: last - first + 1 }, () => ({ unsupported: { code: 122, kind: operandType } }));
+    }
     return Array.from({ length: last - first + 1 }, (_, offset) => {
       const id = String(first + offset);
       if (operandType === 1) return operation === 0 ? { copyVariable: id, variable: String(p[4]) } : null;
@@ -404,7 +488,7 @@ function convertCommand(command, context = {}) {
     if (Number(p[0] || 0) === 0) return [{ mapSettings: { kind: 'panorama', name: String(p[1] || ''), hue: Number(p[2] || 0) } }];
     if (Number(p[0] || 0) === 1) return [{ mapSettings: { kind: 'fog', name: String(p[1] || ''), hue: Number(p[2] || 0), opacity: Number(p[3] || 0), blendType: Number(p[4] || 0), zoom: Number(p[5] || 100), sx: Number(p[6] || 0), sy: Number(p[7] || 0) } }];
     if (Number(p[0] || 0) === 2) return [{ mapSettings: { kind: 'battleback', name: String(p[1] || '') } }];
-    return [];
+    return [unsupportedCommand(Number(command.code), Number(p[0] ?? 0), context.mapId, context.eventId)];
   }
   // 203 is Scroll Map with MV's own [direction, distance, speed] parameter
   // order (verified: start_scroll(@parameters[0..2])), so it maps onto the
@@ -457,7 +541,10 @@ function convertCommand(command, context = {}) {
   // blend) with x/y direct at [4]/[5] when [3] is 0, variable ids otherwise).
   // Only direct appointments convert; the blend mode has no MWGP field.
   if (command.code === 231) {
-    if (!p[1] || Number(p[3] || 0) !== 0) return [];
+    // An empty picture name shows nothing (engine no-op); a variable
+    // designation has no MWGP shape and stays a loud marker.
+    if (!p[1]) return [];
+    if (Number(p[3] || 0) !== 0) return [unsupportedCommand(Number(command.code), Number(p[3]), context.mapId, context.eventId)];
     return [{ picture: { id: Number(p[0]), name: p[1], origin: Number(p[2] || 0), x: Number(p[4] || 0), y: Number(p[5] || 0), scaleX: Number(p[6] ?? 100), scaleY: Number(p[7] ?? 100), opacity: Number(p[8] ?? 255) } }];
   }
   // 232 params are [id, duration, origin, designation, x, y, zoomX, zoomY,
@@ -489,8 +576,14 @@ function convertCommand(command, context = {}) {
   // dropped and reported. 247/248 memorize and restore the BGM/BGS, which is
   // exactly what MWGP's saveBgm/resumeBgm pair (borrowed from MV's 243/244)
   // already expresses in the player.
-  if (command.code === 247) return [{ saveBgm: true }];
-  if (command.code === 248) return [{ resumeBgm: true }];
+  if (command.code === 245) {
+    const bgs = audioParams(p[0]);
+    return bgs ? [{ playBgs: bgs }] : [];
+  }
+  if (command.code === 246) return [{ fadeoutBgs: { duration: Number(p[0] || 1) } }];
+  // XP's Memorize/Restore covers the BGM and the BGS together (MV's 243/244 only the BGM).
+  if (command.code === 247) return [{ saveBgm: 'both' }];
+  if (command.code === 248) return [{ resumeBgm: 'both' }];
   if (command.code === 249) {
     const me = audioParams(p[0]);
     return me ? [{ me }] : [];
@@ -508,26 +601,33 @@ function convertCommand(command, context = {}) {
   if (command.code === 314) return Number(p[0] || 0) === 0 ? [{ recoverAll: { scope: 0, actor: 0 } }] : [];
   // 509 steps are consumed structurally by 209 above; an orphaned one is data.
   if (command.code === 509) return [];
-  return [];
+  // 212-216 have no handler in the shipped Interpreter at all, so dropping
+  // them matches the engine. Anything else unmapped is a real gap: loud
+  // marker, never a skip.
+  if ([212, 213, 214, 215, 216].includes(Number(command.code))) return [];
+  return [unsupportedCommand(Number(command.code), 0, context.mapId, context.eventId)];
 }
 
 function buildCompatibilityReport(counts) {
   const supported = new Set([
     0, 101, 102, 103, 104, 105, 106, 108, 112, 113, 115, 116, 117, 118, 119, 121,
     126, 127, 128, 129, 201, 203, 208, 209, 210, 221, 222, 223, 224, 225, 231, 232,
-    234, 235, 241, 242, 247, 248, 249, 250, 251, 313, 314, 315, 316, 317, 318, 319, 355,
-    401, 402, 403, 404, 405, 408,
-    411, 412, 413, 509, 655
+    234, 235, 241, 242, 245, 246, 247, 248, 249, 250, 251, 313, 314, 315, 316, 317, 318, 319, 355,
+    301, 401, 402, 403, 404, 405, 408,
+    411, 412, 413, 509, 601, 602, 603, 604, 655
   ]);
   // Every classification below is verified against the Interpreter section of
   // the shipped scripts, not guessed from MV's numbering: 111 is partial (only
   // switch, all variable comparison operators, and self-switch branches map;
-  // timer/actor/other non-switch conditions remain unsupported),
+  // timer/actor/other non-switch conditions convert to an explicit unsupported
+  // marker the player warns on instead of dropping the branch),
   // 116/126-129/313/315-319 are
   // supported no-ops-or-erase (116 erases the running event; the rest are
   // command_dummy in the engine itself, as is 314 with a nonzero target),
   // 122 partial (constant/variable/random operands with set/add/subtract/
-  // multiply/divide/modulo map; character/game-data operands are dropped),
+  // multiply/divide/modulo map; kind 6 player x/y and kind 7 map id, Pokémon
+  // count, and money map onto game-data operands; anything else converts to
+  // loud unsupported markers instead of vanishing),
   // 123 partial (needs
   // map/event context), 125 partial (variable gold reuses MV's amount shape),
   // 201/202 support direct and variable designations; event-exchange 202
@@ -586,10 +686,13 @@ for (const name of (await readdir(dataDir)).filter(item => /^Map\d+\.rxdata$/i.t
   const id = Number(name.match(/\d+/)[0]);
   const mwgEvents = [...events.values()].map(event => convertEvent(event, id));
   const bgm = field(sourceMap, 'bgm', null);
+  const bgs = field(sourceMap, 'bgs', null);
   maps.push({ id, info: unwrap(mapInfoHash.get(id)) || null, data: {
     width, height, data: layers.flat(), tilesetId: Number(field(sourceMap, 'tileset_id', 0)),
     autoplayBgm: Boolean(field(sourceMap, 'autoplay_bgm', false)),
     bgm: bgm ? { name: field(bgm, 'name', ''), volume: Number(field(bgm, 'volume', 100)), pitch: Number(field(bgm, 'pitch', 100)) } : null,
+    autoplayBgs: Boolean(field(sourceMap, 'autoplay_bgs', false)),
+    bgs: bgs ? { name: field(bgs, 'name', ''), volume: Number(field(bgs, 'volume', 100)), pitch: Number(field(bgs, 'pitch', 100)) } : null,
     settings: {
       panoramaName: String(field(sourceMap, 'panorama_name', '') || ''), panoramaHue: Number(field(sourceMap, 'panorama_hue', 0) || 0),
       fogName: String(field(sourceMap, 'fog_name', '') || ''), fogHue: Number(field(sourceMap, 'fog_hue', 0) || 0), fogOpacity: Number(field(sourceMap, 'fog_opacity', 0) || 0),
@@ -613,7 +716,14 @@ await copyTree(join(source, 'Graphics', 'Characters'), join(output, 'assets', 'i
 await copyTree(join(source, 'Graphics', 'Tilesets'), join(output, 'assets', 'img', 'tilesets'));
 await copyTree(join(source, 'Graphics', 'Pictures'), join(output, 'assets', 'img', 'pictures'));
 await copyTree(join(source, 'Graphics'), join(output, 'assets', 'graphics'));
-await copyTree(join(source, 'Audio'), join(output, 'assets', 'audio'));
+if (existsSync(join(source, 'Fonts'))) await copyTree(join(source, 'Fonts'), join(output, 'assets', 'fonts'));
+// Audio/BGM, Audio/bgm, ... -> assets/audio/<lowercase kind>: the player and the server address
+// audio by lowercase kind, and only Windows treats the case variants as one directory.
+if (existsSync(join(source, 'Audio'))) {
+  for (const entry of await readdir(join(source, 'Audio'), { withFileTypes: true })) {
+    if (entry.isDirectory()) await copyTree(join(source, 'Audio', entry.name), join(output, 'assets', 'audio', entry.name.toLowerCase()));
+  }
+}
 const system = decodeMarshal(await readFile(join(dataDir, 'System.rxdata')));
 const playerMetadataPath = join(dataDir, 'player_metadata.dat');
 const playerMetadata = existsSync(playerMetadataPath) ? decodeMarshal(await readFile(playerMetadataPath)) : new Map();
@@ -664,6 +774,33 @@ const assetAvailability = {
 const rubyLibrary = libraryIndex
   ? await buildRgssLibrary(rubyScripts, [...scriptStats.sources], { index: libraryIndex, maxDepth: libraryDepth, log: message => console.log(`MWGP convert: ${message}`) })
   : null;
+// Blocking screens (`loop { Graphics.update ... }`): units and Call Script snippets that wait on frames become async.
+let asyncLift = null;
+if (rubyLibrary) {
+  const snippetCommands = [];
+  (function collect(value) {
+    if (Array.isArray(value)) value.forEach(collect);
+    else if (value && typeof value === 'object') {
+      if (typeof value.script === 'string' && typeof value.js === 'string') snippetCommands.push(value);
+      for (const key of Object.keys(value)) if (typeof value[key] === 'object') collect(value[key]);
+    }
+  })(maps.map(map => map.mwgEvents));
+  const lifted = liftBlocking(rubyLibrary.units, snippetCommands.map(command => ({ js: command.js })), { knownMethods: rubyLibrary.methods });
+  rubyLibrary.units = lifted.units;
+  snippetCommands.forEach((command, index) => { command.js = lifted.snippets[index].js; if (lifted.snippets[index].async) command.async = true; });
+  rubyLibrary.asyncNames = lifted.names;
+  asyncLift = lifted.report;
+  console.log(`MWGP convert: async lift: ${asyncLift.functions} function(s) async, ${asyncLift.awaits} call(s) awaited, ${lifted.names.length} blocking name(s)${asyncLift.unawaited ? `, ${asyncLift.unawaited} call(s) left sync (constructors/callbacks)` : ''}${asyncLift.unparsed.length ? `, ${asyncLift.unparsed.length} source(s) unparsed` : ''}`);
+}
+// The game's Marshal data files (Essentials' GameData registries, message tables, ...) as assets the runtime loads.
+const rubyDataFiles = await exportRubyData(dataDir, join(output, 'assets', 'ruby-data'), decodeMarshal, message => console.warn(`MWGP convert: ${message}`));
+if (rubyDataFiles.length) console.log(`MWGP convert: ${rubyDataFiles.length} Data/*.dat file(s) exported for load_data and the GameData registries`);
+const fileIndex = await buildFileIndex(source);
+const textFiles = await readTextFiles(source, fileIndex);
+const libraryFailures = Object.entries(rubyLibrary?.failed || {}).map(([name, error]) => ({ name, error }));
+const libraryPartials = Object.entries(rubyLibrary?.partial || {}).map(([name, detail]) => ({ name, ...detail }));
+const xpDatabase = await convertRgssDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the RPG database (${error.message}); battles use the dialogue duel`); return null; });
+if (xpDatabase) console.log(`MWGP convert: database ${xpDatabase.actors.length - 1} actors, ${xpDatabase.enemies.length - 1} enemies, ${xpDatabase.troops.length - 1} troops, ${xpDatabase.skills.length - 1} skills`);
 const manifest = {
   format: 'MWGP', version: 1,
   source: { engine: 'rpg-maker-xp', projectName: output.split(/[\\/]/).pop(), convertedAt: new Date().toISOString() },
@@ -674,9 +811,33 @@ const manifest = {
   assets: { root: 'assets', kind: 'decoded', ...assetAvailability, faces: false, encryption: 'rgssad-extracted' },
   tilesets, playerSprite, characterFrames, playerMetadata: playerMetadataValues.map(value => ({
     id: Number(field(value, 'id', 0)), trainerType: field(value, 'trainer_type', ''), walkCharset: field(value, 'walk_charset', ''), runCharset: field(value, 'run_charset', ''), cycleCharset: field(value, 'cycle_charset', ''), surfCharset: field(value, 'surf_charset', '')
-  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })) } }, maps, database: {},
+  })), plugins: [], compatibility: { source: 'rpg-maker-xp', commands: buildCompatibilityReport(commandCounts), scripts: { total: scriptStats.total, transpiled: scriptStats.transpiled, failed: [...scriptStats.failed].map(([ruby, error]) => ({ ruby: ruby.slice(0, 200), error })), libraryFailed: libraryFailures, libraryPartial: libraryPartials } }, maps, database: xpDatabase || {},
+  ...(xpDatabase ? { initialParty: xpDatabase.system.partyMembers } : {}),
+  ...(fileIndex.length ? { fileIndex } : {}),
+  ...(Object.keys(textFiles).length ? { textFiles } : {}),
+  ...(rubyDataFiles.length ? { rubyData: { root: 'ruby-data', files: rubyDataFiles } } : {}),
   ...(rubyLibrary ? { rubyLibrary } : {})
 };
+// Audio the engine plays itself (title/battle music, jingles, system sound effects) and the
+// index of what really exists on disk, in whatever formats the project ships.
+{
+  const audioRoot = join(output, 'assets', 'audio');
+  if (existsSync(audioRoot)) {
+    const track = key => audioParams(field(system, key, null));
+    const sounds = Object.fromEntries([['cursor', 'cursor_se'], ['ok', 'decision_se'], ['cancel', 'cancel_se'], ['buzzer', 'buzzer_se'], ['equip', 'equip_se'], ['shop', 'shop_se'],
+      ['save', 'save_se'], ['load', 'load_se'], ['battleStart', 'battle_start_se'], ['escape', 'escape_se'], ['actorCollapse', 'actor_collapse_se'], ['enemyCollapse', 'enemy_collapse_se']]
+      .map(([name, key]) => [name, track(key)]).filter(([, value]) => value));
+    // MIDI music sounds far better with a SoundFont: `--soundfont <file>`, else the project's own .sf2.
+    const flagged = flags.indexOf('--soundfont') >= 0 ? flags[flags.indexOf('--soundfont') + 1] : null;
+    const found = flagged || (await readdir(source)).find(name => /\.sf2$/i.test(name));
+    const soundfontPath = found ? (existsSync(found) ? found : join(source, found)) : null;
+    if (soundfontPath && existsSync(soundfontPath)) await writeFile(join(audioRoot, 'soundfont.sf2'), await readFile(soundfontPath));
+    manifest.audio = { soundfont: soundfontPath && existsSync(soundfontPath) ? 'soundfont.sf2' : null, index: buildAudioIndex(audioRoot), system: { titleBgm: track('title_bgm'), battleBgm: track('battle_bgm'), victoryMe: track('battle_end_me'), gameoverMe: track('gameover_me'), vehicles: {}, sounds } };
+  }
+}
 await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest, null, 2));
 console.log(`Event scripts: ${scriptStats.transpiled}/${scriptStats.total} transpiled to JS${scriptStats.failed.size ? `, ${scriptStats.failed.size} unique failed (see compatibility.scripts.failed)` : ''}`);
 console.log(`Converted ${maps.length} XP maps to ${join(output, 'mwgp.json')}`);
+for (const [key, info] of [...unsupportedCommandFallbacks].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))) {
+  if (info.count > 1) console.warn(`MWGP convert: XP event command ${key} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
+}

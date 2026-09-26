@@ -1,0 +1,1049 @@
+{
+  "source": "Game.exe",
+  "sha256": "5c75e92fcbb6ec50b9f8fc61913d751a8945d6a1fc69c3017c7b8686b532bf04",
+  "provenance": "class and method NAMES read from the binary's plain-text strings (no disassembly); a fact list about the API, no code or assets",
+  "stringCount": 81668,
+  "classes": {
+    "System": {
+      "methods": [
+        "delta",
+        "uptime",
+        "data_directory",
+        "set_window_title",
+        "window_title",
+        "window_title=",
+        "show_settings",
+        "puts",
+        "desensitize",
+        "platform",
+        "is_mac?",
+        "is_rosetta?",
+        "is_linux?",
+        "is_windows?",
+        "is_wine?",
+        "is_really_mac?",
+        "is_really_linux?",
+        "is_really_windows?",
+        "user_language",
+        "user_name",
+        "game_title",
+        "power_state",
+        "nproc",
+        "memory",
+        "reload_cache",
+        "mount",
+        "unmount",
+        "launch",
+        "default_font_family=",
+        "to_utf8",
+        "to_utf8!"
+      ],
+      "constants": [
+        "CFG",
+        "DEBUG",
+        "TEST",
+        "BTEST"
+      ]
+    },
+    "Table": {
+      "methods": [
+        "_dump",
+        "_load",
+        "initialize",
+        "initialize_copy",
+        "resize",
+        "xsize",
+        "ysize",
+        "zsize",
+        "[]",
+        "[]="
+      ],
+      "constants": []
+    },
+    "Color": {
+      "methods": [
+        "_load",
+        "_dump",
+        "initialize",
+        "initialize_copy",
+        "set",
+        "==",
+        "===",
+        "eql?",
+        "to_s",
+        "inspect",
+        "red",
+        "red=",
+        "green",
+        "green=",
+        "blue",
+        "blue=",
+        "alpha",
+        "alpha="
+      ],
+      "constants": []
+    },
+    "Tone": {
+      "methods": [
+        "gray",
+        "gray="
+      ],
+      "constants": []
+    },
+    "Rect": {
+      "methods": [
+        "x=",
+        "y=",
+        "width",
+        "width=",
+        "height",
+        "height=",
+        "empty"
+      ],
+      "constants": []
+    },
+    "Font": {
+      "methods": [
+        "default_name=",
+        "default_size",
+        "default_size=",
+        "default_bold",
+        "default_bold=",
+        "default_italic",
+        "default_italic=",
+        "default_color=",
+        "default_shadow",
+        "default_shadow=",
+        "default_outline",
+        "default_outline=",
+        "default_out_color=",
+        "exist?",
+        "initialize",
+        "initialize_copy",
+        "name=",
+        "size",
+        "size=",
+        "bold",
+        "bold=",
+        "italic",
+        "italic=",
+        "color=",
+        "shadow",
+        "shadow=",
+        "outline",
+        "outline=",
+        "out_color="
+      ],
+      "constants": []
+    },
+    "Bitmap": {
+      "methods": [
+        "dispose",
+        "disposed?",
+        "initialize",
+        "initialize_copy",
+        "width",
+        "height",
+        "rect",
+        "blt",
+        "stretch_blt",
+        "fill_rect",
+        "clear",
+        "get_pixel",
+        "set_pixel",
+        "hue_change",
+        "draw_text",
+        "text_size",
+        "raw_data",
+        "raw_data=",
+        "to_file",
+        "gradient_fill_rect",
+        "clear_rect",
+        "blur",
+        "radial_blur",
+        "mega?",
+        "max_size",
+        "animated?",
+        "playing",
+        "playing=",
+        "play",
+        "stop",
+        "goto_and_stop",
+        "goto_and_play",
+        "frame_count",
+        "current_frame",
+        "add_frame",
+        "remove_frame",
+        "next_frame",
+        "previous_frame",
+        "frame_rate",
+        "frame_rate=",
+        "looping",
+        "looping=",
+        "snap_to_bitmap",
+        "font=",
+        "children",
+        "out_color",
+        "color",
+        "name",
+        "default_out_color",
+        "default_color",
+        "default_name"
+      ],
+      "constants": []
+    },
+    "Graphics": {
+      "methods": [
+        "delta",
+        "update",
+        "freeze",
+        "transition",
+        "frame_reset",
+        "screenshot",
+        "__reset__",
+        "frame_rate",
+        "frame_rate=",
+        "frame_count",
+        "frame_count=",
+        "average_frame_rate",
+        "width",
+        "height",
+        "display_width",
+        "display_height",
+        "wait",
+        "fadeout",
+        "fadein",
+        "snap_to_bitmap",
+        "resize_screen",
+        "resize_window",
+        "center",
+        "brightness",
+        "brightness=",
+        "play_movie",
+        "fullscreen",
+        "fullscreen=",
+        "show_cursor",
+        "show_cursor=",
+        "scale",
+        "scale=",
+        "frameskip",
+        "frameskip=",
+        "fixed_aspect_ratio",
+        "fixed_aspect_ratio=",
+        "smooth_scaling",
+        "smooth_scaling=",
+        "integer_scaling",
+        "integer_scaling=",
+        "last_mile_scaling",
+        "last_mile_scaling=",
+        "thread_safe",
+        "thread_safe="
+      ],
+      "constants": [
+        "RSTRING_PTR",
+        "MAX",
+        "WIRED",
+        "FULL",
+        "MEDIUM",
+        "LOW",
+        "EMPTY"
+      ]
+    },
+    "Input": {
+      "methods": [
+        "delta",
+        "update",
+        "press?",
+        "trigger?",
+        "repeat?",
+        "release?",
+        "count",
+        "time?",
+        "pressex?",
+        "triggerex?",
+        "repeatex?",
+        "releaseex?",
+        "repeatcount",
+        "timeex?",
+        "dir4",
+        "dir8",
+        "mouse_x",
+        "mouse_y",
+        "scroll_v",
+        "mouse_in_window",
+        "mouse_in_window?",
+        "raw_key_states"
+      ],
+      "constants": []
+    },
+    "Controller": {
+      "methods": [
+        "connected?",
+        "name",
+        "power_level",
+        "axes_left",
+        "axes_right",
+        "axes_trigger",
+        "raw_button_states",
+        "raw_axes",
+        "text_input",
+        "text_input=",
+        "gets",
+        "clipboard",
+        "clipboard=",
+        "buttoncodes"
+      ],
+      "constants": [
+        "LEFT",
+        "RIGHT",
+        "UP",
+        "SHIFT",
+        "CTRL",
+        "ALT",
+        "F5",
+        "F6",
+        "F7",
+        "F8",
+        "F9",
+        "MOUSELEFT",
+        "MOUSEMIDDLE",
+        "MOUSERIGHT",
+        "MOUSEX1",
+        "MOUSEX2"
+      ]
+    },
+    "Sprite": {
+      "methods": [
+        "dispose",
+        "disposed?",
+        "flash",
+        "update",
+        "z=",
+        "visible",
+        "visible=",
+        "viewport=",
+        "initialize",
+        "bitmap=",
+        "src_rect=",
+        "x=",
+        "y=",
+        "ox",
+        "ox=",
+        "oy",
+        "oy=",
+        "zoom_x",
+        "zoom_x=",
+        "zoom_y",
+        "zoom_y=",
+        "angle",
+        "angle=",
+        "mirror",
+        "mirror=",
+        "bush_depth",
+        "bush_depth=",
+        "opacity",
+        "opacity=",
+        "blend_type",
+        "blend_type=",
+        "color=",
+        "tone=",
+        "width",
+        "height",
+        "bush_opacity",
+        "bush_opacity=",
+        "pattern=",
+        "pattern_blend_type",
+        "pattern_blend_type=",
+        "pattern_tile",
+        "pattern_tile=",
+        "pattern_opacity",
+        "pattern_opacity=",
+        "pattern_scroll_x",
+        "pattern_scroll_x=",
+        "pattern_scroll_y",
+        "pattern_scroll_y=",
+        "pattern_zoom_x",
+        "pattern_zoom_x=",
+        "pattern_zoom_y",
+        "pattern_zoom_y=",
+        "invert",
+        "invert=",
+        "wave_amp",
+        "wave_amp=",
+        "wave_length",
+        "wave_length=",
+        "wave_speed",
+        "wave_speed=",
+        "wave_phase",
+        "wave_phase="
+      ],
+      "constants": []
+    },
+    "Viewport": {
+      "methods": [
+        "dispose",
+        "disposed?",
+        "flash",
+        "update",
+        "z=",
+        "visible",
+        "visible=",
+        "initialize",
+        "_sprite_finalizer",
+        "rect=",
+        "ox",
+        "ox=",
+        "oy",
+        "oy=",
+        "color=",
+        "tone=",
+        "bitmap"
+      ],
+      "constants": []
+    },
+    "Plane": {
+      "methods": [
+        "dispose",
+        "disposed?",
+        "z=",
+        "visible",
+        "visible=",
+        "viewport=",
+        "initialize",
+        "bitmap=",
+        "ox",
+        "ox=",
+        "oy",
+        "oy=",
+        "zoom_x",
+        "zoom_x=",
+        "zoom_y",
+        "zoom_y=",
+        "opacity",
+        "opacity=",
+        "blend_type",
+        "blend_type=",
+        "color=",
+        "tone=",
+        "contents",
+        "windowskin"
+      ],
+      "constants": []
+    },
+    "Window": {
+      "methods": [
+        "dispose",
+        "disposed?",
+        "z=",
+        "visible",
+        "visible=",
+        "viewport=",
+        "initialize",
+        "update",
+        "windowskin=",
+        "contents=",
+        "stretch",
+        "stretch=",
+        "cursor_rect=",
+        "active",
+        "active=",
+        "pause",
+        "pause=",
+        "x=",
+        "y=",
+        "width",
+        "width=",
+        "height",
+        "height=",
+        "ox",
+        "ox=",
+        "oy",
+        "oy=",
+        "opacity",
+        "opacity=",
+        "back_opacity",
+        "back_opacity=",
+        "contents_opacity",
+        "contents_opacity=",
+        "priorities",
+        "flash_data",
+        "map_data",
+        "tileset",
+        "array",
+        "openness",
+        "openness=",
+        "move",
+        "open?",
+        "close?",
+        "arrows_visible",
+        "arrows_visible=",
+        "padding",
+        "padding=",
+        "padding_bottom",
+        "padding_bottom=",
+        "tone=",
+        "flags",
+        "viewport"
+      ],
+      "constants": []
+    },
+    "Tilemap": {
+      "methods": [
+        "dispose",
+        "disposed?",
+        "initialize",
+        "update",
+        "tileset=",
+        "map_data=",
+        "flash_data=",
+        "priorities=",
+        "visible",
+        "visible=",
+        "ox",
+        "ox=",
+        "oy",
+        "oy=",
+        "opacity",
+        "opacity=",
+        "blend_type",
+        "blend_type=",
+        "color=",
+        "tone=",
+        "children",
+        "bitmap_array",
+        "tilemap"
+      ],
+      "constants": []
+    },
+    "Audio": {
+      "methods": [
+        "bgm_play",
+        "bgm_stop",
+        "bgm_fade",
+        "bgm_volume",
+        "bgm_set_volume",
+        "bgs_play",
+        "bgs_stop",
+        "bgs_fade",
+        "me_play",
+        "me_stop",
+        "me_fade",
+        "bgm_pos",
+        "bgs_pos",
+        "setup_midi",
+        "se_play",
+        "se_stop",
+        "__reset__"
+      ],
+      "constants": []
+    },
+    "Marshal": {
+      "methods": [
+        "_mkxp_load_alias",
+        "oS",
+        "wb",
+        "dump"
+      ],
+      "constants": []
+    },
+    "BitmapArray": {
+      "methods": [
+        "[]=",
+        "[]",
+        "children"
+      ],
+      "constants": []
+    },
+    "HTTPLite": {
+      "methods": [
+        "get",
+        "post",
+        "post_body"
+      ],
+      "constants": [
+        "JSON"
+      ]
+    }
+  },
+  "rpg": {
+    "RPG": {
+      "attributes": []
+    },
+    "RPG::Map": {
+      "attributes": [
+        "display_name",
+        "tileset_id",
+        "width",
+        "height",
+        "scroll_type",
+        "specify_battleback",
+        "battleback1_name",
+        "battleback2_name",
+        "autoplay_bgm",
+        "bgm",
+        "autoplay_bgs",
+        "bgs",
+        "disable_dashing",
+        "encounter_list",
+        "encounter_step",
+        "parallax_name",
+        "parallax_loop_x",
+        "parallax_loop_y",
+        "parallax_sx",
+        "parallax_sy",
+        "parallax_show",
+        "note",
+        "data",
+        "events"
+      ]
+    },
+    "RPG::Map::Encounter": {
+      "attributes": [
+        "troop_id",
+        "weight",
+        "region_set"
+      ]
+    },
+    "RPG::MapInfo": {
+      "attributes": [
+        "name",
+        "parent_id",
+        "order",
+        "expanded",
+        "scroll_x",
+        "scroll_y"
+      ]
+    },
+    "RPG::Event": {
+      "attributes": [
+        "id",
+        "name",
+        "x",
+        "y",
+        "pages"
+      ]
+    },
+    "RPG::Event::Page": {
+      "attributes": [
+        "condition",
+        "graphic",
+        "move_type",
+        "move_speed",
+        "move_frequency",
+        "move_route",
+        "walk_anime",
+        "step_anime",
+        "direction_fix",
+        "through",
+        "priority_type",
+        "trigger",
+        "list"
+      ]
+    },
+    "RPG::Event::Page::Condition": {
+      "attributes": [
+        "switch1_valid",
+        "switch2_valid",
+        "variable_valid",
+        "self_switch_valid",
+        "item_valid",
+        "actor_valid",
+        "switch1_id",
+        "switch2_id",
+        "variable_id",
+        "variable_value",
+        "self_switch_ch",
+        "item_id",
+        "actor_id"
+      ]
+    },
+    "RPG::Event::Page::Graphic": {
+      "attributes": [
+        "tile_id",
+        "character_name",
+        "character_index",
+        "direction",
+        "pattern"
+      ]
+    },
+    "RPG::EventCommand": {
+      "attributes": [
+        "code",
+        "indent",
+        "parameters"
+      ]
+    },
+    "RPG::MoveRoute": {
+      "attributes": [
+        "repeat",
+        "skippable",
+        "wait",
+        "list"
+      ]
+    },
+    "RPG::MoveCommand": {
+      "attributes": [
+        "code",
+        "parameters"
+      ]
+    },
+    "RPG::BaseItem": {
+      "attributes": [
+        "id",
+        "name",
+        "icon_index",
+        "description",
+        "features",
+        "note"
+      ]
+    },
+    "RPG::BaseItem::Feature": {
+      "attributes": [
+        "code",
+        "data_id",
+        "value"
+      ]
+    },
+    "RPG::Actor": {
+      "attributes": [
+        "nickname",
+        "class_id",
+        "initial_level",
+        "max_level",
+        "character_name",
+        "character_index",
+        "face_name",
+        "face_index",
+        "equips"
+      ]
+    },
+    "RPG::Class": {
+      "attributes": [
+        "exp_params",
+        "params",
+        "learnings"
+      ]
+    },
+    "RPG::Class::Learning": {
+      "attributes": [
+        "level",
+        "skill_id",
+        "note"
+      ]
+    },
+    "RPG::UsableItem": {
+      "attributes": [
+        "scope",
+        "occasion",
+        "speed",
+        "animation_id",
+        "success_rate",
+        "repeats",
+        "tp_gain",
+        "hit_type",
+        "damage",
+        "effects"
+      ]
+    },
+    "RPG::UsableItem::Damage": {
+      "attributes": [
+        "type",
+        "element_id",
+        "formula",
+        "variance",
+        "critical"
+      ]
+    },
+    "RPG::UsableItem::Effect": {
+      "attributes": [
+        "code",
+        "data_id",
+        "value1",
+        "value2"
+      ]
+    },
+    "RPG::Skill": {
+      "attributes": [
+        "stype_id",
+        "mp_cost",
+        "tp_cost",
+        "message1",
+        "message2",
+        "required_wtype_id1",
+        "required_wtype_id2"
+      ]
+    },
+    "RPG::Item": {
+      "attributes": [
+        "itype_id",
+        "price",
+        "consumable"
+      ]
+    },
+    "RPG::EquipItem": {
+      "attributes": [
+        "price",
+        "etype_id",
+        "params"
+      ]
+    },
+    "RPG::Weapon": {
+      "attributes": [
+        "wtype_id",
+        "animation_id"
+      ]
+    },
+    "RPG::Armor": {
+      "attributes": [
+        "atype_id"
+      ]
+    },
+    "RPG::Enemy": {
+      "attributes": [
+        "battler_name",
+        "battler_hue",
+        "params",
+        "exp",
+        "gold",
+        "drop_items",
+        "actions"
+      ]
+    },
+    "RPG::Enemy::DropItem": {
+      "attributes": [
+        "kind",
+        "data_id",
+        "denominator"
+      ]
+    },
+    "RPG::Enemy::Action": {
+      "attributes": [
+        "skill_id",
+        "condition_type",
+        "condition_param1",
+        "condition_param2",
+        "rating"
+      ]
+    },
+    "RPG::State": {
+      "attributes": [
+        "restriction",
+        "priority",
+        "remove_at_battle_end",
+        "remove_by_restriction",
+        "auto_removal_timing",
+        "min_turns",
+        "max_turns",
+        "remove_by_damage",
+        "chance_by_damage",
+        "remove_by_walking",
+        "steps_to_remove",
+        "message1",
+        "message2",
+        "message3",
+        "message4"
+      ]
+    },
+    "RPG::Troop": {
+      "attributes": [
+        "id",
+        "name",
+        "members",
+        "pages"
+      ]
+    },
+    "RPG::Troop::Member": {
+      "attributes": [
+        "enemy_id",
+        "x",
+        "y",
+        "hidden"
+      ]
+    },
+    "RPG::Troop::Page": {
+      "attributes": [
+        "condition",
+        "span",
+        "list"
+      ]
+    },
+    "RPG::Troop::Page::Condition": {
+      "attributes": [
+        "turn_ending",
+        "turn_valid",
+        "enemy_valid",
+        "actor_valid",
+        "switch_valid",
+        "turn_a",
+        "turn_b",
+        "enemy_index",
+        "enemy_hp",
+        "actor_id",
+        "actor_hp",
+        "switch_id"
+      ]
+    },
+    "RPG::Animation": {
+      "attributes": [
+        "id",
+        "name",
+        "animation1_name",
+        "animation1_hue",
+        "animation2_name",
+        "animation2_hue",
+        "position",
+        "frame_max",
+        "frames",
+        "timings"
+      ]
+    },
+    "RPG::Animation::Frame": {
+      "attributes": [
+        "cell_max",
+        "cell_data"
+      ]
+    },
+    "RPG::Animation::Timing": {
+      "attributes": [
+        "frame",
+        "se",
+        "flash_scope",
+        "flash_color",
+        "flash_duration"
+      ]
+    },
+    "RPG::Tileset": {
+      "attributes": [
+        "id",
+        "mode",
+        "name",
+        "tileset_names",
+        "flags",
+        "note"
+      ]
+    },
+    "RPG::CommonEvent": {
+      "attributes": [
+        "id",
+        "name",
+        "trigger",
+        "switch_id",
+        "list"
+      ]
+    },
+    "RPG::System": {
+      "attributes": [
+        "game_title",
+        "version_id",
+        "japanese",
+        "party_members",
+        "currency_unit",
+        "skill_types",
+        "weapon_types",
+        "armor_types",
+        "elements",
+        "switches",
+        "variables",
+        "boat",
+        "ship",
+        "airship",
+        "title1_name",
+        "title2_name",
+        "opt_draw_title",
+        "opt_use_midi",
+        "opt_transparent",
+        "opt_followers",
+        "opt_slip_death",
+        "opt_floor_death",
+        "opt_display_tp",
+        "opt_extra_exp",
+        "window_tone",
+        "title_bgm",
+        "battle_bgm",
+        "battle_end_me",
+        "gameover_me",
+        "sounds",
+        "test_battlers",
+        "test_troop_id",
+        "start_map_id",
+        "start_x",
+        "start_y",
+        "terms",
+        "battleback1_name",
+        "battleback2_name",
+        "battler_name",
+        "battler_hue",
+        "edit_map_id"
+      ]
+    },
+    "RPG::System::Vehicle": {
+      "attributes": [
+        "character_name",
+        "character_index",
+        "bgm",
+        "start_map_id",
+        "start_x",
+        "start_y"
+      ]
+    },
+    "RPG::System::Terms": {
+      "attributes": [
+        "basic",
+        "params",
+        "etypes",
+        "commands"
+      ]
+    },
+    "RPG::System::TestBattler": {
+      "attributes": [
+        "actor_id",
+        "level",
+        "equips"
+      ]
+    },
+    "RPG::AudioFile": {
+      "attributes": [
+        "name",
+        "volume",
+        "pitch"
+      ]
+    },
+    "RPG::BGM": {
+      "attributes": [
+        "pos"
+      ]
+    },
+    "RPG::BGS": {
+      "attributes": [
+        "pos"
+      ]
+    },
+    "RPG::ME": {
+      "attributes": []
+    },
+    "RPG::SE": {
+      "attributes": []
+    }
+  },
+  "kernel": {
+    "load_data": true,
+    "save_data": true,
+    "rgss_main": true,
+    "rgss_stop": true,
+    "msgbox": true,
+    "msgbox_p": true,
+    "print": true,
+    "p": false
+  },
+  "exports": [
+    "RGSSAD",
+    "RGSSReset",
+    "RGSSError"
+  ],
+  "summary": {
+    "classes": 19,
+    "methods": 433,
+    "rpgClasses": 46
+  },
+  "notes": []
+}

@@ -16,19 +16,18 @@
 // getters to match.
 import { convert } from '../transpilers/ruby2js-master/demo/selfhost/ruby2js.js';
 import Functions from '../transpilers/ruby2js-master/demo/selfhost/filters/functions.js';
-import { selfCallsFilter } from './rgss-library.mjs';
-import { RgssCalls } from './rgss-call-filter.mjs';
+import { RgssCalls, setSelfMethods } from './rgss-call-filter.mjs';
 
 // Snippets run as bodies of the game's Interpreter methods: bare calls to those methods
 // become `this.<name>()`. The set comes from the game's scripts (tools/rgss-library.mjs).
-let selfFilter = null;
+let interpreterNames = new Set();
 // RgssCalls (see rgss-call-filter.mjs) needs the game's `def` names via setKnownMethods,
 // which the converter calls after indexing; snippets and library then agree on which
 // paren-less calls are method calls.
 export function setInterpreterMethods(names) {
-  selfFilter = names?.size ? selfCallsFilter(names).prototype : null;
+  interpreterNames = new Set(names || []);
 }
-const compile = ruby => convert(ruby, { eslevel: 2022, underscored_private: true, filters: [Functions.prototype, ...(selfFilter ? [selfFilter] : []), RgssCalls.prototype] }).toString().trim();
+const compile = ruby => { setSelfMethods(interpreterNames); return convert(ruby, { eslevel: 2022, underscored_private: true, filters: [Functions.prototype, RgssCalls.prototype] }).toString().trim().replace(/(?<![\w$.)\]])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.toString\(\)/g, 'String($1 ?? "")'); };
 
 // kind 'call' -> statements; kind 'cond' -> a body that returns the truthiness
 // of the (possibly multi-statement) Ruby expression. Returns { js } or

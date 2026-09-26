@@ -1,0 +1,579 @@
+// MV/MZ-style troop battle runner: a party against a troop, driven by the project's own database.
+//
+// What is modelled (RPG Maker MV rules, rpg_objects.js Game_Action / Game_Battler / BattleManager):
+//   * battlers: actors (class curve + equipment + traits + states + buffs) and enemies; the eight
+//     parameters, x-parameters (hit/eva/cri/...) and s-parameters (grd/rec/pdr/mdr/exr/...) from traits;
+//   * the turn: party command (Fight / Escape), per-actor commands (Attack, Skill, Guard, Item), enemy
+//     actions chosen by rating, actions ordered by speed (agility + skill speed), MP costs, item use;
+//   * skills and items: scope and targets, hit/evade, damage formulas (`a.atk * 4 - b.def * 2` and the
+//     like, evaluated with a/b/v), physical/magical damage rates, element rates, guard, critical, variance,
+//     HP/MP damage, recovery and drain, and the effects that matter (recover HP/MP, add/remove state,
+//     buffs and debuffs, learn skill, escape);
+//   * states: restriction (confusion, sleep), regeneration and slip damage, turn-based removal, death;
+//   * escape (the MV ratio, growing with each failed try), victory (experience, level-ups with learned
+//     skills, gold, drops) and defeat.
+// Not modelled: TP mechanics, counter/reflection/substitute traits, animations and battle graphics, the
+// side-view layout. Presentation goes through an injected `present({ text, choices })` (the player's
+// dialogue box), so the whole runner is deterministic and testable with a scripted `present` and `rng`.
+//
+//   runBattle({ database, troopId, party, records, items, present, rng, variable, canEscape, canLose, hooks })
+//     -> { outcome: 'win' | 'lose' | 'escape', exp, gold, drops }
+// `records` maps actor id -> the player's persistent actor record (level, exp, hp, mp, states, skills, equips);
+// battle results are written back to it. `items` is the { id: count } inventory (mutated); `hooks.gainGold`
+// / `hooks.gainItem` receive rewards.
+
+const SAFE_FORMULA = /^[\w\s.+\-*/%()<>=!&|?:,[\]$]*$/;
+const FORBIDDEN_FORMULA = /\b(?:function|constructor|prototype|__proto__|eval|window|globalThis|document|import|require|process|this|new|class|return|while|for|Function)\b|=>|\$(?!gameVariables)/;
+const PARAMS = ['mhp', 'mmp', 'atk', 'def', 'mat', 'mdef', 'agi', 'luk'];
+const XPARAMS = ['hit', 'eva', 'cri', 'cev', 'mev', 'mrf', 'cnt', 'hrg', 'mrg', 'trg'];
+const SPARAMS = ['tgr', 'grd', 'rec', 'pha', 'mcr', 'tcr', 'pdr', 'mdr', 'fdr', 'exr'];
+const DEATH_STATE = 1;
+// The battle's built-in attack/guard skills and the guard state: skills 1 and 2 and state 2 in MV. A converted project
+// whose own data already uses those ids (XP) names spare ones in `system.battleIds`.
+const battleId = (database, key, fallback) => Number(database?.system?.battleIds?.[key] ?? fallback);
+const attackSkillId = database => battleId(database, 'attackSkill', 1);
+const guardSkillId = database => battleId(database, 'guardSkill', 2);
+const guardStateId = database => battleId(database, 'guardState', 2);
+
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+export const format = (text, ...args) => String(text ?? '').replace(/%(\d)/g, (_, index) => args[Number(index) - 1] ?? '');
+
+// MV's experience curve (Game_Actor#expForLevel).
+export function expForLevel(klass, level) {
+  if (klass?.expCurve) return Number(klass.expCurve[Math.min(level, klass.expCurve.length - 1)] ?? 0);
+  const [basis = 30, extra = 20, accA = 30, accB = 30] = klass?.expParams || [];
+  return Math.round(basis * (Math.pow(level - 1, 0.9 + accA / 250)) * level * (level + 1) / (6 + Math.pow(level, 2) / 50 / accB) + (level - 1) * extra);
+}
+
+class Battler {
+  constructor(battle, kind, source, index) {
+    this.battle = battle;
+    this.kind = kind;            // 'actor' | 'enemy'
+    this.source = source;        // actor or enemy database entry
+    this.index = index;
+    this.states = [];            // [{ id, turns }]
+    this.buffs = new Array(8).fill(0);
+    this.buffTurns = new Array(8).fill(0);
+    this.guarding = false;
+    this.appeared = true;
+    this.escaped = false;
+  }
+  get isActor() { return this.kind === 'actor'; }
+  get name() { return this.source.name || (this.isActor ? 'Actor' : 'Enemy'); }
+  get db() { return this.battle.database; }
+  get dead() { return this.hp <= 0; }
+  get alive() { return this.hp > 0 && this.appeared && !this.escaped; }
+
+  traitObjects() {
+    const list = [this.source];
+    for (const state of this.states) list.push(this.db.states?.[state.id]);
+    return list;
+  }
+  traits(code, id) {
+    const out = [];
+    for (const holder of this.traitObjects()) for (const trait of holder?.traits || []) if (trait.code === code && (id === undefined || trait.dataId === id)) out.push(trait);
+    return out;
+  }
+  traitsPi(code, id) { return this.traits(code, id).reduce((product, trait) => product * Number(trait.value), 1); }
+  traitsSum(code, id) { return this.traits(code, id).reduce((sum, trait) => sum + Number(trait.value), 0); }
+
+  paramBase(id) { return 0; }
+  paramPlus(id) { return 0; }
+  param(id) {
+    const value = (this.paramBase(id) + this.paramPlus(id)) * this.traitsPi(21, id) * (1 + (this.buffs[id] || 0) * 0.25);
+    const max = id === 0 ? 999999 : id === 1 ? 9999 : 999;
+    return Math.round(clamp(value, 0, max));
+  }
+  // MV projects always carry a base hit-rate trait (0.95); one that defines none replaces the combat maths with
+  // plugins, and would never land a hit here, so an absent hit rate means "always hits".
+  xparam(id) { const traits = this.traits(22, id); return id === 0 && !traits.length ? 1 : traits.reduce((sum, trait) => sum + Number(trait.value), 0); }
+  sparam(id) { return this.traitsPi(23, id); }
+  elementRate(elementId) { return elementId > 0 ? this.traitsPi(11, elementId) : 1; }
+
+  get mhp() { return Math.max(1, this.param(0)); }
+  get mmp() { return this.param(1); }
+  get atk() { return this.param(2); } get def() { return this.param(3); } get mat() { return this.param(4); }
+  get mdf() { return this.param(5); } get agi() { return this.param(6); } get luk() { return this.param(7); }
+  get maxHp() { return this.mhp; }
+  get maxMp() { return this.mmp; }
+  get hit() { return this.xparam(0); } get eva() { return this.xparam(1); } get cri() { return this.xparam(2); }
+  get cev() { return this.xparam(3); } get mev() { return this.xparam(4); }
+  get level() { return 1; }
+  get tp() { return this._tp || 0; }
+  set tp(value) { this._tp = value; }
+  get mdef() { return this.param(5); }
+  get grd() { return this.sparam(1); } get rec() { return this.sparam(2); } get pha() { return this.sparam(3); }
+  get mcr() { return this.sparam(4); } get pdr() { return this.sparam(6); } get mdr() { return this.sparam(7); } get exr() { return this.sparam(9); }
+  get tgr() { return this.sparam(0); }
+
+  hasState(id) { return this.states.some(state => state.id === id); }
+  addState(id, chance = 1) {
+    const state = this.db.states?.[id];
+    if (!state || this.dead && id !== DEATH_STATE) return false;
+    if (this.battle.rng() >= chance * this.stateRate(id)) return false;
+    if (id === DEATH_STATE) this.hp = 0;
+    if (!this.hasState(id)) {
+      const min = Number(state.minTurns || 0), max = Number(state.maxTurns || min);
+      this.states.push({ id, turns: state.autoRemovalTiming ? min + Math.floor(this.battle.rng() * (max - min + 1)) : 0 });
+    } else this.states.find(entry => entry.id === id).turns = Math.max(this.states.find(entry => entry.id === id).turns, Number(state.minTurns || 0));
+    return true;
+  }
+  removeState(id) {
+    if (!this.hasState(id)) return false;
+    this.states = this.states.filter(state => state.id !== id);
+    if (id === DEATH_STATE && this.hp <= 0) this.hp = 1;
+    return true;
+  }
+  stateRate(id) { return this.traitsPi(13, id) * (this.traits(14, id).length ? 0 : 1); }
+  get restriction() { return this.states.reduce((max, state) => Math.max(max, Number(this.db.states?.[state.id]?.restriction || 0)), 0); }
+  get canMove() { return this.alive && this.restriction < 4; }
+  get isGuarding() { return this.guarding && this.canMove; }
+
+  gainHp(value) { this.hp = clamp(this.hp + Math.trunc(value), 0, this.mhp); if (this.hp <= 0) this.addState(DEATH_STATE, 1); else this.removeState(DEATH_STATE); }
+  gainMp(value) { this.mp = clamp(this.mp + Math.trunc(value), 0, this.mmp); }
+  addBuff(id, turns = 5) { this.buffs[id] = clamp(this.buffs[id] + 1, -2, 2); this.buffTurns[id] = turns; }
+  addDebuff(id, turns = 5) { this.buffs[id] = clamp(this.buffs[id] - 1, -2, 2); this.buffTurns[id] = turns; }
+  removeBuff(id) { this.buffs[id] = 0; this.buffTurns[id] = 0; }
+  agilityForOrder() { return this.agi; }
+}
+
+export class ActorBattler extends Battler {
+  constructor(battle, actorId, record, index) {
+    super(battle, 'actor', battle.database.actors?.[actorId] || { name: `Actor ${actorId}` }, index);
+    this.actorId = actorId;
+    this.record = record;
+    const klass = battle.database.classes?.[Number(record.classId || this.source.classId)];
+    // XP keeps the stat curves and the experience table on the actor, not the class.
+    this.klass = this.source.expCurve && klass ? { ...klass, expCurve: this.source.expCurve } : klass;
+    this.states = (record.states || []).map(id => ({ id, turns: 0 }));
+    // A record that is "full" by its own stored maximum starts at the true maximum (equipment and traits included).
+    this.hp = record.hp === undefined || (record.maxHp !== undefined && record.hp >= record.maxHp && record.hp > 0) ? this.mhp : Math.min(Number(record.hp), this.mhp);
+    this.mp = record.mp === undefined || (record.maxMp !== undefined && record.mp >= record.maxMp) ? this.mmp : Math.min(Number(record.mp), this.mmp);
+    if (record.dead || this.hp <= 0) { this.hp = 0; if (!this.hasState(DEATH_STATE)) this.states.push({ id: DEATH_STATE, turns: 0 }); }
+  }
+  get level() { return Math.max(1, Number(this.record.level || this.source.initialLevel || 1)); }
+  traitObjects() { return [...super.traitObjects(), this.klass, ...this.equipItems()]; }
+  // Equipment by slot (1-based, the etype order): what the actor started with, overridden by the record's own
+  // `equips[slot] = { id, kind }` (Change Equipment events and the equip menu).
+  equipItems() {
+    const base = this.source.equips || [];
+    const overrides = this.record.equips || {};
+    const slots = Math.max(base.length, ...Object.keys(overrides).map(Number).filter(Number.isFinite));
+    const list = [];
+    for (let slot = 1; slot <= slots; slot++) {
+      const override = overrides[String(slot)];
+      const id = override ? Number(override.id) : Number(base[slot - 1] || 0);
+      const kind = override ? override.kind : (slot === 1 ? 'weapon' : 'armor');
+      if (id > 0) list.push((kind === 'weapon' ? this.db.weapons : this.db.armors)?.[id]);
+    }
+    return list.filter(Boolean);
+  }
+  paramBase(id) { return Number((this.source.params?.[id] || this.klass?.params?.[id])?.[this.level] ?? 0); }
+  paramPlus(id) { return this.equipItems().reduce((sum, item) => sum + Number(item.params?.[id] || 0), 0); }
+  skills() {
+    const learned = new Set([...(this.klass?.learnings || []).filter(entry => entry.level <= this.level).map(entry => entry.skillId), ...(this.record.skills || []), ...this.traits(43).map(trait => trait.dataId)]);
+    learned.delete(attackSkillId(this.db)); learned.delete(guardSkillId(this.db));
+    return [...learned].map(id => this.db.skills?.[id]).filter(skill => skill && skill.stypeId !== 0);
+  }
+}
+
+class EnemyBattler extends Battler {
+  constructor(battle, enemy, member, index) {
+    super(battle, 'enemy', enemy, index);
+    this.member = member;
+    this.appeared = member?.hidden !== true;
+    this.hp = this.mhp;
+    this.mp = this.mmp;
+    this.letter = '';
+  }
+  paramBase(id) { return Number(this.source.params?.[id] ?? 0); }
+  get level() { return 1; }
+}
+
+// The rules shared by battles and the menu screens: formula evaluation, hit/evade, damage and effects.
+export function createRules({ database, rng, variable, message, basic }) {
+  const warnedFormulas = new Set();
+  // Damage formulas are the project's own data (MV evals them too), but only a plain arithmetic subset is
+  // ever run: names, numbers, member access, operators, ternaries, calls like Math.max(...) and v[n].
+  const evalFormula = (formula, a, b) => {
+    const text = String(formula ?? '0');
+    if (!SAFE_FORMULA.test(text) || FORBIDDEN_FORMULA.test(text)) { console.warn(`MWGP battle: formula "${text}" is not a plain expression; treated as 0`); return 0; }
+    try {
+      const values = new Proxy({}, { get: (_, id) => Number(variable(String(id))) || 0 });
+      const value = new Function('a', 'b', 'v', '$gameVariables', 'Math', `return (${text});`)(a, b, values, { value: id => Number(variable(String(id))) || 0 }, Math);
+      return Number.isFinite(value) ? value : 0;
+    } catch { return 0; }
+  };
+  const isPhysical = item => Number(item.hitType) === 1;
+  const isMagical = item => Number(item.hitType) === 2;
+  const itemHit = (subject, item) => Number(item.successRate ?? 100) * 0.01 * (isPhysical(item) ? subject.hit : 1);
+  const itemEva = (target, item) => (isPhysical(item) ? target.eva : isMagical(item) ? target.mev : 0);
+
+  const damageFor = (subject, target, item) => {
+    const spec = item.damage || {};
+    if (!spec.type) return { value: 0, critical: false };
+    // A damage skill with no formula is computed by a plugin in some games (the engine would deal 0). The plugin
+    // damage engine is not run here, so MV's stock formulas stand in, loudly, rather than a battle nobody can win.
+    let formula = spec.formula;
+    const plain = text => SAFE_FORMULA.test(text) && !FORBIDDEN_FORMULA.test(text);
+    if ((!String(formula ?? '').trim() || !plain(String(formula))) && [1, 2, 5, 6].includes(Number(spec.type))) {
+      // Empty, or plugin code (`value = user.dmgFormula_x(target);`) rather than an expression: not run here.
+      const reason = String(formula ?? '').trim() ? 'is plugin code, not an expression' : 'has no damage formula (a plugin computes it)';
+      formula = isMagical(item) ? 'a.mat * 4 - b.mdf * 2' : 'a.atk * 4 - b.def * 2';
+      if (!warnedFormulas.has(item.name)) { warnedFormulas.add(item.name); console.warn(`MWGP battle: skill "${item.name}" ${reason}; using ${formula}`); }
+    }
+    // MV (Game_Action#evalDamageFormula): the formula is clamped at 0 and recovery types (3, 4) apply a -1 sign.
+    let value = Math.max(evalFormula(formula, subject, target), 0) * ([3, 4].includes(Number(spec.type)) ? -1 : 1);
+    if (value > 0) value *= isPhysical(item) ? target.pdr : isMagical(item) ? target.mdr : 1;
+    if (value < 0) value *= target.rec;
+    const elementId = Number(spec.elementId) < 0 ? (subject.isActor ? (subject.traits(31)[0]?.dataId ?? 0) : 0) : Number(spec.elementId);
+    value *= target.elementRate(elementId);
+    if (value > 0 && target.isGuarding) value /= 2 * target.grd;
+    let critical = false;
+    if (spec.critical && value > 0 && rng() < subject.cri * (1 - target.cev)) { value *= 3; critical = true; }
+    const variance = Number(spec.variance || 0);
+    if (variance > 0) {
+      const amp = Math.floor(Math.max(Math.abs(value) * variance / 100, 0));
+      const spread = Math.floor(rng() * (amp + 1)) + Math.floor(rng() * (amp + 1)) - amp;
+      value = value >= 0 ? value + spread : value - spread;
+    }
+    return { value: Math.round(value), critical };
+  };
+
+  const applyEffects = (subject, target, item, log) => {
+    for (const effect of item.effects || []) {
+      switch (effect.code) {
+        case 11: { const amount = Math.floor((target.mhp * effect.value1 + effect.value2) * target.rec * (subject.pha ?? 1)); if (amount) { target.gainHp(amount); log.push(format(message(target.isActor ? 'actorRecovery' : 'enemyRecovery'), target.name, basic(2), amount)); } break; }
+        case 12: { const amount = Math.floor((target.mmp * effect.value1 + effect.value2) * target.rec * (subject.pha ?? 1)); if (amount) { target.gainMp(amount); log.push(format(message(target.isActor ? 'actorRecovery' : 'enemyRecovery'), target.name, basic(4), amount)); } break; }
+        case 21: { const id = effect.dataId || 0; if (id > 0 && target.addState(id, effect.value1)) { const state = database.states?.[id]; log.push(`${target.name}${target.isActor ? state?.message1 || '' : state?.message2 || ''}`); } break; }
+        case 22: if (target.removeState(effect.dataId)) log.push(`${target.name}${database.states?.[effect.dataId]?.message4 || ''}`); break;
+        case 31: target.addBuff(effect.dataId, effect.value1 || 5); break;
+        case 32: target.addDebuff(effect.dataId, effect.value1 || 5); break;
+        case 33: case 34: target.removeBuff(effect.dataId); break;
+        case 41: if (!target.isActor) { target.escaped = true; log.push(format(message('escapeStart'), target.name)); } break;
+        case 43: if (target.isActor && !(target.record.skills || []).includes(effect.dataId)) { (target.record.skills ||= []).push(effect.dataId); log.push(format(message('obtainSkill'), database.skills?.[effect.dataId]?.name || '')); } break;
+        default: break;   // TP, grow, common event: not modelled
+      }
+    }
+  };
+  return { evalFormula, isPhysical, isMagical, itemHit, itemEva, damageFor, applyEffects };
+}
+
+// The engine's terms with English fallbacks: message(key) and basic(index).
+export function battleText(database) {
+  const terms = database.system?.terms || {};
+  return {
+    terms,
+    message: key => terms.messages?.[key] || DEFAULT_MESSAGES[key] || '',
+    basic: index => terms.basic?.[index] || ['Level', 'Lv', 'HP', 'HP', 'MP', 'MP', 'TP', 'TP'][index] || ''
+  };
+}
+
+// A paged menu over the dialogue seam: at most five entries at a time, then "next page" / "back" rows.
+// Resolves to the chosen entry, or null when backed out.
+export function createPicker(present, terms = {}) {
+  return async (text, entries, { back = true } = {}) => {
+    let page = 0;
+    for (;;) {
+      const per = 5, slice = entries.slice(page * per, page * per + per);
+      const choices = slice.map((entry, index) => ({ text: entry.label, value: page * per + index }));
+      if (entries.length > per) choices.push({ text: page * per + per < entries.length ? '▼' : '▲', value: 'page' });
+      if (back) choices.push({ text: terms.commands?.[22] || 'Cancel', value: 'back' });
+      const chosen = await present({ text, choices });
+      if (chosen === 'page') { page = (page + 1) % Math.ceil(entries.length / per); continue; }
+      if (chosen === 'back' || chosen === undefined || chosen === null) return null;
+      return entries[Number(chosen)];
+    }
+  };
+}
+
+export async function runBattle(options) {
+  const { database, troopId, party: partyIds, records, items = {}, present, rng = Math.random, variable = () => 0, canEscape = true, canLose = false, hooks = {} } = options;
+  const { terms, message, basic } = battleText(database);
+  const battle = { database, rng, variable, terms, items };
+  const troop = database.troops?.[troopId];
+  const actors = (partyIds || []).map((id, index) => new ActorBattler(battle, id, records[id] || (records[id] = { level: database.actors?.[id]?.initialLevel || 1, classId: database.actors?.[id]?.classId }), index));
+  const enemies = (troop?.members || []).map((member, index) => (database.enemies?.[member.enemyId] ? new EnemyBattler(battle, database.enemies[member.enemyId], member, index) : null)).filter(Boolean);
+  // "Slime A", "Slime B": duplicates get letters like the engine.
+  const counts = {};
+  for (const enemy of enemies) counts[enemy.source.name] = (counts[enemy.source.name] || 0) + 1;
+  const seen = {};
+  for (const enemy of enemies) if (counts[enemy.source.name] > 1) { seen[enemy.source.name] = (seen[enemy.source.name] || 0) + 1; enemy.letter = String.fromCharCode(64 + seen[enemy.source.name]); }
+  for (const enemy of enemies) Object.defineProperty(enemy, 'name', { get: () => (enemy.letter ? `${enemy.source.name} ${enemy.letter}` : enemy.source.name) });
+  const foes = battler => (battler.isActor ? enemies : actors);
+  const friends = battler => (battler.isActor ? actors : enemies);
+  let turn = 0;
+  await hooks.onSetup?.({ actors, enemies });
+
+  // ---- presentation helpers -----------------------------------------------------------------
+  const say = async lines => {
+    const list = (Array.isArray(lines) ? lines : [lines]).filter(Boolean);
+    for (let at = 0; at < list.length; at += 3) await present({ text: list.slice(at, at + 3).join('\n') });
+  };
+  const statusText = focus => {
+    const enemyLine = enemies.filter(enemy => enemy.appeared && !enemy.escaped).map(enemy => `${enemy.name} ${enemy.hp}/${enemy.mhp}`).join(' | ');
+    const actorLine = actors.map(actor => `${actor.name} ${basic(2)} ${actor.hp}/${actor.mhp}${actor.mmp ? ` ${basic(4)} ${actor.mp}/${actor.mmp}` : ''}${actor.dead ? ' †' : ''}${actor === focus ? ' ◀' : ''}`).join(' | ');
+    return `${enemyLine}\n${actorLine}`;
+  };
+  const pick = createPicker(present, terms);
+
+  // ---- targets ------------------------------------------------------------------------------
+  const scopeTargets = (subject, item, chosen) => {
+    const scope = Number(item.scope);
+    const opponents = foes(subject).filter(battler => battler.alive), allies = friends(subject).filter(battler => battler.alive);
+    switch (scope) {
+      case 1: return [chosen && chosen.alive ? chosen : opponents[0]].filter(Boolean);
+      case 2: return opponents;
+      case 3: case 4: case 5: case 6: return Array.from({ length: scope - 2 }, () => pickRandom(opponents)).filter(Boolean);
+      case 7: return [chosen && chosen.alive ? chosen : allies[0]].filter(Boolean);
+      case 8: return allies;
+      case 9: return [chosen && chosen.dead ? chosen : friends(subject).find(battler => battler.dead)].filter(Boolean);
+      case 10: return friends(subject).filter(battler => battler.dead);
+      case 11: return [subject];
+      default: return [];
+    }
+  };
+  const pickRandom = list => (list.length ? list[Math.floor(rng() * list.length)] : null);
+  const needsTarget = item => [1, 7, 9].includes(Number(item.scope));
+  const chooseTarget = async (subject, item) => {
+    const pool = Number(item.scope) === 1 ? foes(subject).filter(battler => battler.alive)
+      : Number(item.scope) === 9 ? friends(subject).filter(battler => battler.dead) : friends(subject).filter(battler => battler.alive);
+    if (pool.length <= 1) return pool[0] || null;
+    const entry = await pick(`${item.name}?`, pool.map(battler => ({ label: `${battler.name} ${battler.hp}/${battler.mhp}`, battler })));
+    return entry?.battler || null;
+  };
+
+  // ---- applying an action -------------------------------------------------------------------
+  const { evalFormula, isPhysical, isMagical, itemHit, itemEva, damageFor, applyEffects } = createRules({ database, rng, variable, message, basic });
+
+  const useItem = async (subject, item, chosenTarget, { consumeItem = false } = {}) => {
+    const log = [];
+    const isSkill = !consumeItem;
+    log.push(item.message1 ? format(item.message1, subject.name, item.name) : format(isSkill ? (terms.messages?.useSkill || '%1 uses %2!') : '%1 uses %2!', subject.name, item.name));
+    if (item.message2) log.push(format(item.message2, subject.name, item.name));
+    const targets = scopeTargets(subject, item, chosenTarget);
+    if (!targets.length) { if (Number(item.scope) !== 0) log.push(format(message('actionFailure'), subject.name)); await say(log.filter(line => line.trim() && line.trim() !== subject.name)); return; }
+    const repeats = Math.max(1, Number(item.repeats || 1));
+    for (let time = 0; time < repeats; time++) {
+      for (const target of targets) {
+        if (Number(item.scope) < 7 && !target.alive) continue;
+        const hit = rng() < itemHit(subject, item);
+        if (!hit || rng() < itemEva(target, item)) { log.push(format(message(target.isActor ? 'actorNoHit' : 'enemyNoHit'), target.name)); continue; }
+        const damage = damageFor(subject, target, item);
+        const type = Number(item.damage?.type || 0);
+        if (type) {
+          const value = damage.value;
+          if (damage.critical) log.push(message(target.isActor ? 'criticalToActor' : 'criticalToEnemy'));
+          if (type === 1 || type === 5) { target.gainHp(-value); if (type === 5) subject.gainHp(value); }
+          else if (type === 2 || type === 6) { target.gainMp(-value); if (type === 6) subject.gainMp(value); }
+          else if (type === 3) target.gainHp(-value);
+          else if (type === 4) target.gainMp(-value);
+          const shown = Math.abs(value);
+          const key = type === 3 || type === 4 ? (target.isActor ? 'actorRecovery' : 'enemyRecovery')
+            : value === 0 ? (target.isActor ? 'actorNoDamage' : 'enemyNoDamage')
+            : type === 5 || type === 6 ? (target.isActor ? 'actorDrain' : 'enemyDrain') : (target.isActor ? 'actorDamage' : 'enemyDamage');
+          const label = type === 2 || type === 4 || type === 6 ? basic(4) : basic(2);
+          log.push(format(message(key), target.name, shown, label));
+          if (type === 1 && value > 0 && target.hasState(guardStateId(database))) { /* guard state stays until the turn ends */ }
+          if (value > 0 && (type === 1 || type === 5)) for (const state of [...target.states]) { const def = database.states?.[state.id]; if (def?.removeByDamage && rng() * 100 < Number(def.chanceByDamage ?? 100)) target.removeState(state.id); }
+        }
+        applyEffects(subject, target, item, log);
+        if (target.dead && !target.hasState(DEATH_STATE)) target.addState(DEATH_STATE, 1);
+        if (target.dead) log.push(`${target.name}${target.isActor ? database.states?.[DEATH_STATE]?.message1 || ' collapses!' : database.states?.[DEATH_STATE]?.message2 || ' is defeated!'}`);
+      }
+    }
+    await say(log);
+  };
+
+  const payCost = (subject, skill) => { subject.mp -= Number(skill.mpCost || 0); };
+  const canPay = (subject, skill) => subject.mp >= Number(skill.mpCost || 0);
+
+  // ---- choosing actions ---------------------------------------------------------------------
+  const actorCommand = async actor => {
+    for (;;) {
+      const commands = [{ label: terms.commands?.[2] || 'Attack', kind: 'attack' }];
+      if (actor.skills().length) commands.push({ label: terms.commands?.[5] || 'Skill', kind: 'skill' });
+      commands.push({ label: terms.commands?.[3] || 'Guard', kind: 'guard' });
+      if (Object.values(items).some(count => count > 0)) commands.push({ label: terms.commands?.[4] || 'Item', kind: 'item' });
+      const command = await pick(`${statusText(actor)}\n${actor.name}?`, commands, { back: false });
+      if (!command) continue;
+      if (command.kind === 'guard') return { subject: actor, kind: 'guard', item: database.skills?.[guardSkillId(database)] };
+      if (command.kind === 'attack') { const target = await chooseTarget(actor, database.skills[attackSkillId(database)]); if (target) return { subject: actor, kind: 'skill', item: database.skills[attackSkillId(database)], target }; continue; }
+      if (command.kind === 'skill') {
+        const skill = await pick(`${actor.name}`, actor.skills().map(entry => ({ label: `${entry.name}${entry.mpCost ? ` (${entry.mpCost} ${basic(5)})` : ''}`, skill: entry })));
+        if (!skill) continue;
+        if (!canPay(actor, skill.skill)) { await say(`${actor.name}: ${basic(4)}?`); continue; }
+        const target = needsTarget(skill.skill) ? await chooseTarget(actor, skill.skill) : null;
+        if (needsTarget(skill.skill) && !target) continue;
+        return { subject: actor, kind: 'skill', item: skill.skill, target };
+      }
+      if (command.kind === 'item') {
+        const usable = Object.entries(items).filter(([id, count]) => count > 0 && database.items?.[id]?.occasion !== 3 && database.items?.[id]?.occasion !== 2).map(([id]) => ({ label: `${database.items[id].name} ×${items[id]}`, id }));
+        const chosen = await pick(`${actor.name}`, usable);
+        if (!chosen) continue;
+        const item = database.items[chosen.id];
+        const target = needsTarget(item) ? await chooseTarget(actor, item) : null;
+        if (needsTarget(item) && !target) continue;
+        return { subject: actor, kind: 'item', item, itemId: chosen.id, target };
+      }
+    }
+  };
+
+  const enemyAction = enemy => {
+    const usable = (enemy.source.actions || []).filter(action => {
+      const skill = database.skills?.[action.skillId];
+      if (!skill || !canPay(enemy, skill)) return false;
+      const [p1, p2] = [Number(action.conditionParam1), Number(action.conditionParam2)];
+      switch (Number(action.conditionType)) {
+        case 1: return turn >= p1 && (p2 === 0 ? turn === p1 : (turn - p1) % p2 === 0);
+        case 2: { const rate = enemy.hp / enemy.mhp; return rate >= p1 && rate <= p2; }
+        case 3: { const rate = enemy.mmp > 0 ? enemy.mp / enemy.mmp : 0; return rate >= p1 && rate <= p2; }
+        case 4: return enemy.hasState(p1);
+        case 5: return Math.max(...actors.map(actor => actor.level)) >= p1;
+        case 6: return Boolean(variable(`switch:${p1}`));
+        default: return true;
+      }
+    });
+    if (!usable.length) return { subject: enemy, kind: 'skill', item: database.skills[attackSkillId(database)] };
+    const ratingMax = Math.max(...usable.map(action => Number(action.rating)));
+    const pool = usable.filter(action => Number(action.rating) > ratingMax - 3);
+    const total = pool.reduce((sum, action) => sum + Number(action.rating) - (ratingMax - 3), 0);
+    let roll = rng() * total;
+    for (const action of pool) { roll -= Number(action.rating) - (ratingMax - 3); if (roll <= 0) return { subject: enemy, kind: 'skill', item: database.skills[action.skillId] }; }
+    return { subject: enemy, kind: 'skill', item: database.skills[pool[0].skillId] };
+  };
+
+  const confusedTarget = (subject, action) => {
+    const restriction = subject.restriction;
+    if (restriction === 1) return pickRandom(foes(subject).filter(battler => battler.alive));
+    if (restriction === 3) return pickRandom(friends(subject).filter(battler => battler.alive));
+    return pickRandom([...actors, ...enemies].filter(battler => battler.alive && battler !== subject));
+  };
+
+  const speedOf = action => action.subject.agi + Math.floor(rng() * (5 + action.subject.agi / 4)) + Number(action.item?.speed || 0);
+
+  const executeAction = async action => {
+    const { subject } = action;
+    if (!subject.canMove) return;
+    if (action.kind === 'guard') { subject.guarding = true; subject.addState(guardStateId(database), 1); await say(format(terms.messages?.guard || '%1 guards.', subject.name)); return; }
+    let { item, target } = action;
+    if (subject.restriction > 0 && subject.restriction < 4) { item = database.skills[attackSkillId(database)]; target = confusedTarget(subject, action); }
+    if (!canPay(subject, item)) return;
+    if (action.kind === 'item' && !(items[action.itemId] > 0)) return;
+    if (action.kind === 'skill') payCost(subject, item);
+    if (action.kind === 'item') { if (item.consumable !== false) { items[action.itemId] -= 1; if (items[action.itemId] <= 0) delete items[action.itemId]; } }
+    if (target && !target.alive && Number(item.scope) === 1) target = pickRandom(foes(subject).filter(battler => battler.alive));
+    await useItem(subject, item, target, { consumeItem: action.kind === 'item' });
+  };
+
+  const endOfTurn = async () => {
+    const log = [];
+    for (const battler of [...actors, ...enemies]) {
+      if (!battler.alive) continue;
+      const hrg = battler.xparam(7), mrg = battler.xparam(8);
+      if (hrg) { const amount = Math.floor(battler.mhp * hrg); battler.gainHp(amount); if (amount < 0) log.push(format(message(battler.isActor ? 'actorDamage' : 'enemyDamage'), battler.name, -amount)); }
+      if (mrg) battler.gainMp(Math.floor(battler.mmp * mrg));
+      for (const state of [...battler.states]) {
+        const def = database.states?.[state.id];
+        if (def?.autoRemovalTiming === 2 || (def?.autoRemovalTiming === 1)) { state.turns -= 1; if (state.turns <= 0) { battler.removeState(state.id); if (def?.message4) log.push(`${battler.name}${def.message4}`); } }
+      }
+      battler.buffTurns.forEach((turns, id) => { if (turns > 0 && --battler.buffTurns[id] === 0) battler.buffs[id] = 0; });
+      battler.removeState(guardStateId(database));
+      battler.guarding = false;
+    }
+    await say(log);
+  };
+
+  const partyDown = () => actors.every(actor => actor.dead);
+  const troopDown = () => enemies.every(enemy => !enemy.appeared || enemy.dead || enemy.escaped);
+
+  // ---- write back / rewards -------------------------------------------------------------------
+  const writeBack = () => {
+    for (const actor of actors) {
+      const record = actor.record;
+      record.hp = actor.hp; record.mp = actor.mp; record.maxHp = actor.mhp; record.maxMp = actor.mmp; record.dead = actor.dead;
+      record.states = actor.states.map(state => state.id).filter(id => id !== guardStateId(database) && !database.states?.[id]?.removeAtBattleEnd);
+    }
+  };
+  const rewards = async () => {
+    const exp = enemies.reduce((sum, enemy) => sum + Number(enemy.source.exp || 0), 0);
+    const gold = enemies.reduce((sum, enemy) => sum + Number(enemy.source.gold || 0), 0);
+    const drops = [];
+    for (const enemy of enemies) for (const drop of enemy.source.dropItems || []) {
+      if (drop.kind > 0 && rng() * Number(drop.denominator || 1) < 1) drops.push({ kind: drop.kind, id: drop.dataId });
+    }
+    const log = [format(message('victory'), partyName()), ...(exp > 0 ? [format(message('obtainExp'), exp, terms.basic?.[8] || 'EXP')] : []), ...(gold > 0 ? [format(message('obtainGold'), gold).replace('\\G', terms.currencyUnit || database.system?.currencyUnit || 'G')] : [])];
+    for (const drop of drops) {
+      const table = drop.kind === 1 ? database.items : drop.kind === 2 ? database.weapons : database.armors;
+      log.push(format(message('obtainItem'), table?.[drop.id]?.name || `#${drop.id}`));
+      hooks.gainItem?.(drop.kind, drop.id, 1);
+    }
+    if (gold) hooks.gainGold?.(gold);
+    for (const actor of actors) {
+      const klass = actor.klass;
+      const before = actor.level;
+      const rate = actor.exr;
+      actor.record.exp = Number(actor.record.exp ?? expForLevel(klass, before)) + Math.round(exp * rate);
+      while (actor.level < Number(actor.source.maxLevel || 99) && actor.record.exp >= expForLevel(klass, actor.level + 1)) {
+        actor.record.level = actor.level + 1;
+        for (const learning of klass?.learnings || []) if (learning.level === actor.record.level && !(actor.record.skills || []).includes(learning.skillId)) { (actor.record.skills ||= []).push(learning.skillId); log.push(format(message('obtainSkill'), database.skills?.[learning.skillId]?.name || '')); }
+        actor.hp = Math.min(actor.hp, actor.mhp); actor.mp = Math.min(actor.mp, actor.mmp);
+        log.splice(log.length, 0, format(message('levelUp'), actor.name, basic(0), actor.record.level));
+      }
+    }
+    await say(log);
+    return { exp, gold, drops };
+  };
+  const partyName = () => format(message('partyName'), actors[0]?.name || '');
+
+  // ---- the battle -----------------------------------------------------------------------------
+  const visibleEnemies = enemies.filter(enemy => enemy.appeared);
+  if (!visibleEnemies.length || !actors.length) { hooks.onEnd?.({ actors, enemies }); return { outcome: 'lose', exp: 0, gold: 0, drops: [], error: !actors.length ? 'no party' : 'unknown troop' }; }
+  await hooks.onStart?.({ actors, enemies });
+  await say(format(message('emerge'), visibleEnemies[0].name + (visibleEnemies.length > 1 ? ` +${visibleEnemies.length - 1}` : '')));
+  let escapeRatio = 0.5 * (actors.reduce((sum, actor) => sum + actor.agi, 0) / actors.length) / Math.max(1, enemies.reduce((sum, enemy) => sum + enemy.agi, 0) / enemies.length);
+  let outcome = null;
+  for (let safety = 0; safety < 200 && !outcome; safety++) {
+    turn++;
+    // party command
+    const fight = await pick(`${statusText(null)}`, [{ label: terms.commands?.[0] || 'Fight', kind: 'fight' }, ...(canEscape ? [{ label: terms.commands?.[1] || 'Escape', kind: 'escape' }] : [])], { back: false });
+    if (fight?.kind === 'escape') {
+      await say(format(message('escapeStart'), partyName()));
+      if (rng() < escapeRatio) { outcome = 'escape'; break; }
+      escapeRatio += 0.1;
+      await say(message('escapeFailure'));
+    } else {
+      const queue = [];
+      for (const actor of actors) if (actor.canMove) queue.push(actor.restriction > 0 && actor.restriction < 4 ? { subject: actor, kind: 'skill', item: database.skills[attackSkillId(database)] } : await actorCommand(actor));
+      for (const enemy of enemies) if (enemy.alive && enemy.canMove) queue.push(enemyAction(enemy));
+      queue.sort((left, right) => (right.kind === 'guard') - (left.kind === 'guard') || speedOf(right) - speedOf(left));
+      for (const action of queue) {
+        if (partyDown() || troopDown()) break;
+        await executeAction(action);
+        hooks.onAction?.({ actors, enemies, turn });
+      }
+    }
+    if (partyDown()) { outcome = 'lose'; break; }
+    if (troopDown()) { outcome = 'win'; break; }
+    await endOfTurn();
+    await hooks.onTurn?.(turn, { actors, enemies });
+    if (partyDown()) { outcome = 'lose'; break; }
+    if (troopDown()) { outcome = 'win'; break; }
+  }
+  if (!outcome) console.warn('MWGP battle: 200 turns without a result; ending the battle as an escape');
+  outcome ||= 'escape';
+  let result = { exp: 0, gold: 0, drops: [] };
+  if (outcome === 'win') result = await rewards();
+  else if (outcome === 'lose') await say(format(message('defeat'), partyName()));
+  writeBack();
+  hooks.onEnd?.({ actors, enemies, outcome });
+  return { outcome, ...result, canLose };
+}
+
+const DEFAULT_MESSAGES = {
+  emerge: '%1 emerged!', victory: '%1 was victorious!', defeat: '%1 was defeated.', escapeStart: '%1 has started to escape!', escapeFailure: 'However, it was unable to escape!',
+  obtainExp: '%1 %2 received!', obtainGold: '%1\\G found!', obtainItem: '%1 found!', obtainSkill: '%1 learned!', levelUp: '%1 is now %2 %3!', partyName: '%1’s Party',
+  actionFailure: 'There was no effect on %1!', criticalToEnemy: 'An excellent hit!!', criticalToActor: 'A painful blow!!',
+  actorDamage: '%1 took %2 damage!', actorRecovery: '%1 recovered %2 %3!', actorDrain: '%1 was drained of %2 %3!', actorNoDamage: '%1 took no damage!', actorNoHit: 'Miss! %1 took no damage!',
+  enemyDamage: '%1 took %2 damage!', enemyRecovery: '%1 recovered %2 %3!', enemyDrain: '%1 was drained of %2 %3!', enemyNoDamage: '%1 took no damage!', enemyNoHit: 'Miss! %1 took no damage!'
+};

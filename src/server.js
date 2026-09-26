@@ -1,9 +1,31 @@
 import { createServer } from 'node:http';
 import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { basename, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
+import { gzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
+// Text responses (manifests, plugin/engine sources) are large and compress ~8x: gzip them for clients that
+// accept it, keeping the compressed copy per file version so the cost is paid once.
+const gzipped = new Map();
+async function sendFile(req, res, file, type) {
+  const fs = await import('node:fs/promises');
+  const stat = await fs.stat(file);
+  const headers = { 'content-type': type, 'cache-control': 'no-cache' };
+  if (/\bgzip\b/.test(String(req.headers['accept-encoding'] || '')) && stat.size > 4096 && /json|javascript|text/.test(type)) {
+    const key = `${file}:${stat.mtimeMs}:${stat.size}`;
+    if (!gzipped.has(key)) gzipped.set(key, promisify(gzip)(await fs.readFile(file)));
+    res.writeHead(200, { ...headers, 'content-encoding': 'gzip', vary: 'accept-encoding' });
+    return res.end(await gzipped.get(key));
+  }
+  res.writeHead(200, headers);
+  return res.end(await fs.readFile(file));
+}
+
+// Content types for decoded project assets (audio covers every RPG Maker generation's formats).
+const assetTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4', '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav', '.aac': 'audio/aac', '.flac': 'audio/flac', '.opus': 'audio/ogg', '.mid': 'audio/midi', '.wma': 'audio/x-ms-wma', '.sf2': 'audio/x-soundfont', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8' };
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const gamesRoot = join(root, 'RPGM_versions');
 const mwgpRoot = join(root, 'MWGP_versions');
@@ -78,9 +100,8 @@ const server = createServer(async (req, res) => {
       const assetFile = resolve(mwgpRoot, assetName, 'assets', assetPath);
       const assetBase = resolve(mwgpRoot, assetName, 'assets');
       if (!assetFile.startsWith(assetBase + sep) || !existsSync(assetFile)) return json(res, 404, { error: 'Asset not found' });
-      const type = assetFile.endsWith('.png') ? 'image/png' : assetFile.endsWith('.ogg') ? 'audio/ogg' : assetFile.endsWith('.m4a') ? 'audio/mp4' : 'application/octet-stream';
-      res.writeHead(200, { 'content-type': type });
-      return res.end(await import('node:fs/promises').then(fs => fs.readFile(assetFile)));
+      const type = assetTypes[extname(assetFile).toLowerCase()] || 'application/octet-stream';
+      return sendFile(req, res, assetFile, type);
     }
     const id = rest;
     const folder = listMwgp().find(item => item.id === id);
@@ -88,8 +109,7 @@ const server = createServer(async (req, res) => {
     const name = Buffer.from(id, 'base64url').toString('utf8');
     const manifest = join(mwgpRoot, name, 'mwgp.json');
     if (!existsSync(manifest)) return json(res, 404, { error: 'MWGP manifest not found' });
-    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    return res.end(await import('node:fs/promises').then(fs => fs.readFile(manifest)));
+    return sendFile(req, res, manifest, 'application/json; charset=utf-8');
   }
   if (url.pathname === '/api/launch' && req.method === 'POST') {
     let body = '';
@@ -98,22 +118,53 @@ const server = createServer(async (req, res) => {
     catch { return json(res, 400, { error: 'Invalid request' }); }
   }
   if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
+  if (url.pathname === '/fallback-core.js') {
+    res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'fallback-core.js'))));
+  }
   if (url.pathname === '/player-core.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
-    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'core.js'))));
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'player-core.js'))));
   }
-  if (url.pathname === '/pixi-core.js') {
+  if (url.pathname === '/audio-manager.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
-    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'pixi-core.js'))));
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'audio-manager.js'))));
+  }
+  if (url.pathname === '/soundfont.sf2') {
+    // Optional shared General MIDI SoundFont: only entries of soundfonts/vetted.json (licence and
+    // ownership checked, see soundfonts/README.md). Games that ship their own are served from
+    // their converted assets instead.
+    const dir = join(root, 'soundfonts');
+    let file = null;
+    try {
+      const vetted = JSON.parse(await import('node:fs/promises').then(fs => fs.readFile(join(dir, 'vetted.json'), 'utf8')));
+      file = (vetted.fonts || []).map(entry => entry.file).find(name => typeof name === 'string' && basename(name) === name && existsSync(join(dir, name)));
+    } catch { /* no vetted list */ }
+    if (!file) return json(res, 404, { error: 'No vetted shared SoundFont installed' });
+    res.writeHead(200, { 'content-type': 'audio/x-soundfont' });
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(dir, file))));
+  }
+  if (url.pathname === '/rgss-classes.js') {
+    res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'rgss-classes.js'))));
   }
   if (url.pathname === '/rgss-script.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
     return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'rgss-script.js'))));
   }
+  // Any other module of the player (imported relatively by player-core.js / rgss-script.js): src/player/<name>.js.
+  if (/^\/[a-z0-9_-]+\.js$/i.test(url.pathname) && existsSync(join(root, 'src', 'player', url.pathname.slice(1)))) {
+    res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', url.pathname.slice(1)))));
+  }
   if (url.pathname === '/mwg.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
     return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'node_modules', '@datamoc', 'mw_games', 'dist', 'mw_games.global.js'))));
   }
+  // Browsers request a favicon even when the page does not declare one.
+  // Return an explicit empty response so console diagnostics contain only
+  // actual launcher/player failures.
+  if (url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
   const requested = url.pathname === '/' ? '/index.html' : url.pathname;
   const file = resolve(publicRoot, `.${requested}`);
   if (!file.startsWith(publicRoot + sep) || !existsSync(file)) return json(res, 404, { error: 'Not found' });

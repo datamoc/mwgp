@@ -10,7 +10,7 @@
 // - Anything else is skipped with a reason.
 //
 // Usage: npm run convert:auto -- <source dir> <output dir> [--skip-existing]
-import { readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { readdirSync, existsSync, mkdirSync, cpSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -54,6 +54,16 @@ async function convert(name) {
     const extracted = join(tmpdir(), `mwgp-extract-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
     await invoke('extract-rgssad.js', [join(from, 'Game.rgssad'), extracted]);
     try {
+      // Essentials projects commonly keep Audio/ beside Game.rgssad instead of
+      // inside the archive. Preserve it in the temporary extracted project so
+      // convert-rgss can expose it to the browser player.
+      if (existsSync(join(from, 'Audio'))) {
+        cpSync(join(from, 'Audio'), join(extracted, 'Audio'), { recursive: true, force: true });
+      }
+      // Loose folders the game reads at run time next to the archive (bitmap fonts and their descriptors).
+      for (const folder of ['Fonts']) if (existsSync(join(from, folder)) && !existsSync(join(extracted, folder))) cpSync(join(from, folder), join(extracted, folder), { recursive: true, force: true });
+      // A project's own SoundFont (Essentials ships soundfont.sf2 beside the executable) plays its MIDI.
+      for (const file of readdirSync(from).filter(name => /\.sf2$/i.test(name))) cpSync(join(from, file), join(extracted, file), { force: true });
       const log = await invoke('convert-rgss.js', [extracted, to]);
       return { name, status: 'converted', kind: 'rgss', log };
     } finally {

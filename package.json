@@ -14,9 +14,13 @@
     "extract:rgssad": "node tools/extract-rgssad.js",
     "transpile:rgss": "node tools/transpile-rgss-scripts.mjs",
     "bundle:rgss": "node tools/bundle-rgss-scripts.mjs",
+    "rgss:api": "node tools/rgss-api-dump.mjs",
+    "rgss:coverage": "node tools/rgss-coverage.mjs",
     "test": "node tools/test-smoke.mjs"
   },
   "dependencies": {
-    "@datamoc/mw_games": "^0.16.0"
+    "@datamoc/mw_games": "^0.19.0",
+    "acorn": "^8.18.0",
+    "acorn-walk": "^8.3.5"
   }
 }
