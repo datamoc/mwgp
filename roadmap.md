@@ -110,6 +110,19 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
 
 ## Recent (coord-tracked)
 
+- **T172 — Walkable pond (human report, faithful).** No code change: the map-2 pond is flagged
+  passable+bush in the project's own tileset, so the shipped `checkPassage` walks it too — verified
+  cell-for-cell against our `passageAllowsStep`. Logged in `docs/play-checklist.md`.
+- **T157 — Elementals tutorial hand-check (done).** Human playthrough at human pace: no stall
+  anywhere in the opening (tutorial texts, +5G step, "List other Controls" loop, map 1 → map 2
+  transfer); chest +40G applied; gold reads correctly in the menu (Esc), absent from the map as in
+  MV. The scripted-run stalls were bot-pacing artifacts. Logged in `docs/play-checklist.md`.
+- **T170 — MWG improvement bilan (done).** `4MWG/` refreshed against 0.19.0: §18 still open
+  (null-texture `_updateGpuText`, deterministic confirm-spam repro stands), new §19 asks for a loud
+  unknown-command hook in `EventRunner.step()` (found via T127: unknown keys fall through silent),
+  §20 refreshes the adoption backlog (portrait seam, MoveRouteRunner, World swap, per-kind bus
+  volume — all still adapter-side, verified in `player-core.js`), §21 proposes adopting 0.19.0's
+  SoundFont subsetting at convert time. Notes-only, no code touched.
 - **T158 — Browser harness prints every note (done).** One-line fix in `tools/test-browser.mjs`: the
   PASS summary loop no longer truncates `result.notes` to the first 2, so battle/audio lines are visible
   again (the per-note 160-char cap stays). Verified live (`--only Elementals`, audio/battle/menu probes
