@@ -41,6 +41,16 @@ function calleeKind(callee) {
   }
   return 'member';
 }
+// The class a member call goes through, when it is named outright: `this.f()`
+// inside class X is X, `X.f()` is X; anything else (bare calls, computed or
+// compound receivers) has no attributable class.
+function callReceiver(callee, kind, thisCls) {
+  if (kind === 'this') return thisCls || null;
+  let at = callee;
+  while (at.type === 'MemberExpression' && !at.computed && (at.property.name === 'call' || at.property.name === 'apply') && at.object) at = at.object;
+  if (at.type === 'MemberExpression' && !at.computed && at.object.type === 'Identifier') return at.object.name;
+  return null;
+}
 const blockingCall = callee => callee.type === 'MemberExpression' && !callee.computed && callee.object.type === 'Identifier' && callee.property.type === 'Identifier' && BLOCKING.has(`${callee.object.name}.${callee.property.name}`);
 
 // Walk `root` without entering nested functions, calling `visit(node, parent)` for every node.
@@ -62,6 +72,7 @@ function walkShallow(root, visit) {
 // Every function-like node with the name it is known by and how to mark it async.
 function collectFunctions(ast) {
   const found = [];
+  const parents = new Map();
   const visit = (node, parent) => {
     if (isFunction(node)) {
       let name = null, kind = 'plain', insertAt = node.start, skip = false;
@@ -85,6 +96,7 @@ function collectFunctions(ast) {
   while (stack.length) {
     const [node, parent] = stack.pop();
     if (!node || typeof node.type !== 'string') continue;
+    if (parent) parents.set(node, parent);
     visit(node, parent);
     for (const key of Object.keys(node)) {
       const value = node[key];
@@ -92,6 +104,27 @@ function collectFunctions(ast) {
       else if (value && typeof value.type === 'string') stack.push([value, node]);
     }
   }
+  // The class a definition belongs to, when it is textually clear: inside
+  // `class X`, or the value of `X.foo = ...` / `X.prototype.foo = ...`.
+  // A `this.foo = ...` assignment is skipped (the receiver is dynamic) so an
+  // outer class or path assignment still applies.
+  const clsOf = fnNode => {
+    let child = fnNode;
+    let node = parents.get(child);
+    while (node) {
+      if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && node.id?.type === 'Identifier') return node.id.name;
+      if (node.type === 'AssignmentExpression' && child === node.right) {
+        let root = node.left;
+        if (root?.type === 'MemberExpression' && !root.computed && root.property.type === 'Identifier' && root.property.name === 'prototype') root = root.object;
+        if (root?.type === 'MemberExpression' || root?.type === 'ThisExpression') { child = node; node = parents.get(node); continue; }
+        if (root?.type === 'Identifier') return root.name;
+      }
+      child = node;
+      node = parents.get(node);
+    }
+    return null;
+  };
+  for (const fn of found) fn.cls = clsOf(fn.node);
   return found;
 }
 
@@ -100,33 +133,54 @@ function asyncNamesOf(parsed) {
   // The analysis is by name, and a name like `get` or `update` is defined in many unrelated classes. So a name is:
   //  * async  (`all`): some definition of it waits on frames, directly or through a call it awaits;
   //  * strong (`strong`): EVERY definition of it is async. Only strong names are awaited through `obj.name()` calls (the class
-  //    behind `obj` is unknown); any async name is awaited through a bare `name()` or `this.name()` call.
+  //    behind `obj` is unknown); any async name is awaited through a bare `name()` call.
+  //  * keyed (`keyedStrong`): every definition ATTRIBUTED TO one class is async (`TrainerBattle.generate_foes` while a
+  //    same-named `WildBattle.generate_foes` stays sync). A call through that class name awaits; anything else falls
+  //    back to the global rule.
   const all = new Set(ASYNC_BUILTINS), strong = new Set(ASYNC_BUILTINS);
+  const keyedStrong = new Set();
   const bodies = [];
   const totals = new Map();
+  const keyedTotals = new Map();
+  const keyOf = fn => fn.name && `${fn.cls || ''}.${fn.name}`;
   for (const entry of parsed) {
     for (const fn of entry.functions) {
       if (fn.skip) continue;
       const calls = [];
-      walkShallow(fn.node.body, (node) => { if (node.type === 'CallExpression') calls.push({ blocking: blockingCall(node.callee), name: calleeName(node.callee), kind: calleeKind(node.callee) }); });
+      walkShallow(fn.node.body, (node) => {
+        if (node.type !== 'CallExpression') return;
+        const kind = calleeKind(node.callee);
+        calls.push({ blocking: blockingCall(node.callee), name: calleeName(node.callee), kind, recv: callReceiver(node.callee, kind, fn.cls) });
+      });
       bodies.push({ fn, calls, async: false });
-      if (fn.name) totals.set(fn.name, (totals.get(fn.name) || 0) + 1);
+      if (fn.name) {
+        totals.set(fn.name, (totals.get(fn.name) || 0) + 1);
+        const key = keyOf(fn);
+        keyedTotals.set(key, (keyedTotals.get(key) || 0) + 1);
+      }
     }
   }
   // Only a bare `name()` call is unambiguously "the" global function of that name; `this.name()` and `obj.name()` could
-  // both reach any class that defines `name`, so both require every definition to agree (`strong`), not just one.
-  const qualifies = call => call.name && all.has(call.name) && (call.kind === 'bare' || strong.has(call.name));
+  // both reach any class that defines `name`, so both require every definition to agree (`strong`), not just one — or,
+  // when the receiver names the class outright, every definition attributed to that class (`keyedStrong`).
+  const qualifies = call => call.name && all.has(call.name) && (call.kind === 'bare' || strong.has(call.name) || (call.recv != null && keyedStrong.has(`${call.recv}.${call.name}`)));
   let changed = true;
   while (changed) {
     changed = false;
     const asyncCounts = new Map();
+    const keyedAsync = new Map();
     for (const body of bodies) {
       if (!body.async && body.calls.some(call => call.blocking || qualifies(call))) { body.async = true; changed = true; if (body.fn.name) all.add(body.fn.name); }
-      if (body.async && body.fn.name) asyncCounts.set(body.fn.name, (asyncCounts.get(body.fn.name) || 0) + 1);
+      if (body.async && body.fn.name) {
+        asyncCounts.set(body.fn.name, (asyncCounts.get(body.fn.name) || 0) + 1);
+        const key = keyOf(body.fn);
+        keyedAsync.set(key, (keyedAsync.get(key) || 0) + 1);
+      }
     }
     for (const [name, count] of asyncCounts) if (count === totals.get(name) && !strong.has(name)) { strong.add(name); changed = true; }
+    for (const [key, count] of keyedAsync) if (count === keyedTotals.get(key) && !keyedStrong.has(key)) { keyedStrong.add(key); changed = true; }
   }
-  return { all, strong };
+  return { all, strong, keyedStrong };
 }
 
 // Edits for one parsed source: `async` on every function that awaits, `(await ...)` around every call to an async name.
@@ -138,7 +192,10 @@ function editsFor(entry, names, report) {
     const name = calleeName(node.callee);
     if (blockingCall(node.callee)) return true;
     if (!name || !names.all.has(name)) return false;
-    return calleeKind(node.callee) === 'bare' || names.strong.has(name);
+    const kind = calleeKind(node.callee);
+    if (kind === 'bare' || names.strong.has(name)) return true;
+    const recv = callReceiver(node.callee, kind, inFunction?.cls);
+    return recv != null && names.keyedStrong?.has(`${recv}.${name}`);
   };
   const handle = (bodyRoot, fn) => {
     const calls = [];
@@ -256,6 +313,77 @@ function optionalReadEdits(ast, known) {
     }
   };
   visit(ast, null);
+  return edits;
+}
+
+// Ruby2JS lowers every `.call` to a direct invocation (`proc.call(x)` ->
+// `proc(x)`): right for procs, wrong for a game class/module's own `call`
+// method (`MultipleForms.call("getForm", pkmn)` -> `MultipleForms(...)`,
+// uncallable). Restore the method call for consts the indexer saw defined as
+// a class/module (never proc variables or proc-holding constants).
+function moduleCallEdits(ast, callModules) {
+  const edits = [];
+  if (!callModules?.size) return edits;
+  const visit = node => {
+    if (!node || typeof node.type !== 'string') return;
+    // No shadowing guard: Ruby reserves uppercase identifiers for constants,
+    // so a bare `Name(...)` is always the module (a same-name local or
+    // parameter cannot exist), including the module's own later references.
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && callModules.has(node.callee.name)) {
+      edits.push({ pos: node.callee.end, text: '.call' });
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value.type === 'string') visit(value); }
+  };
+  visit(ast);
+  return edits;
+}
+
+// Ruby2JS qualifies a bare constant with its lexical path (`NAME_SHADOW_COLOR`
+// -> `Battle.Scene.PokemonDataBox.NAME_SHADOW_COLOR`). Inside the class's own
+// static initializers that path is a temporal dead zone: the class is still
+// being defined (and a reopened part would read a half-built one). Such a
+// self-path means `this` there, which static initializers bind to the class.
+function selfStaticEdits(ast, js) {
+  const edits = [];
+  const pathOf = node => {
+    const parts = [];
+    let current = node;
+    while (current?.type === 'MemberExpression' && !current.computed && current.property.type === 'Identifier') { parts.unshift(current.property.name); current = current.object; }
+    if (current?.type !== 'Identifier') return null;
+    parts.unshift(current.name);
+    return parts.join('.');
+  };
+  const rewrite = (node, target) => {
+    if (!node || typeof node.type !== 'string') return;
+    // `this` is dynamic inside nested functions and belongs to an inner class
+    // inside a nested one: only plain code in the static initializer itself.
+    if (node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression' || node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration' || node.type === 'ClassExpression') return;
+    if (node.type === 'MemberExpression' && !node.computed && node.object.type !== 'ThisExpression') {
+      const full = pathOf(node);
+      if (full === target || full?.startsWith(target + '.')) {
+        let prefix = node;
+        const depth = target.split('.').length;
+        for (let level = full.split('.').length; level > depth; level--) prefix = prefix.object;
+        edits.push({ pos: node.start, del: prefix.end - node.start, text: 'this' });
+        return;
+      }
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) value.forEach(child => rewrite(child, target)); else if (value && typeof value.type === 'string') rewrite(value, target); }
+  };
+  const visit = node => {
+    if (!node || typeof node.type !== 'string') return;
+    // Class fields arrive as PropertyDefinition nodes (static blocks as StaticBlock).
+    const staticsOf = body => body.filter(member => (member.type === 'PropertyDefinition' && member.static) || member.type === 'StaticBlock');
+    if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression' && node.right.type === 'ClassExpression') {
+      const target = pathOf(node.left);
+      if (target) for (const member of staticsOf(node.right.body.body)) rewrite(member.value || member, target);
+    }
+    if (node.type === 'ClassDeclaration' && node.id) {
+      for (const member of staticsOf(node.body.body)) rewrite(member.value || member, node.id.name);
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value.type === 'string') visit(value); }
+  };
+  visit(ast);
   return edits;
 }
 
@@ -424,6 +552,27 @@ function moduleSelfEdits(ast, js) {
       }
       // The export IS the shared self (getters kept).
       edits.push({ pos: last.argument.start, text: 'Object.defineProperties(__self, Object.getOwnPropertyDescriptors(' }, { pos: last.argument.end, text: '))' });
+      // The export must also carry every function the module defines: Ruby's
+      // `extend` gives the class ALL of the module's methods, but the returned
+      // object only lists some (zero-argument defs arrive as getters, and only
+      // some survive). A missing `each` — or a `get exists()` that throws when
+      // called — breaks the extending class loudly at run time. Append the
+      // missing names as shorthand methods; a shorthand after a getter wins
+      // over it, and duplicates of an already-listed name are the same
+      // function and stay harmless. Never export `constructor` (it would
+      // clobber the per-module fake above) or `__proto__` (a shorthand for it
+      // mutates the prototype instead of defining a property).
+      if (last.argument.type === 'ObjectExpression') {
+        const exported = new Set();
+        for (const prop of last.argument.properties) {
+          if (prop.type === 'Property' && !prop.computed && prop.key.type === 'Identifier' && prop.kind === 'init') exported.add(prop.key.name);
+        }
+        const missing = [...functions.keys()].filter(name => !exported.has(name) && name !== 'constructor' && name !== '__proto__');
+        if (missing.length) {
+          const prefix = last.argument.properties.length ? ', ' : '';
+          edits.push({ pos: last.argument.end - 1, text: `${prefix}${missing.join(', ')}` });
+        }
+      }
       // Sibling calls inside the module's functions carry `this`.
       for (const fn of functions.values()) {
         const stack = [fn.body];
@@ -537,13 +686,13 @@ function selfEachEdits(ast, js) {
   return edits;
 }
 
-export function lowerRuby(js, known = null, zeroArg = null) {
+export function lowerRuby(js, known = null, zeroArg = null, callModules = null) {
   js = repairCallAssignments(js);
   // `::Sprite` (a top-level constant, from inside a namespace) is emitted as `Function("return this")().Sprite`: the runtime's own globals.
   js = js.split('Function("return this")()').join('__global');
   let ast;
   try { ast = parse(js); } catch { return js; }
-  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js), ...selfEachEdits(ast, js)];
+  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...moduleCallEdits(ast, callModules), ...selfStaticEdits(ast, js), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js), ...selfEachEdits(ast, js)];
   const stack = [ast];
   while (stack.length) {
     const node = stack.pop();
@@ -689,7 +838,7 @@ export const lowerModulo = lowerRuby;
 
 // units: { name: js }, snippets: [{ js }] (statement lists run as a function body).
 // Returns { units, snippets: [{ js, async }], names, report } with every source rewritten where it blocks.
-export function liftBlocking(units, snippets, { knownMethods = null } = {}) {
+export function liftBlocking(units, snippets, { knownMethods = null, callModules = null } = {}) {
   const known = knownMethods ? new Set(knownMethods) : null;
   // Zero-parameter top-level library functions (`function pbInBugContest() {`), by name.
   const zeroArg = new Set();
@@ -700,8 +849,8 @@ export function liftBlocking(units, snippets, { knownMethods = null } = {}) {
     try { const ast = parse(js); parsed.push({ kind, key, js, ast, functions: collectFunctions(ast) }); }
     catch (error) { report.unparsed.push(`${kind}:${key}`); }
   };
-  units = Object.fromEntries(Object.entries(units).map(([name, js]) => [name, lowerRuby(js, known, zeroArg)]));
-  snippets = snippets.map(snippet => ({ ...snippet, js: lowerRuby(snippet.js, known, zeroArg) }));
+  units = Object.fromEntries(Object.entries(units).map(([name, js]) => [name, lowerRuby(js, known, zeroArg, callModules)]));
+  snippets = snippets.map(snippet => ({ ...snippet, js: lowerRuby(snippet.js, known, zeroArg, callModules) }));
   for (const [name, js] of Object.entries(units)) parseAll('unit', name, js);
   snippets.forEach((snippet, index) => parseAll('snippet', index, snippet.js));
   const names = asyncNamesOf(parsed);
@@ -714,3 +863,4 @@ export function liftBlocking(units, snippets, { knownMethods = null } = {}) {
   }
   return { units: outUnits, snippets: outSnippets, names: [...names.all].sort(), strongNames: [...names.strong].sort(), report };
 }
+

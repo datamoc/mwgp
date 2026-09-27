@@ -26,7 +26,7 @@ import Functions from '../transpilers/ruby2js-master/demo/selfhost/filters/funct
 import Combiner from '../transpilers/ruby2js-master/demo/selfhost/filters/combiner.js';
 import Return from '../transpilers/ruby2js-master/demo/selfhost/filters/return.js';
 import * as acorn from 'acorn';
-import { RgssCalls, setKnownMethods, addKnownMethods, setSelfMethods, collectDefNames } from './rgss-call-filter.mjs';
+import { RgssCalls, setKnownMethods, addKnownMethods, setSelfMethods, collectDefNames, collectAttrNames } from './rgss-call-filter.mjs';
 import { resolveInitializeAliases } from './rgss-initialize-alias.mjs';
 import { repairCallAssignments } from './rgss-repair.mjs';
 
@@ -97,15 +97,15 @@ function bootRegistration(node, bytes) {
 }
 
 // A top-level registration on a handler registry (`MenuHandlers.add(:pause_menu, :pokedex, {...})`,
-// `ItemHandlers::UseOnPokemon.add(...)`, `GameData::TerrainTag.register(...)`): plain arguments (hashes of procs), no DSL. Kept as
+// `ItemHandlers::UseOnPokemon.add(...)`, `GameData::TerrainTag.register(...)`, `MultipleForms.register(...)`): plain arguments (hashes of procs), no DSL. Kept as
 // an ordered "boot statement" so the registries are filled when the game starts, as they are when Ruby loads the scripts.
 const constPath = node => (node?.type === 'const' ? `${node.children[0] ? `${constPath(node.children[0])}::` : ''}${node.children[1]}` : null);
-function bootStatement(node, bytes) {
+function bootStatement(node, bytes, typeConsts = null) {
   const call = node.type === 'block' ? node.children[0] : node;
   if (call?.type !== 'send') return null;
   const receiver = constPath(call.children[0]);
-  if (!receiver || !['add', 'register'].includes(String(call.children[1]))) return null;
-  if (!receiver.endsWith('Handlers') && !receiver.startsWith('GameData::')) return null;
+  if (!receiver || !['add', 'addIf', 'register', 'registerIf', 'copy'].includes(String(call.children[1]))) return null;
+  if (!receiver.endsWith('Handlers') && !receiver.startsWith('GameData::') && !(typeConsts?.has(receiver) || typeConsts?.has(receiver.split('::')[0]))) return null;
   const location = node.location ?? node.loc;
   return { text: bytes.subarray(location._start_offset, location._end_offset).toString('utf8') };
 }
@@ -115,11 +115,13 @@ export function indexScripts(scripts, log = () => {}) {
   const bootStatementNames = [];
   const units = new Map(); // name -> { kind, pieces: [{ script, text }], sends, consts, methods }
   const allDefNames = new Set();
+  const typeConsts = new Set(); // every class/module const the game defines (not proc-holding casgn consts)
   for (const script of scripts) {
     let ast;
     try { [ast] = parse(script.source, script.name); }
     catch (error) { log(`index: skipping "${script.name}" (${String(error.message).split('\n')[0].slice(0, 80)})`); continue; }
     collectDefNames(ast, allDefNames);
+    collectAttrNames(ast, allDefNames);
     const bytes = Buffer.from(script.source, 'utf8');
     const record = (name, kind, node, methods = new Set(), replacement = null) => {
       const location = node.location ?? node.loc;
@@ -133,13 +135,17 @@ export function indexScripts(scripts, log = () => {}) {
       units.set(name, unit);
     };
     for (const node of bodyOf(ast)) {
+      if ((node.type === 'class' || node.type === 'module') && constPath(node.children[0])) typeConsts.add(constPath(node.children[0]));
       // `SaveData.register(:player) do save_value { ... }; load_value { |v| ... }; new_game_value { ... } end`: a save-data
       // registration written in Ruby's instance_eval DSL, which Ruby2JS cannot express. Kept as a "boot" unit: a hash of
       // lambdas the runtime applies at startup (see `bootState` in rgss-script.js).
-      const statement = bootStatement(node, bytes);
-      if (statement) { const name = `BootStatement_${bootStatementNames.length}`; record(name, 'const', node, new Set(), statement.text); bootStatementNames.push(name); continue; }
+      // The save-data DSL matcher goes first: a `SaveData.register(...) do ... end`
+      // block also matches the registry-statement shape below (a `register`
+      // send on a game module), but only the DSL form rebuilds the value.
       const boot = bootRegistration(node, bytes);
       if (boot) { record(boot.name, 'const', boot.node, new Set(), boot.text); boot.id && bootNames.push(boot.name); continue; }
+      const statement = bootStatement(node, bytes, typeConsts);
+      if (statement) { const name = `BootStatement_${bootStatementNames.length}`; record(name, 'const', node, new Set(), statement.text); bootStatementNames.push(name); continue; }
       if ((node.type === 'module' || node.type === 'class') && GLOBAL_SCOPES.includes(constRoot(node.children[0])) && node.children[0].children[0] == null) {
         for (const member of bodyOf(node.children[node.type === 'class' ? 2 : 1])) if (member.type === 'def') record(String(member.children[0]), 'def', member);
         continue;
@@ -153,13 +159,20 @@ export function indexScripts(scripts, log = () => {}) {
       // the class are calls on `this`.
       const methods = new Set();
       if (node.type === 'class' && node.children[0].children[0] == null) {
-        for (const member of bodyOf(node.children[2])) if (member.type === 'def') methods.add(String(member.children[0]));
+        for (const member of bodyOf(node.children[2])) {
+          if (member.type === 'def') methods.add(String(member.children[0]));
+          else if (member.type === 'send' && (member.children[1] === 'attr_reader' || member.children[1] === 'attr_accessor')) {
+            for (const arg of member.children.slice(2)) {
+              if (arg?.type === 'sym' && typeof arg.children[0] === 'string') methods.add(arg.children[0]);
+            }
+          }
+        }
       }
       record(name, kind, node, methods);
     }
   }
   const interpreter = INTERPRETER_CLASSES.find(name => units.get(name)?.kind === 'const' && units.get(name).methods.size) || null;
-  return { units, allDefNames, bootNames, bootStatementNames, interpreter, interpreterMethods: interpreter ? units.get(interpreter).methods : new Set() };
+  return { units, allDefNames, typeConsts, bootNames, bootStatementNames, interpreter, interpreterMethods: interpreter ? units.get(interpreter).methods : new Set() };
 }
 
 // Names event snippets reach: units they reference directly, plus the interpreter
@@ -203,6 +216,64 @@ export const nilSafeToString = js => js.replace(/(?<![\w$.)\]])([A-Za-z_$][\w$]*
 // class body is a call on `self` even when the method is inherited (`refresh` in a Window subclass).
 let methodOnlyNames = new Set();
 export function setMethodOnlyNames(names) { methodOnlyNames = new Set(names || []); }
+
+// The Functions filter lowers `rec.respond_to?("lit")` (or `:sym`) to
+// `"lit" in rec`, which throws when rec is a primitive. Ruby's respond_to? is
+// total, so route literal checks through the nil-safe `__respond_to`
+// runtime helper. The receiver is found by scanning back over identifier
+// runs, member dots, balanced brackets and string literals; anything else
+// (operators, statement starts) ends it, and an empty receiver is left alone.
+// A leading `&.` is dropped: the helper is nil-safe, so the guard is implied.
+export function rewriteLiteralRespondTo(source) {
+  const pattern = /\.respond_to\?\s*\(\s*(?::(\w+)|"((?:[^"\\]|\\.)*)")\s*\)/g;
+  let out = '';
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const end = match.index;
+    let j = end - 1;
+    if (source[j] === '&') j--;
+    const closers = { ')': '(', ']': '[', '}': '{' };
+    const skipString = () => {
+      const quote = source[j];
+      j--;
+      while (j >= 0 && (source[j] !== quote || source[j - 1] === '\\')) j--;
+      return j >= 0;
+    };
+    let ok = true;
+    while (j >= 0) {
+      const char = source[j];
+      // No `!`: a leading negation (`!owner.respond_to?`) ends the receiver
+      // and stays outside the helper; a trailing `!`/`?` is a method suffix.
+      if (/[\w$@?]/.test(char) || char === '.' || ((char === '!' || char === '?') && j === end - 2)) { j--; continue; }
+      if (char === '"' || char === "'") { if (!skipString()) { ok = false; break; } j--; continue; }
+      if (char === ')' || char === ']' || char === '}') {
+        const opener = closers[char];
+        let depth = 1;
+        j--;
+        while (j >= 0 && depth) {
+          const inner = source[j];
+          if (inner === '"' || inner === "'") { if (!skipString()) break; }
+          else if (inner === char) depth++;
+          else if (inner === opener) depth--;
+          j--;
+        }
+        if (depth) { ok = false; break; }
+        continue;
+      }
+      break;
+    }
+    let rec = source.slice(j + 1, end);
+    // Safe navigation (`y&.respond_to?`): the `&` stays out; the helper is
+    // nil-safe, so the guard is implied.
+    if (rec.startsWith('&')) rec = rec.slice(1);
+    if (rec.endsWith('&')) rec = rec.slice(0, -1);
+    if (!ok || !rec || rec.endsWith('.') || /[^\w$@?!.[\](){}'",: ]/.test(rec)) continue;
+    out += source.slice(last, j + 1) + `__respond_to(${rec}, "${match[1] ?? match[2]}")`;
+    last = pattern.lastIndex;
+  }
+  return out + source.slice(last);
+}
 
 // A patch script redefining a helper (`def pbExclaim` twice across pieces) reaches
 // JS as duplicate top-level `function NAME` declarations. Bare they validate, but
@@ -249,13 +320,40 @@ export function transpileUnit(unit) {
   // Safe-navigation assignment (`object&.property = value`) has no direct
   // JavaScript assignment form. A missing optional UI object is equivalent to
   // a no-op in the portable renderer, so use an ordinary assignment and let
-  // the existing object shims provide the value when present.
-  source = source.replace(/([^\s=]+)&\.(\w+)\s*=\s*([^\n]+)/g, '$1.$2 = $3');
+  // the existing object shims provide the value when present. The `=` must be
+  // a lone assignment: comparisons (`==`, `!=`, `<=`, `>=`) and hash rockets
+  // (`=>`) share its first character and must not match.
+  source = source.replace(/([^\s=]+)&\.(\w+)\s*(?<![=!<>])=(?![=>])\s*([^\n]+)/g, '$1.$2 = $3');
   // Ruby2JS lowers a receiver-less respond_to?(:foo) to `"foo" in `, which is
   // invalid JavaScript. In RGSS library code this idiom means “is the optional
   // helper available in the current script scope”; defined?(foo) has the same
   // useful meaning for the player shim and is handled by the transpiler.
   source = source.replace(/respond_to\?\s*\(\s*:(\w+)\s*\)/g, 'defined?($1)');
+  // The same filter lowers `rec.respond_to?("lit")` to `"lit" in rec`, which
+  // throws when rec is a primitive (a species id string reaching a registry
+  // `[]`). Ruby's respond_to? is total, so literal checks go through a
+  // nil-safe runtime helper instead; dynamic names already stay calls.
+  source = rewriteLiteralRespondTo(source);
+  // `attr_reader`/`attr_accessor` declare zero-argument readers that Ruby2JS
+  // emits as getters, while every paren-less use compiles to a call (RgssCalls
+  // forces the call form for any name the game defines): `s.type()` against
+  // `get type()` throws. Expand readers to plain `def`s so definitions agree
+  // with call sites; accessor writers keep an explicit setter each, and the
+  // existing method/setter reconciliation covers the pair. Only the simple
+  // space-separated `:sym` line form is expanded (the whole Void corpus);
+  // anything else stays native, exactly as today.
+  source = source.replace(/^([ \t]*)attr_(reader|accessor)[ \t]+((?::[A-Za-z_$][\w$]*[ \t]*,?[ \t]*)+?)([ \t]*(?:#[^\n]*)?)\r?$/gm,
+    (line, indent, kind, names, comment) => {
+      if (/,\s*$/.test(names)) return line;
+      const defs = [];
+      for (const raw of names.split(',')) {
+        const name = raw.trim().replace(/^:/, '');
+        if (!/^[A-Za-z_$][\w$]*$/.test(name)) return line;
+        defs.push(`${indent}def ${name}\n${indent}  @${name}\n${indent}end`);
+        if (kind === 'accessor') defs.push(`${indent}def ${name}=(__value)\n${indent}  @${name} = __value\n${indent}end`);
+      }
+      return defs.join('\n') + (comment ? ` ${comment.trim()}` : '');
+    });
   // Filter order matters: RgssCalls ends a node's chain, so anything that must see a call
   // (SelfCalls) goes before it. Return adds Ruby's implicit `return` of the last expression.
   const filters = [Functions.prototype, Return.prototype, Combiner.prototype];
@@ -342,17 +440,133 @@ export function transpileUnit(unit) {
 // usable: extend the first exported class/module with the methods/constants
 // from the other successful pieces. This is deliberately a partial fallback,
 // reported to the manifest, never a silent claim of full parity.
-function mergeTranspiledParts(name, parts) {
-  const blocks = parts.map(js => `{
-  ${js}
+export function mergeTranspiledParts(name, parts) {
+  // Parts can reference the class at top level ahead of the block that
+  // declares it (`Battle.Battler = ...` before `class Battle`), which is a
+  // temporal dead zone for the merged tail binding below. Hoist the first
+  // declaration to the top so every later block sees an initialized class.
+  let head = '';
+  // Ruby reopens nested classes across script sections (`class Battle::Scene`
+  // in two files); Ruby2JS emits each reopening as `Battle.Scene = class ...`,
+  // so a later one would replace the earlier and drop everything attached to
+  // it (`Battle.Scene.Animation`, read by a heritage clause further down).
+  // Track nested-path assignments in execution order: a repeated one merges
+  // the fresh class into the existing value instead of replacing it. Anything
+  // that is not a class-on-class merge still replaces, as before.
+  const assignedPaths = new Set();
+  const blocks = parts.map(js => {
+    let body = js;
+    try {
+      const ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true });
+      const isDecl = node => (node.type === 'ClassDeclaration' && node.id?.name === name) || (node.type === 'VariableDeclaration' && node.declarations.some(d => d.id?.type === 'Identifier' && d.id.name === name));
+      const edits = [];
+      let hoisted = null;
+      if (!head) {
+        const decl = ast.body.find(isDecl);
+        if (decl) {
+          head = js.slice(decl.start, decl.end);
+          hoisted = decl;
+          edits.push({ start: decl.start, end: decl.end, text: '' });
+        }
+      }
+      // An empty superclass-less reopening (`class Battle {}` around an
+      // `include`) contributes nothing but its binding, which shadows the
+      // hoisted class: `Name.X` reads in its block then miss (and its
+      // `__mixin(Name.prototype, ...)` would land on the shadow, lost).
+      for (const node of ast.body) {
+        if (node !== hoisted && node.type === 'ClassDeclaration' && node.id?.name === name && node.body.body.length === 0 && !node.superClass) edits.push({ start: node.start, end: node.end, text: '' });
+      }
+      // Ruby's `class << self` (a singleton reopening, the mod idiom for wrapping a
+      // method with `alias new old` + a redefinition) arrives as `PATH = (() => {
+      // this.new = this.old(); this.old = ...; return {} })()`. The arrow fixes
+      // `this` to the loader scope instead of the object under definition, so
+      // captures read stubs and overrides land on the scope; and the capture
+      // invokes the old method instead of referencing it. Bind the body to the
+      // path's current value (a fresh object on first assignment), return that
+      // object instead of the discarded `{}`, and drop the capture's parens
+      // when the captured name is redefined later in the same body.
+      const bindSelfIife = (expr, lhs) => {
+        if (expr.type !== 'CallExpression' || expr.arguments.length || expr.callee.type !== 'ArrowFunctionExpression' || expr.callee.async || expr.callee.params.length || expr.callee.body.type !== 'BlockStatement') return null;
+        const stmts = expr.callee.body.body;
+        const topThis = node => {
+          const stack = [node];
+          while (stack.length) {
+            const current = stack.pop();
+            if (!current || typeof current.type !== 'string') continue;
+            if (current.type === 'ThisExpression') return true;
+            if (current.type === 'FunctionDeclaration' || current.type === 'FunctionExpression' || current.type === 'ClassDeclaration' || current.type === 'ClassExpression') continue;
+            for (const key of Object.keys(current)) { const value = current[key]; if (Array.isArray(value)) stack.push(...value); else if (value && typeof value.type === 'string') stack.push(value); }
+          }
+          return false;
+        };
+        if (!stmts.some(node => node.type !== 'FunctionDeclaration' && topThis(node))) return null;
+        const selfOf = member => member.type === 'MemberExpression' && !member.computed && member.object.type === 'ThisExpression' && member.property.type === 'Identifier' ? member.property.name : null;
+        const redefined = new Set();
+        for (const node of stmts) {
+          if (node.type === 'ExpressionStatement' && node.expression.type === 'AssignmentExpression' && node.expression.operator === '=') {
+            const target = selfOf(node.expression.left);
+            if (target) redefined.add(target);
+          }
+        }
+        const inner = [];
+        for (const node of stmts) {
+          if (node.type === 'ReturnStatement' && node.argument?.type === 'ObjectExpression' && node.argument.properties.length === 0) inner.push({ start: node.argument.start, end: node.argument.end, text: 'this' });
+          if (node.type === 'ExpressionStatement' && node.expression.type === 'AssignmentExpression' && node.expression.operator === '=') {
+            const call = node.expression.right;
+            if (call?.type === 'CallExpression' && call.arguments.length === 0 && redefined.has(selfOf(call.callee)) && selfOf(node.expression.left)) inner.push({ start: call.start, end: call.end, text: js.slice(call.callee.start, call.callee.end) });
+          }
+        }
+        let text = js.slice(expr.callee.body.start, expr.callee.body.end);
+        inner.sort((a, b) => b.start - a.start);
+        for (const edit of inner) text = text.slice(0, edit.start - expr.callee.body.start) + edit.text + text.slice(edit.end - expr.callee.body.start);
+        return `(function () ${text}).call(${lhs} == null ? {} : ${lhs})`;
+      };
+      for (const node of ast.body) {
+        if (node.type !== 'ExpressionStatement' || node.expression.type !== 'AssignmentExpression' || node.expression.operator !== '=') continue;
+        const chain = [];
+        let at = node.expression.left;
+        while (at?.type === 'MemberExpression' && !at.computed && at.property.type === 'Identifier') { chain.unshift(at.property.name); at = at.object; }
+        if (at?.type !== 'Identifier' || at.name !== name || !chain.length) continue;
+        const path = chain.join('.');
+        const lhs = js.slice(node.expression.left.start, node.expression.left.end);
+        const bound = bindSelfIife(node.expression.right, lhs);
+        const rhs = bound ?? js.slice(node.expression.right.start, node.expression.right.end);
+        if (assignedPaths.has(path)) edits.push({ start: node.expression.start, end: node.expression.end, text: `${lhs} = __mwgp_reopen(${lhs}, (${rhs}))` });
+        else if (bound) edits.push({ start: node.expression.right.start, end: node.expression.right.end, text: rhs });
+        assignedPaths.add(path);
+      }
+      if (edits.length) {
+        edits.sort((a, b) => b.start - a.start);
+        for (const edit of edits) body = body.slice(0, edit.start) + edit.text + body.slice(edit.end);
+      }
+    } catch { /* keep the part whole: the tail merge still applies */ }
+    return `{
+  ${body}
   __mwgp_parts.push(typeof ${name} !== 'undefined' ? ${name} : undefined);
-}`).join('\n');
+}`;
+  }).join('\n');
   return `
 const __mwgp_parts = [];
+function __mwgp_reopen(__mwgp_existing, __mwgp_fresh) {
+  if (!__mwgp_existing) return __mwgp_fresh;
+  if ((typeof __mwgp_existing === 'function' || (typeof __mwgp_existing === 'object' && __mwgp_existing !== null)) && (typeof __mwgp_fresh === 'function' || (typeof __mwgp_fresh === 'object' && __mwgp_fresh !== null))) {
+    const __mwgp_copy = (__mwgp_target, __mwgp_source, __mwgp_skip) => {
+      for (const __mwgp_key of Object.getOwnPropertyNames(__mwgp_source)) {
+        if (__mwgp_skip.includes(__mwgp_key)) continue;
+        try { Object.defineProperty(__mwgp_target, __mwgp_key, Object.getOwnPropertyDescriptor(__mwgp_source, __mwgp_key)); } catch { /* a non-configurable slot keeps its value; the rest still merges */ }
+      }
+    };
+    if (typeof __mwgp_existing === 'function' && typeof __mwgp_fresh === 'function' && __mwgp_existing.prototype && __mwgp_fresh.prototype) __mwgp_copy(__mwgp_existing.prototype, __mwgp_fresh.prototype, ['constructor']);
+    __mwgp_copy(__mwgp_existing, __mwgp_fresh, ['length', 'name', 'prototype', 'constructor']);
+    return __mwgp_existing;
+  }
+  return __mwgp_fresh;
+}
+${head}
 ${blocks}
-let ${name} = __mwgp_parts.shift();
+${head ? '' : `let ${name} = __mwgp_parts.shift();`}
 for (const __mwgp_part of __mwgp_parts) {
-  if (!__mwgp_part || !${name}) continue;
+  if (!__mwgp_part || __mwgp_part === ${name} || !${name}) continue;
   if (typeof ${name} === 'function' && __mwgp_part.prototype) {
     for (const __mwgp_key of Object.getOwnPropertyNames(__mwgp_part.prototype)) {
       if (__mwgp_key !== 'constructor') Object.defineProperty(${name}.prototype, __mwgp_key, Object.getOwnPropertyDescriptor(__mwgp_part.prototype, __mwgp_key));

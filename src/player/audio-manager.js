@@ -1,5 +1,5 @@
 // RPG Maker sound and music, on top of mw_games' audio layer (`AudioBus`, `parseMidi`,
-// `renderMidiToBuffer`, `parseSoundFont`, mw_games >= 0.18).
+// `renderMidiToBuffer`, `parseSoundFont`, mw_games >= 0.18; off-thread MIDI render needs >= 0.20).
 //
 // The library owns the playback semantics RPG Maker needs: BGM and BGS as independent looping
 // streams (replaying the same track only retunes it), ME jingles that suspend and resume the BGM at
@@ -10,9 +10,10 @@
 //     name to the extension that exists (XP/VX/Ace mix .ogg/.mp3/.wav/.mid; MV/MZ decode to
 //     .ogg/.m4a); .wma cannot be decoded and warns once;
 //   * decoding: `decodeAudioData` for real audio (with the LOOPSTART/LOOPLENGTH Vorbis comments
-//     MV/MZ files carry, in samples), and MIDI through parseMidi -> renderMidiToBuffer with the
-//     project's SoundFont (or the library's built-in synth), the rendered PCM cached in IndexedDB
-//     because the render takes seconds and the page reloads on every map change;
+//     MV/MZ files carry, in samples), and MIDI rendered off the main thread through
+//     renderMidiToBufferAsync with the project's SoundFont (or the library's built-in synth),
+//     falling back to the sync parseMidi -> renderMidiToBuffer path; the rendered PCM is cached
+//     in IndexedDB because the render takes seconds and the page reloads on every map change;
 //   * the player's mixer: master, per-kind volumes and mute (persisted), applied on top of each
 //     track's own volume;
 //   * the browser's autoplay unlock and a small LRU of decoded music.
@@ -56,6 +57,7 @@ export class AudioManager {
     this.log = log;
     this.soundfontUrls = soundfontUrls;
     this.soundfontUrl = null;
+    this.soundfontBytes = null;   // raw SoundFont 2 bytes for the worker render path
     this.soundfontPromise = null;
     this.renderCache = renderCache === undefined ? indexedDbRenderCache() : renderCache;
     this.cacheVersion = String(cacheVersion);
@@ -148,7 +150,7 @@ export class AudioManager {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const bytes = await response.arrayBuffer();
     if (isMidi) {
-      const rendered = this.lib.renderMidiToBuffer(this.lib.parseMidi(new Uint8Array(bytes)), { soundfont: font, sampleRate: 22050 });
+      const rendered = await this.renderMidi(bytes, font);
       const loop = { start: rendered.loopStart, end: rendered.loopEnd };
       const channels = [rendered.left, rendered.right];
       if (cacheKey && this.renderCache) Promise.resolve(this.renderCache.set(cacheKey, { rate: rendered.sampleRate, channels, loop })).catch(() => {});
@@ -163,6 +165,21 @@ export class AudioManager {
       if (end > start) loop = { start, end: Math.min(end, buffer.duration) };
     }
     return { buffer, loop };
+  }
+
+  // MIDI bytes -> stereo PCM frames. Prefers the library's worker render (mw_games 0.20+):
+  // synthesising a real track costs seconds and would freeze the scene's frames on the main
+  // thread. Bit-identical to the sync path, so the IndexedDB render cache stays valid across
+  // the switch; a worker failure (or an older library) falls back loudly to the sync render.
+  async renderMidi(bytes, font) {
+    if (typeof this.lib.renderMidiToBufferAsync === 'function') {
+      try {
+        return await this.lib.renderMidiToBufferAsync(bytes, { soundFontBytes: this.soundfontBytes ?? undefined, sampleRate: 22050 });
+      } catch (error) {
+        this.warnOnce('midi-worker', `MWGP audio: worker MIDI render failed (${error?.message || error}); rendering on the main thread`);
+      }
+    }
+    return this.lib.renderMidiToBuffer(this.lib.parseMidi(new Uint8Array(bytes)), { soundfont: font, sampleRate: 22050 });
   }
 
   bufferFromFrames(context, channels, rate) {
@@ -180,9 +197,11 @@ export class AudioManager {
           try {
             const response = await this.fetchImpl(url);
             if (!response.ok) continue;
-            const font = this.lib.parseSoundFont(await response.arrayBuffer());
+            const bytes = await response.arrayBuffer();
+            const font = this.lib.parseSoundFont(bytes);
             this.log.info?.(`MWGP audio: MIDI voiced by SoundFont ${url}`);
             this.soundfontUrl = url;
+            this.soundfontBytes = bytes;
             return font;
           } catch (error) { this.warnOnce(`soundfont:${url}`, `MWGP audio: SoundFont ${url} unusable (${error?.message || error}); trying the next`); }
         }

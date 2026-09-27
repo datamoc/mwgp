@@ -5,8 +5,8 @@
 // - MV/MZ (`www/index.html` or `index.html`) -> tools/convert-mv.js with
 //   --copy-assets, so the output plays without RPG Maker and without the
 //   original folder.
-// - Extracted RGSS (`Data/*.rxdata` XP, `Data/*.rvdata` VX) -> tools/convert-rgss.js.
-// - Raw RGSS (`Game.rgssad`) -> extracted to a temp dir, then convert-rgss.js.
+// - Extracted RGSS (`Data/*.rxdata` XP, `Data/*.rvdata` VX, `Data/*.rvdata2` Ace) -> tools/convert-rgss.js.
+// - Raw RGSS (`Game.rgssad`, `Game.rgss3a`) -> extracted to a temp dir, then convert-rgss.js.
 // - Anything else is skipped with a reason.
 //
 // Usage: npm run convert:auto -- <source dir> <output dir> [--skip-existing]
@@ -27,9 +27,9 @@ const skipExisting = flags.includes('--skip-existing');
 mkdirSync(outputRoot, { recursive: true });
 
 const hasRxdata = folder => existsSync(join(folder, 'Data')) &&
-  readdirSync(join(folder, 'Data')).some(name => /\.(rxdata|rvdata)$/i.test(name));
+  readdirSync(join(folder, 'Data')).some(name => /\.(rxdata|rvdata|rvdata2)$/i.test(name));
 const hasMv = folder => existsSync(join(folder, 'www', 'index.html')) || existsSync(join(folder, 'index.html'));
-const hasRgssad = folder => existsSync(join(folder, 'Game.rgssad'));
+const hasRgssad = folder => existsSync(join(folder, 'Game.rgssad')) || existsSync(join(folder, 'Game.rgss3a'));
 
 async function convert(name) {
   const from = join(sourceRoot, name), to = join(outputRoot, name);
@@ -52,7 +52,8 @@ async function convert(name) {
   }
   if (hasRgssad(from)) {
     const extracted = join(tmpdir(), `mwgp-extract-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);
-    await invoke('extract-rgssad.js', [join(from, 'Game.rgssad'), extracted]);
+    const archive = existsSync(join(from, 'Game.rgssad')) ? 'Game.rgssad' : 'Game.rgss3a';
+    await invoke('extract-rgssad.js', [join(from, archive), extracted]);
     try {
       // Essentials projects commonly keep Audio/ beside Game.rgssad instead of
       // inside the archive. Preserve it in the temporary extracted project so
@@ -70,7 +71,7 @@ async function convert(name) {
       await run(process.execPath, ['-e', `require('fs').rmSync(${JSON.stringify(extracted)}, { recursive: true, force: true })`]).catch(() => {});
     }
   }
-  return { name, status: 'skipped', reason: 'no MV index.html, Data/*.rxdata, or Game.rgssad found' };
+  return { name, status: 'skipped', reason: 'no MV index.html, Data/*.rxdata|rvdata|rvdata2, or Game.rgssad|rgss3a found' };
 }
 
 const entries = readdirSync(sourceRoot, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name);

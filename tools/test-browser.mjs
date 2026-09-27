@@ -9,7 +9,8 @@
 //                and any runtime/uncaught error.
 //   --maps       also boots every map of each project (or N evenly spread maps) and fails on maps that crash,
 //                log console errors, or draw nothing: the reachability part of "can this game be played everywhere".
-// Or via:        npm test            (set MWGP_BROWSER=0 to skip it loudly)
+// Or via:        npm test            (runs as its last section; MWGP_BROWSER=0 or no
+//                                playwright/chromium skips it loudly)
 //
 // MWGP_SMOKE_DEBUG=1 echoes every page console message.
 // It starts its own server on RPGM_SMOKE_PORT (default 4199) unless
@@ -74,8 +75,11 @@ async function waitForServer(url, timeoutMs = 20000) {
 
 const playwright = await loadPlaywright();
 if (!playwright) {
+  // Environment without a playable browser: a loud skip, not a failure, so npm test
+  // (which runs this harness as its last section, T126) stays green where no browser
+  // can run. Only a harness that runs and finds failures fails the suite.
   console.error('SKIPPED (loud): playwright is not installed locally or globally - browser coverage is NOT running.');
-  process.exit(1);
+  process.exit(0);
 }
 
 let server = null;let startedServer = false;
@@ -112,9 +116,11 @@ try {
   const executablePath = installedChromium();
   browser = await playwright.chromium.launch({ executablePath: executablePath || undefined, args: ['--enable-unsafe-swiftshader', '--use-gl=angle'] });
 } catch (error) {
-  console.error('FAIL: chromium could not start - ' + (error?.message || error));
+  // Same loud-skip rule as a missing playwright: no playable browser means no
+  // coverage, not a game regression.
+  console.error('SKIPPED (loud): chromium could not start - ' + (error?.message || error));
   if (startedServer) server.kill();
-  process.exit(1);
+  process.exit(0);
 }
 
 // Known-benign console noise: missing optional assets are handled by the player

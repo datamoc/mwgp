@@ -171,7 +171,7 @@ for (const dir of convertedDirs) {
   else notes.push('xp converter report classification ok (all translated codes supported/partial)');
 }
 
-// 2d: per-feature banner areas (T128) ÔÇö every supported/partial code from both
+// 2d: per-feature banner areas (T128) — every supported/partial code from both
 // converters must sit in a named FEATURE_AREA, so the banner's "other" bucket
 // only ever carries genuinely unclassified codes, and the report rolls up and
 // silences correctly on synthetic and real-manifest input.
@@ -190,7 +190,7 @@ for (const dir of convertedDirs) {
   if (unmapped.length) fail(`feature areas miss classified codes: ${unmapped.join(', ')}`);
   else notes.push('feature areas cover every supported/partial code ok');
   const karrynLike = featureReport({ commands: { 356: { count: 4178, status: 'partial' }, 355: { count: 466, status: 'partial' }, 101: { count: 50, status: 'supported' } }, plugins: { Tachie: { count: 3103, status: 'partial' } } });
-  if (karrynLike.map(entry => entry.area).join(',') !== 'plugins,scripts' || !featureLines(karrynLike)[0].startsWith('Plugins: partial (356├ù4178')) {
+  if (karrynLike.map(entry => entry.area).join(',') !== 'plugins,scripts' || !featureLines(karrynLike)[0].startsWith('Plugins: partial (356×4178')) {
     fail(`feature report misrolls Karryn-like input: ${JSON.stringify(karrynLike)}`);
   } else notes.push('feature report rolls up worst-status-first by uses ok');
   if (featureReport({ commands: { 101: { count: 5, status: 'supported' } } }).length) fail('feature report is not silent for a fully supported project');
@@ -386,7 +386,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
   // the library builder transpiles what the snippets reach and the runtime runs it.
   {
     const { setInterpreterMethods, transpileSnippet } = await import(pathToFileURL(join(root, 'tools', 'rgss-snippet.mjs')).href);
-    const { indexScripts, buildRgssLibrary, transpileUnit } = await import(pathToFileURL(join(root, 'tools', 'rgss-library.mjs')).href);
+    const { indexScripts, buildRgssLibrary, transpileUnit, mergeTranspiledParts } = await import(pathToFileURL(join(root, 'tools', 'rgss-library.mjs')).href);
     const { setKnownMethods } = await import(pathToFileURL(join(root, 'tools', 'rgss-call-filter.mjs')).href);
     const { createRgssRuntime } = await import(pathToFileURL(join(root, 'src', 'player', 'rgss-script.js')).href);
     const scripts = [
@@ -398,7 +398,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
       { name: 'ForwardConst', source: 'module ForwardConst\n  VALUE = LATER_VALUE + 1\n  LATER_VALUE = 4\n  def self.value\n    VALUE\n  end\nend\n' },
       { name: 'MethodCatalog', source: 'def missing_method\nend\n' },
       { name: 'PartialUnit', source: 'module PartialUnit\nend\n' },
-      { name: 'Pronoun', source: 'module Pronoun\n  def self.current_gender\n    "female"\n  end\n  def self.title\n    current_gender\n  end\nend\n' }
+      { name: 'Pronoun', source: 'module Pronoun\n  def self.current_gender\n    "female"\n  end\n  def self.title\n    current_gender\n  end\n  def self.id_check\n    "x".respond_to?("id")\n  end\nend\n' }
     ];
     const snippets = ['get_self.setTempSwitchOn("A")', 'give_potion(2)', 'on_event?', 'HashProbe.total_value', 'HashProbe.count', 'ForwardConst.value', 'PartialUnit.missing_method', 'Pronoun.title', 'Unknown.thing(1)'];
     const index = indexScripts(scripts);
@@ -448,13 +448,73 @@ else notes.push('RGSS label fallthrough order preserved ok');
       // The newest lowerings, end to end: `slice!`, Hash key membership, a module sharing `@cache`
       // state across sibling calls (the `RPG::Cache` bitmap-cache shape), and a method kept callable next to a
       // same-name setter. Handler-registry statements (`XHandlers.add`, `GameData::X.register`) index as boot units.
-      const { lowerRuby } = await import(pathToFileURL(join(root, 'tools', 'rgss-async.mjs')).href);
+      const { lowerRuby, liftBlocking } = await import(pathToFileURL(join(root, 'tools', 'rgss-async.mjs')).href);
+      // Same-named methods split across classes (`TrainerBattle.generate_foes`
+      // async, `WildBattle.generate_foes` sync): a call through the class name
+      // awaits exactly when that class's own definitions agree.
+      const liftProbe = liftBlocking({
+        LiftA: 'class LiftA {\n  static fetch() { return LiftA.load(); }\n  static load() { Graphics.update(); return 1; }\n}',
+        LiftB: 'class LiftB {\n  static fetch() { return LiftB.load(); }\n  static load() { return 2; }\n}',
+      }, [], {});
+      const liftKeyed = liftProbe.units.LiftA.includes('(await LiftA.load())') && !liftProbe.units.LiftB.includes('(await LiftB.load())');
       const spliceOk = await rgss.run({ source: 'slice!', js: 'let s = "hello"; const cut = __splice(s, (__v) => { s = __v }, 1, 2); const a = [1, 2, 3]; const head = __splice(a, null, 0, 1); $game_variables[9] = cut + "|" + s + "|" + head + "|" + a.join(",");' }, { game }, events[0]);
       const hashIncludes = rgss.evaluateValue({ source: 'include?', js: 'return ({a: 1}).includes("a") && !({a: 1}).includes("z") && [1, 2].includes(2);' }, { game }, events[0]);
       const cacheJs = lowerRuby('const Cache = (() => { this._cache = {}; function load(n) { return this._cache[n] ?? (this._cache[n] = n * 2) } function get(n) { return load(n) } return { load, get } })()');
       const cacheHit = rgss.evaluateValue({ source: 'cache', js: `${cacheJs}; return Cache.get(21) + Cache.get(21);` }, { game }, events[0]);
       const clashJs = lowerRuby('class W { columns() { return 3 } set columns(v) { this._c = v } }');
       const clashHit = rgss.evaluateValue({ source: 'clash', js: `${clashJs}; const w = new W(); w.columns = 9; return w.columns() + w._c;` }, { game }, events[0]);
+      const clampHit = rgss.evaluateValue({ source: 'clamp', js: 'return (5).clamp(0, 10) + (50).clamp(0, 10) + (-5).clamp(0, 10);' }, { game }, events[0]);
+      // `attr_reader`/`attr_accessor` expand to plain defs (readers must be
+      // methods, not getters: every paren-less use compiles to a call), with
+      // an explicit setter each for accessors (the GameData record shape).
+      // addKnownMethods mirrors what indexScripts does for real scripts
+      // (collectAttrNames feeds allDefNames).
+      const { addKnownMethods } = await import(pathToFileURL(join(root, 'tools', 'rgss-call-filter.mjs')).href);
+      addKnownMethods(['real_name', 'stage']);
+      const attrJs = lowerRuby(transpileUnit({ name: 'attr', kind: 'const', methods: new Set(['real_name', 'stage']), sends: new Set(), consts: new Set(), pieces: [{ script: 'A', text: 'class AttrThing\n  attr_reader :real_name\n  attr_accessor :stage\nend' }] }));
+      const attrHit = rgss.evaluateValue({ source: 'attr', js: `${attrJs}; const t = new AttrThing(); t.stage = 2; return [typeof t.real_name, typeof t.stage, t.stage()].join("|");` }, { game }, events[0]);
+      const attrIndex = indexScripts([{ name: 'AttrIdx', source: 'class AttrIdx\n  attr_reader :mood\n  attr_accessor :energy\nend' }]);
+      const attrIndexed = attrIndex.allDefNames.has('mood') && attrIndex.allDefNames.has('energy');
+      setKnownMethods(index.allDefNames);
+      // A Ruby mixin module reaches JS as an IIFE whose return lists only some
+      // of its functions (zero-argument defs arrive as getters, and only some
+      // survive); `extend` must still give the class every one of them, so the
+      // lowered export carries the missing names as methods (the GameData
+      // registries' `each`/`exists`/`count` shape from Pokemon Void).
+      const mixinJs = lowerRuby('const Kinds = (() => { this._mark = 1; function schema() { return 7 } function register(h) { return h.id } function exists(other) { return other != null } function get(other) { return other } function keys() { return [1] } function each(f) { return f(1) } function count() { return 1 } return { register, get, keys, get exists() { return exists.call(this) } } })(); class Mon {} __mixin(Mon, Object.getOwnPropertyDescriptors(Kinds));');
+      const mixinHit = rgss.evaluateValue({ source: 'mixin', js: `${mixinJs}; const seen = []; Kinds.each(v => seen.push(v)); return [typeof Mon.each, typeof Mon.count, Mon.exists(1), Mon.get(5), Mon.keys().join(), seen.join(), Mon.schema()].join("|");` }, { game }, events[0]);
+      // A setter aliased under a plain name (`alias __shadow_hpeq hp=`, the Shadow
+      // Pokémon shape) stays a plain callable def: the override invokes the old
+      // body as `__shadow_hpeq(value)`, which a JS setter could never answer.
+      const shadowJs = lowerRuby(transpileUnit({ name: 'shadow', kind: 'class', methods: new Set(), sends: new Set(), consts: new Set(), pieces: [{ script: 'S', text: 'class ShadowMon\n  def hp=(value)\n    @_hp = value\n  end\n  alias __shadow_hpeq hp=\n  def hp=(value)\n    __shadow_hpeq(value)\n    @_hp += 1\n  end\nend' }] }));
+      const shadowHit = rgss.evaluateValue({ source: 'shadow', js: `${shadowJs}; const p = new ShadowMon(); p.hp = 5; return p.__hp;` }, { game }, events[0]);
+      // A `.call` on a game module survives Ruby2JS's proc-invocation lowering:
+      // the indexer marks the const, lowerRuby restores `ModCall.call(...)`.
+      const modCallJs = lowerRuby(transpileUnit({ name: 'modcall', kind: 'const', methods: new Set(), sends: new Set(), consts: new Set(), pieces: [{ script: 'S', text: 'module ModCall\n  def self.call(x)\n    x * 2\n  end\nend\nModCall.call(21)' }] }), null, null, new Set(['ModCall']));
+      const modCallHit = rgss.evaluateValue({ source: 'modcall', js: `${modCallJs}\nreturn ModCall.call(21);` }, { game }, events[0]);
+      // Merged reopenings can reference the class ahead of the block declaring
+      // it (`Battle.Battler = ...` before `class Battle`): the first
+      // declaration hoists so the reference never hits the tail binding's
+      // temporal dead zone.
+      const mergedJs = mergeTranspiledParts('MergeMon', ['MergeMon.Kind = 1;\nclass MergeMon {\n  constructor() { this._k = 1; }\n}', 'class MergeMon {\n};\nMergeMon.Half = 2;\n__mixin(MergeMon.prototype, Object.getOwnPropertyDescriptors({ extra() { return 9; } }));', 'MergeMon.Scene = class {\n  full() { return 1; }\n};\nMergeMon.Scene.Animation = class {\n  play() { return 2; }\n};', 'MergeMon.Scene = class {\n  extra() { return 3; }\n};\nMergeMon.Scene.Animation.Arceus = class extends MergeMon.Scene.Animation {\n  burst() { return 4; }\n};']);
+      const mergedHit = rgss.evaluateValue({ source: 'merge', js: `${mergedJs}\nreturn MergeMon.Kind + MergeMon.Half + new MergeMon()._k + new MergeMon().extra() + new MergeMon.Scene().full() + new MergeMon.Scene().extra() + new MergeMon.Scene.Animation().play() + new (MergeMon.Scene.Animation.Arceus)().burst();` }, { game }, events[0]);
+      // Ruby's `class << self` singleton reopening (alias + override) arrives
+      // as an arrow IIFE over `this`: the body binds to the existing object,
+      // the capture keeps a reference, and the discarded `return {}` returns it.
+      const iifeJs = mergeTranspiledParts('IifeMon', ['class IifeMon {\n}', 'IifeMon.Fx = class {};\nIifeMon.Fx.play = () => { return \'old\'; };', 'IifeMon.Fx = (() => {\n  this.origPlay = this.play();\n  this.play = () => { return \'new\' + this.origPlay(); };\n  return {}\n})()']);
+      const iifeHit = rgss.evaluateValue({ source: 'iife', js: `${iifeJs}\nreturn IifeMon.Fx.play();` }, { game }, events[0]);
+      // A static initializer reading the class's own path (`Box.Holder.base`
+      // inside `Box.Holder = class ...`) means `this` there: the class is
+      // still being defined, so its path does not resolve yet.
+      const selfStaticJs = lowerRuby('TargetBox.Holder = class {\n  static base = 7;\n  static doubled = TargetBox.Holder.base * 2;\n};');
+      const selfStaticHit = rgss.evaluateValue({ source: 'selfstatic', js: `const TargetBox = {};\n${selfStaticJs}\nreturn TargetBox.Holder.doubled;` }, { game }, events[0]);
+      // A top-level `X.register(...)` on the game's own module (MultipleForms,
+      // not just *Handlers/GameData::*) indexes as a boot statement too.
+      // A `SaveData.register(...) do ... end` block is a save-data value even
+      // though it also matches the registry-statement shape: the DSL matcher
+      // runs first.
+      const saveIndex = indexScripts([{ name: 'Saves', source: 'module SaveData\nend\nSaveData.register(:hero) do\n  ensure_class Player\n  save_value { 1 }\n  load_value { |v| }\n  new_game_value { 2 }\nend\n' }]);
+      const formIndex = indexScripts([{ name: 'Forms', source: 'module MultipleForms\nend\nMultipleForms.register(:UNOWN, { "getFormOnCreation" => 1 })\n' }]);
       const bootIndex = indexScripts([{ name: 'Handlers', source: 'MenuHandlers.add(:pause_menu, :pokedex, { "name" => "Pokedex" })\n' }]);
       const checks = [
         [Object.keys(library.units).sort().join() === 'ForwardConst,Game_Event,HashProbe,Interpreter,PartialUnit,Pronoun,Shop,give_potion', 'library holds exactly the units the snippets reach'],
@@ -484,7 +544,23 @@ else notes.push('RGSS label fallthrough order preserved ok');
         , [hashIncludes === true, 'Hash#include? reads key membership without shadowing Array#includes']
         , [cacheHit === 84, 'a module IIFE shares its @cache across sibling calls through one self']
         , [clashHit === 12, 'a method next to a same-name setter stays callable and the setter still assigns']
+        , [clampHit === 15, 'Ruby Numeric#clamp is available to RGSS libraries']
+        , [attrHit === 'function|function|2', 'attr_reader/attr_accessor expand to callable readers with a working setter']
+        , [attrIndexed === true, 'the indexer collects attr_reader/attr_accessor names as known methods']
+        , [mixinHit === 'function|function|true|5|1|1|7', 'an extended class answers every mixin def (each/exists/count/keys/get/register/schema)']
         , [(bootIndex.bootStatementNames || []).length === 1, 'handler-registry statements index as boot units']
+        , [shadowHit === 6, 'a setter aliased under a plain name stays callable from its override']
+        , [modCallHit === 42 && modCallJs.includes('ModCall.call('), 'a .call on a game module survives the proc-invocation lowering']
+        , [(formIndex.bootStatementNames || []).length === 1, 'a top-level register on a game module indexes as a boot statement']
+        , [(saveIndex.bootNames || []).join() === 'BootValue_hero' && !(saveIndex.bootStatementNames || []).length, 'a save-data register block indexes as a boot value, not a boot statement']
+        , [mergedHit === 23, 'merged reopenings hoist the first class declaration, drop empty shadowing ones and merge repeated nested classes']
+        , [iifeHit === 'newold', 'a merged singleton reopening binds its body to the existing object and keeps the alias capture']
+        , [test('Pronoun.id_check()') === false, 'a literal respond_to on a primitive is false, not a throw']
+        , [test('Pronoun.respond_to?("title")') === true, 'a literal respond_to finds a real method']
+        , [rgss.evaluateValue({ source: 'stored', js: '$game_temp.title = "kept"; return $game_temp.title();' }, { game }, events[0]) === 'kept', 'a stored shim value under a method name still answers as a call']
+        , [liftKeyed === true, 'the async lift awaits a class-named call exactly when that class agrees']
+        , [transpileUnit({ name: 'safenav', kind: 'const', methods: new Set(), sends: new Set(), consts: new Set(), pieces: [{ script: 'S', text: 'module SafeNav\n  def self.check(env)\n    env&.climate == :Cave\n  end\nend' }] }).includes('=='), 'safe navigation keeps == comparisons instead of rewriting them into assignments']
+        , [selfStaticHit === 14, 'a static initializer reading its own class path means this']
       ];
       for (const [ok, label] of checks) if (!ok) fail(`rgss runtime: ${label}`);
       if (checks.every(([ok]) => ok)) notes.push(`rgss script runtime ok (${checks.length} checks)`);
@@ -570,8 +646,9 @@ else notes.push('RGSS label fallthrough order preserved ok');
     if (results.every(Boolean)) notes.push('mv engine layer ok (9 checks: plugin method on real class, plugin commands through Game_Interpreter, rpgExtra bridge, reload persistence)'); else fail(`mv engine layer: ${JSON.stringify(results)}`);
   }
   // Audio: the adapter over mw_games' AudioBus (>= 0.18): format resolution, loop tags, mixer scaling,
-  // ME/BGM resume, state round-trip, MIDI through the library's parser/renderer + SoundFont, the render
-  // cache, and the converter's index, against a fake AudioContext (no browser needed).
+  // ME/BGM resume, state round-trip, MIDI through the library's parser/renderer + SoundFont (worker
+  // render bit-identity and sync fallback, >= 0.20), the render cache, and the converter's index,
+  // against a fake AudioContext (no browser needed).
   {
     const lib = await import('@datamoc/mw_games/audio');
     const { AudioManager, chooseExtension, parseLoopTags } = await import(pathToFileURL(join(root, 'src', 'player', 'audio-manager.js')).href);
@@ -693,6 +770,13 @@ else notes.push('RGSS label fallthrough order preserved ok');
       checks.push(font.presetCount === 1 && voices.length === 1 && voices[0].loop && voices[0].rootKey === 60);
       const sampled = lib.renderMidiToBuffer(file, { soundfont: font });
       checks.push(sampled.duration > 1 && sampled.left.some(value => value !== 0));
+      // 0.20+: the worker render is present and bit-identical to the sync path.
+      checks.push(typeof lib.renderMidiToBufferAsync === 'function');
+      const asyncRendered = await lib.renderMidiToBufferAsync(bytes, { soundFontBytes: sf2 });
+      checks.push(asyncRendered.sampleRate === sampled.sampleRate && asyncRendered.loopStart === sampled.loopStart &&
+        asyncRendered.left.length === sampled.left.length &&
+        asyncRendered.left.every((value, index) => value === sampled.left[index]) &&
+        asyncRendered.right.every((value, index) => value === sampled.right[index]));
       // The manager wires it together: project SoundFont, MIDI render, loop region, and the reload cache.
       const cache = new Map();
       const routes = { '/assets/audio/bgm/Song.mid': bytes, '/sf.sf2': sf2 };
@@ -708,6 +792,13 @@ else notes.push('RGSS label fallthrough order preserved ok');
       const reloaded = make(options);
       await reloaded.playBgm({ name: 'Song' }); await settle();
       checks.push(fetched.filter(url => url.endsWith('.mid')).length === before && reloaded.isPlaying('bgm'));   // second "page load" hits the cache, no MIDI fetch
+      // The manager falls back to the sync render when the library predates the worker path.
+      const syncLib = { ...lib };
+      delete syncLib.renderMidiToBufferAsync;
+      const syncCache = new Map();
+      const syncOnly = make({ ...options, lib: syncLib, renderCache: { get: async key => syncCache.get(key) ?? null, set: async (key, value) => { syncCache.set(key, value); } } });
+      await syncOnly.playBgm({ name: 'Song' }); await settle();
+      checks.push(syncOnly.isPlaying('bgm') && syncCache.size === 1);
     }
     if (checks.every(Boolean)) notes.push(`audio adapter over mw_games ${lib.AudioBus ? 'AudioBus' : '?'}, MIDI + SoundFont and index ok (${checks.length} checks)`); else fail(`audio manager: ${JSON.stringify(checks)}`);
   }
@@ -1384,7 +1475,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
   // 5c: autotile source math and character frame geometry (engine rules the
   // converter measures and the player renders by; see rpg_core.js Tilemap
   // and rpg_sprites.js Sprite_Character).
-  const { autotileSource, autotileDrawOps, characterDepth, characterGeometry, characterCellIndex, characterPixelSize, passageAllowsStep } =
+  const { autotileSource, autotileDrawOps, characterDepth, characterGeometry, characterCellIndex, characterPixelSize, normalTileFrame, passageAllowsStep, tileToFrame } =
     await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
   const expect = (actual, wanted, label) => {
     if (JSON.stringify(actual) !== JSON.stringify(wanted)) fail(`${label}: got ${JSON.stringify(actual)}, want ${JSON.stringify(wanted)}`);
@@ -1418,6 +1509,19 @@ else notes.push('RGSS label fallthrough order preserved ok');
   expect(characterPixelSize({ fw: 60, fh: 80, object: true }, 48), { w: 60, h: 80, shift: 0 }, 'characterPixelSize object');
   expect(characterDepth(4), 4000, 'characterDepth row');
   expect(characterDepth(4, 1), 4001, 'characterDepth tie breaker');
+  // B-E sheets use the engine's 8-column halves, not row-major-16: Karryn's
+  // tile 814 must sample the empty (6,5) cell, never the dev-badge art.
+  expect(normalTileFrame(512), 0, 'normalTileFrame sheet origin');
+  expect(normalTileFrame(519), 7, 'normalTileFrame first row end');
+  expect(normalTileFrame(520), 16, 'normalTileFrame second half starts a new row');
+  expect(normalTileFrame(767), 255, 'normalTileFrame sheet corner is stable');
+  expect(normalTileFrame(814), 86, 'normalTileFrame Karryn badge tile samples empty (6,5)');
+  expect(normalTileFrame(8), 16, 'normalTileFrame B tile 8');
+  const stubMwg = { EMPTY: -1, tileFrame: (sheet, frame) => (sheet << 20) | frame };
+  const eEntries = [{ slot: 7 }, { slot: 8 }];
+  const eSheets = [{ count: 256 }, { count: 256 }];
+  expect(tileToFrame(814, eEntries, eSheets, stubMwg), (1 << 20) | 86, 'tileToFrame routes E tiles through the half-sheet frame');
+  expect(tileToFrame(767, eEntries, eSheets, stubMwg), (0 << 20) | 255, 'tileToFrame keeps the stable corner');
   const passageFlags = [0, 0, 15, 0x10];
   expect(passageAllowsStep([0, 2, 1], passageFlags, 0x01), false, 'blocked lower wall is authoritative');
   expect(passageAllowsStep([2, 1], [0, 0, 0], 0x01), true, 'passable upper door tile overrides blocked lower decoration');
@@ -1441,10 +1545,14 @@ try {
   fail(`--scan failed: ${String(error.message).slice(0, 300)}`);
 }
 
-// 7: VX (RGSS2) conversion (T122) - a synthetic VX project and its XP twin,
-// built with mw_games' own encodeMarshal, convert end to end and validate.
+// 7: VX (RGSS2) conversion (T122) - a synthetic VX project, its XP twin and an
+// Ace (RGSS3, T123) sibling, built with mw_games' own encodeMarshal, convert
+// end to end and validate. The Ace shapes beyond the Marshal envelope are
+// assumed from VX (see tools/rgss-ace.mjs), so its fixture pins the plumbing
+// and the loud fallbacks, not ground truth from a real Ace project.
 try {
   const vx = await import(pathToFileURL(join(root, 'tools', 'rgss-vx.mjs')).href);
+  const ace = await import(pathToFileURL(join(root, 'tools', 'rgss-ace.mjs')).href);
   const { encodeMarshal } = await import('@datamoc/mw_games/rpg');
   const { deflateSync } = await import('node:zlib');
   const vxChecks = [];
@@ -1456,6 +1564,15 @@ try {
   check(vx.vxRemap(203) === 202 && vx.vxRemap(204) === 203 && vx.vxRemap(205) === 209 && vx.vxRemap(214) === null, 'VX renumbers hit XP cases');
   check(vx.vxWeatherType(1) === 'rain' && vx.vxWeatherType(2) === 'storm' && vx.vxWeatherType(3) === 'snow' && vx.vxWeatherType(9) === 'none', 'VX weather enum maps');
   check(vx.VX_TILESET_SHEETS.length === 9 && vx.VX_TILESET_SHEETS[0] === 'TileA1', 'VX global tileset sheets listed');
+  // Ace shares VX's event numbering (assumed, see tools/rgss-ace.mjs): the
+  // re-export must stay identical, and the tileset reader must degrade loudly.
+  check(JSON.stringify(Object.keys(ace.ACE_COMMAND_NAMES).sort()) === JSON.stringify(Object.keys(vx.VX_COMMAND_NAMES).sort())
+    && ace.aceRemap(205) === 209 && ace.aceWeatherType(1) === 'rain', 'Ace re-exports the VX command layer');
+  {
+    const warnings = [];
+    const fallback = ace.aceTilesetEntry({ class: 'RPG::Tileset', ivars: { '@id': 5 } }, 5, () => { throw new Error('no table read on fallback'); }, message => warnings.push(message));
+    check(fallback.id === 5 && JSON.stringify(fallback.tilesetNames) === JSON.stringify(ace.ACE_TILESET_SHEETS) && fallback.flags.length === 0 && warnings.length === 2, 'Ace tileset reader falls back loudly');
+  }
   const O = (cls, ivars) => ({ class: cls, ivars });
   const cmd = (code, parameters, indent = 0) => O('RPG::EventCommand', { '@code': code, '@indent': indent, '@parameters': parameters });
   const audioFile = name => O('RPG::AudioFile', { '@name': name, '@volume': 90, '@pitch': 100 });
@@ -1503,21 +1620,28 @@ try {
     '@graphic': graphic || O('RPG::Event::Page::Graphic', {}),
     '@move_type': 0, '@trigger': 0, '@list': list });
   const buildFixture = (dir, engine) => {
+    const isAce = engine === 'ace';
     const isVx = engine === 'vx';
-    const ext = isVx ? '.rvdata' : '.rxdata';
+    const isVxLike = isVx || isAce;
+    const ext = isAce ? '.rvdata2' : isVx ? '.rvdata' : '.rxdata';
     const write = (name, value) => writeFileSync(join(dir, 'Data', name + ext), Buffer.from(encodeMarshal(value)));
     mkdirSync(join(dir, 'Data'), { recursive: true });
     const sysIv = { '@game_title': `${engine} Probe`, '@start_map_id': 1, '@start_x': 2, '@start_y': 3,
       '@title_bgm': audioFile('Town1'), '@battle_bgm': audioFile('Battle1'),
       '@battle_end_me': audioFile('Victory1'), '@gameover_me': audioFile('GameOver1') };
-    if (isVx) {
+    if (isVxLike) {
       sysIv['@party_members'] = [1];
       sysIv['@sounds'] = [audioFile('Cursor1'), audioFile('Decision1'), null, null, null, null, null, null, null, null, null, null];
     }
     write('System', O('RPG::System', sysIv));
     write('MapInfos', new Map([[1, O('RPG::MapInfo', { '@name': 'Town', '@parent_id': 0, '@order': 1 })]]));
     write('CommonEvents', []);
-    if (isVx) write('Actors', [O('RPG::Actor', { '@id': 1, '@character_name': 'Hero', '@character_index': 2 })]);
+    if (isAce) {
+      write('Actors', [O('RPG::Actor', { '@id': 1, '@character_name': 'Hero', '@character_index': 2 })]);
+      write('Tilesets', [null, O('RPG::Tileset', { '@id': 1, '@name': 'World',
+        '@tileset_names': ['TileA1', 'TileA2', 'TileA3', 'TileA4', 'TileA5', 'TileB', 'TileC', 'TileD', 'TileE'],
+        '@flags': O('Table', { '@raw': tableBytes(4, 1, 1, () => 0x10) }) })]);
+    } else if (isVx) write('Actors', [O('RPG::Actor', { '@id': 1, '@character_name': 'Hero', '@character_index': 2 })]);
     else {
       const tilesetTable = layer => tableBytes(6, 5, 1, () => layer);
       write('Tilesets', [O('RPG::Tileset', { '@id': 0, '@tileset_name': 'World', '@autotile_names': ['028-Weiner'],
@@ -1531,11 +1655,11 @@ try {
       cmd(122, [1, 2, 0, 0, 10]), cmd(122, [5, 5, 1, 7, 0]), cmd(122, [6, 6, 0, 7, 1]),
       cmd(129, [2, 0, 0]), cmd(314, [0, 0]), cmd(313, [0, 1, 0, 5]),
       cmd(102, [['Yes', 'No'], -1]), cmd(402, [0, 'Yes']), cmd(402, [1, 'No']), cmd(403, []), cmd(404, []),
-      cmd(301, isVx ? [0, 7, true, false] : [7, true, false]),
+      cmd(301, isVxLike ? [0, 7, true, false] : [7, true, false]),
       cmd(355, ['$game_variables[3] = 7']),
       cmd(111, [12, '$game_switches[1]'])
     ];
-    if (isVx) list.push(
+    if (isVxLike) list.push(
       cmd(205, [-1, route([[1, []]])]), cmd(505, []),
       cmd(230, [30]), cmd(214, []), cmd(203, [-1, 0, 2, 3, 2]), cmd(204, [2, 5, 4]),
       cmd(202, [0, 0, 1, 4, 5]), cmd(236, [1, 5, 60]),
@@ -1552,20 +1676,25 @@ try {
         '@pages': [pageOf(list, O('RPG::Event::Page::Graphic', { '@character_name': 'Hero', '@character_index': 0, '@direction': 2, '@pattern': 1 }))] })]]),
       '@bgm': audioFile('Town1'), '@autoplay_bgm': true, '@bgs': audioFile(''), '@autoplay_bgs': false
     };
-    if (!isVx) mapIv['@tileset_id'] = 0;
+    if (isAce) mapIv['@tileset_id'] = 1;
+    else if (!isVx) mapIv['@tileset_id'] = 0;
     write('Map001', O('RPG::Map', mapIv));
-    writeFileSync(join(dir, 'Data', 'Scripts' + ext), scriptsFile([[1, 'VXLib', 'class Game_VX\nend\n']]));
+    writeFileSync(join(dir, 'Data', 'Scripts' + ext), scriptsFile([[1, isAce ? 'AceLib' : 'VXLib', 'class Game_VX\nend\n']]));
     mkdirSync(join(dir, 'Graphics', 'Characters'), { recursive: true });
-    writeFileSync(join(dir, 'Graphics', 'Characters', 'Hero.png'), png(isVx ? 96 : 128, isVx ? 128 : 192));
+    writeFileSync(join(dir, 'Graphics', 'Characters', 'Hero.png'), png(isVxLike ? 96 : 128, isVxLike ? 128 : 192));
     if (isVx) {
       mkdirSync(join(dir, 'Graphics', 'System'), { recursive: true });
       for (const sheet of vx.VX_TILESET_SHEETS) writeFileSync(join(dir, 'Graphics', 'System', sheet + '.png'), png(32, 32));
+    }
+    if (isAce) {
+      mkdirSync(join(dir, 'Graphics', 'Tilesets'), { recursive: true });
+      for (const sheet of ace.ACE_TILESET_SHEETS) writeFileSync(join(dir, 'Graphics', 'Tilesets', sheet + '.png'), png(32, 32));
     }
   };
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'mwgp-vx-'));
   try {
     const converted = {};
-    for (const engine of ['vx', 'xp']) {
+    for (const engine of ['vx', 'xp', 'ace']) {
       const from = join(fixtureRoot, engine), to = join(fixtureRoot, engine + '-out');
       buildFixture(from, engine);
       try {
@@ -1622,6 +1751,32 @@ try {
         && report['111']?.status === 'supported' && report['122']?.status === 'partial'
         && report['301']?.status === 'partial', 'VX compatibility report classifies');
     }
+    if (converted.ace) {
+      const m = converted.ace, event = m.maps[0].mwgEvents[0], commands = event.pages[0].commands;
+      const flat = [];
+      (function walk(list) { for (const c of list || []) { flat.push(c); walk(c.then); walk(c.else); for (const b of c.branches || []) walk(b); if (c.cancelBranch) walk(c.cancelBranch); } })(commands);
+      const one = pred => flat.find(pred);
+      const loud = flat.filter(c => c.unsupported !== undefined).map(c => `${c.unsupported.code}:${c.unsupported.kind}`).sort();
+      strongly(m.source.engine === 'rpg-maker-vxace', 'Ace manifest carries the Ace engine tag');
+      strongly(m.display.tileSize === 32 && m.maps.length === 1 && m.maps[0].info?.name === 'Town', 'Ace map converts with its name');
+      strongly(m.maps[0].data.tilesetId === 1, 'Ace maps keep their database tileset id');
+      strongly(JSON.stringify(m.tilesets[1]?.tilesetNames) === JSON.stringify(ace.ACE_TILESET_SHEETS)
+        && JSON.stringify(m.tilesets[1]?.flags) === JSON.stringify([16, 16, 16, 16]), 'Ace Tilesets table converts with names and flags');
+      strongly(m.tilesets[0] === null, 'Ace null tileset rows stay null');
+      strongly(m.playerSprite?.name === 'Hero' && m.playerSprite?.index === 2, 'Ace start actor gives the player sprite');
+      strongly(JSON.stringify(m.initialParty) === '[1]' && Object.keys(m.database || {}).length === 0, 'Ace party comes from System, database stays empty');
+      strongly(commands[0]?.say === 'Hello' && commands[1]?.say === 'World', 'Ace text converts');
+      strongly(one(c => c.wait === 0.5) !== undefined, 'Ace 230 waits /60');
+      strongly(one(c => c.eraseEvent) !== undefined, 'Ace 214 erases');
+      strongly(one(c => c.relocate)?.relocate?.x === 2, 'Ace 203 relocates');
+      strongly(one(c => c.vehicleLocation?.mapId === 1) !== undefined, 'Ace 202 places the vehicle');
+      strongly(one(c => c.battle?.troopId === 7) !== undefined, 'Ace 301 designates the troop');
+      strongly(one(c => typeof c.script === 'string' && typeof c.js === 'string') !== undefined, 'Ace scripts transpile');
+      strongly(JSON.stringify(loud) === JSON.stringify(['106:0', '122:7', '211:0', '313:0']), 'Ace unknowns stay loud (106/122-kind7/211/313)');
+      const report = m.compatibility.commands;
+      strongly(report['205']?.status === 'supported' && report['214']?.status === 'supported'
+        && report['230']?.status === 'supported' && report['301']?.status === 'partial', 'Ace compatibility report classifies');
+    }
     if (converted.xp) {
       const m = converted.xp, commands = m.maps[0].mwgEvents[0].pages[0].commands;
       const flat = [];
@@ -1640,12 +1795,111 @@ try {
       strongly(m.maps[0].mwgEvents[0].pages[0].commands[2]?.then?.length === 0, 'XP 126 stays a dummy drop');
     }
     for (const [ok, label] of vxChecks) if (!ok) fail(`VX fixture: ${label}`);
-    if (converted.vx && converted.xp) notes.push(`VX/XP fixtures convert (${vxChecks.length} checks)`);
+    if (converted.vx && converted.xp && converted.ace) notes.push(`VX/XP/Ace fixtures convert (${vxChecks.length} checks)`);
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
 } catch (error) {
   fail(`VX fixture check failed: ${String(error.message).slice(0, 200)}`);
+}
+
+// 8: RGSSAD archives (T123) - v1 and v3 round-trips built by hand from the
+// layouts extract-rgssad.js implements (v3 per mkxp's src/rgssad.cpp), plus
+// loud rejections of bad magic, unknown versions and corrupt v3 entries.
+try {
+  const archiveChecks = [];
+  const acheck = (ok, label) => archiveChecks.push([ok, label]);
+  const u32le = n => { const b = Buffer.alloc(4); b.writeUInt32LE(n >>> 0); return [...b]; };
+  const xorPayload = (data, startKey) => {
+    const out = Buffer.from(data);
+    let key = startKey >>> 0;
+    for (let o = 0; o < out.length; o += 4) {
+      const chunk = Math.min(4, out.length - o);
+      for (let b = 0; b < chunk; b++) out[o + b] ^= (key >>> (8 * b)) & 0xff;
+      key = (Math.imul(key, 7) + 3) >>> 0;
+    }
+    return out;
+  };
+  const advanceKey = key => (Math.imul(key, 7) + 3) >>> 0;
+  // v3 builder: header + seed + entry table (offset/size/key/namelen/name per
+  // file, terminator offset 0) + payloads at absolute offsets.
+  const buildV3 = (seed, files) => {
+    const key = (Math.imul(seed, 9) + 3) >>> 0;
+    const encNames = files.map(([name]) => {
+      const plain = Buffer.from(name, 'latin1'), enc = Buffer.from(plain);
+      for (let i = 0; i < enc.length; i++) enc[i] ^= (key >>> (8 * (i % 4))) & 0xff;
+      return enc;
+    });
+    let at = 12 + files.reduce((n, _, i) => n + 16 + encNames[i].length, 0) + 4;
+    const table = [];
+    const payloads = [];
+    files.forEach(([name, data, entryKey], i) => {
+      table.push(...u32le((at ^ key) >>> 0), ...u32le((data.length ^ key) >>> 0),
+        ...u32le((entryKey ^ key) >>> 0), ...u32le((encNames[i].length ^ key) >>> 0), ...encNames[i]);
+      payloads.push(xorPayload(data, entryKey));
+      at += data.length;
+    });
+    table.push(...u32le((0 ^ key) >>> 0));
+    return Buffer.concat([Buffer.from('RGSSAD\0', 'latin1'), Buffer.from([3]), Buffer.from(u32le(seed)), Buffer.from(table), ...payloads]);
+  };
+  // v1 builder: header + front-to-back stream (namelen/name/datalen/data).
+  const buildV1 = files => {
+    const parts = [Buffer.from('RGSSAD\0', 'latin1'), Buffer.from([1])];
+    let key = 0xDEADCAFE >>> 0;
+    for (const [name, data, entryKey] of files) {
+      const nb = Buffer.from(name, 'latin1');
+      parts.push(Buffer.from(u32le((nb.length ^ key) >>> 0))); key = advanceKey(key);
+      const enc = Buffer.from(nb);
+      for (let i = 0; i < enc.length; i++) { enc[i] ^= key & 0xff; key = advanceKey(key); }
+      parts.push(enc);
+      parts.push(Buffer.from(u32le((data.length ^ key) >>> 0))); key = advanceKey(key);
+      parts.push(xorPayload(data, key));
+    }
+    return Buffer.concat(parts);
+  };
+  const archiveRoot = mkdtempSync(join(tmpdir(), 'mwgp-rgssad-'));
+  try {
+    const sysData = Buffer.from([4, 8, 0x5b, 5]);           // tiny Marshal array
+    const tuneData = Buffer.from([1, 2, 3, 4, 5, 6, 7]);    // odd length: tail bytes
+    const v3 = buildV3(0x11223344, [['Data\\System.rvdata2', sysData, 0x12345678], ['Audio/Bgm/Theme.ogg', tuneData, 0x9abcdef0]]);
+    writeFileSync(join(archiveRoot, 'Game.rgss3a'), v3);
+    mkdirSync(join(archiveRoot, 'v3out'), { recursive: true });
+    try {
+      execFileSync(process.execPath, [join(root, 'tools', 'extract-rgssad.js'), join(archiveRoot, 'Game.rgss3a'), join(archiveRoot, 'v3out')], { stdio: 'pipe' });
+      acheck(readFileSync(join(archiveRoot, 'v3out', 'Data', 'System.rvdata2')).equals(sysData)
+        && readFileSync(join(archiveRoot, 'v3out', 'Audio', 'Bgm', 'Theme.ogg')).equals(tuneData), 'v3 archive round-trips (backslash names normalized)');
+    } catch (error) {
+      acheck(false, `v3 archive extracts (${String(error.stderr || error.message).slice(0, 200)})`);
+    }
+    const v1 = buildV1([['Data/System.rxdata', sysData, 0]]);
+    writeFileSync(join(archiveRoot, 'Game.rgssad'), v1);
+    mkdirSync(join(archiveRoot, 'v1out'), { recursive: true });
+    try {
+      execFileSync(process.execPath, [join(root, 'tools', 'extract-rgssad.js'), join(archiveRoot, 'Game.rgssad'), join(archiveRoot, 'v1out')], { stdio: 'pipe' });
+      acheck(readFileSync(join(archiveRoot, 'v1out', 'Data', 'System.rxdata')).equals(sysData), 'v1 archive still round-trips after the refactor');
+    } catch (error) {
+      acheck(false, `v1 archive extracts (${String(error.stderr || error.message).slice(0, 200)})`);
+    }
+    const badRun = args => {
+      try { execFileSync(process.execPath, [join(root, 'tools', 'extract-rgssad.js'), ...args], { stdio: 'pipe' }); return 'ran'; }
+      catch (error) { return String(error.stderr || error.message); }
+    };
+    writeFileSync(join(archiveRoot, 'bad.bin'), Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]));
+    acheck(badRun([join(archiveRoot, 'bad.bin'), join(archiveRoot, 'badout')]).includes('not an RGSSAD archive'), 'bad magic fails loudly');
+    const v2 = Buffer.from(v3); v2[7] = 2;
+    writeFileSync(join(archiveRoot, 'Game2.rgssad'), v2);
+    acheck(badRun([join(archiveRoot, 'Game2.rgssad'), join(archiveRoot, 'v2out')]).includes('Unsupported RGSSAD version 2'), 'unknown version fails loudly');
+    const corrupt = Buffer.from(v3);
+    corrupt.writeUInt32LE(((0xfffff000 ^ ((Math.imul(0x11223344, 9) + 3) >>> 0)) >>> 0), 12);
+    writeFileSync(join(archiveRoot, 'Game3.rgss3a'), corrupt);
+    acheck(badRun([join(archiveRoot, 'Game3.rgss3a'), join(archiveRoot, 'v3out2')]).includes('corrupt v3 entry'), 'out-of-range v3 offset fails loudly');
+  } finally {
+    rmSync(archiveRoot, { recursive: true, force: true });
+  }
+  for (const [ok, label] of archiveChecks) if (!ok) fail(`RGSSAD fixture: ${label}`);
+  notes.push(`RGSSAD v1/v3 fixtures extract (${archiveChecks.length} checks)`);
+} catch (error) {
+  fail(`RGSSAD fixture check failed: ${String(error.message).slice(0, 200)}`);
 }
 
 // 6: lazy per-map index (T119) - stubs keep id+info and drop data/mwgEvents,
@@ -1706,6 +1960,38 @@ try {
   else notes.push('maps-sweep resume log ok (parse/filter/prune)');
 } catch (error) {
   fail(`resume log check failed: ${String(error.message).slice(0, 200)}`);
+}
+
+// Browser harness (T126): the headless Chromium playthrough over every converted
+// project, wired into npm test so regressions are caught without a manual run.
+// MWGP_BROWSER=0 skips it loudly; a machine with no playable browser (no
+// playwright/chromium installed) also skips loudly instead of failing — only a
+// harness that runs and reports failures fails the suite.
+try {
+  if (process.env.MWGP_BROWSER === '0') {
+    notes.push('browser harness skipped (loud): MWGP_BROWSER=0 - no browser coverage this run; the Node suite alone does not prove a game boots');
+  } else {
+    const { spawnSync } = await import('node:child_process');
+    console.log('browser harness: driving every converted project in Chromium...');
+    const ran = spawnSync(process.execPath, [join(root, 'tools', 'test-browser.mjs')], { encoding: 'utf8', timeout: 30 * 60 * 1000, maxBuffer: 64 * 1024 * 1024 });
+    process.stdout.write(ran.stdout || '');
+    process.stderr.write(ran.stderr || '');
+    const output = `${ran.stdout || ''}\n${ran.stderr || ''}`;
+    const skipped = output.split('\n').find(line => line.includes('SKIPPED (loud)'));
+    const summary = output.split('\n').filter(line => line.startsWith('Browser smoke:')).pop();
+    if (ran.error) fail(`browser harness could not run: ${String(ran.error?.message || ran.error).slice(0, 200)}`);
+    else if (skipped) notes.push(`browser harness: ${skipped.trim()}`);
+    else if (ran.status === 0 && summary && /no failures/.test(summary) && !/[1-9]\d* with console errors/.test(summary)) notes.push(`browser harness ok (${summary.replace(/^Browser smoke: /, '')})`);
+    else {
+      // Name the noisy projects: the harness summary's trailing "no failures"
+      // means no FAILED verdicts, which reads wrong next to a gate failure.
+      const noisy = output.split('\n').filter(line => line.includes('PASS (with console errors)')).map(line => line.trim());
+      const what = summary ? summary.replace(/^Browser smoke: /, '').replace(/, no failures$/, '') : `exit ${ran.status}`;
+      fail(`browser harness failed (${what}${noisy.length ? ` [${noisy.join('; ')}]` : ''})`);
+    }
+  }
+} catch (error) {
+  fail(`browser harness could not run: ${String(error?.message || error).slice(0, 200)}`);
 }
 
 if (failures.length) {

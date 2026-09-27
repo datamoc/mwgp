@@ -48,6 +48,20 @@ export function collectDefNames(ast, names = new Set()) {
   return names;
 }
 
+// `attr_reader`/`attr_accessor` declare zero-argument readers without a `def`
+// node (transpileUnit expands them to real defs before conversion). Collect
+// their names too, so call sites compile to calls exactly like plainer defs.
+export function collectAttrNames(ast, names = new Set()) {
+  if (!ast || typeof ast !== 'object' || !('type' in ast) || !('children' in ast)) return names;
+  if (ast.type === 'send' && (ast.children[1] === 'attr_reader' || ast.children[1] === 'attr_accessor')) {
+    for (const arg of ast.children.slice(2)) {
+      if (arg?.type === 'sym' && typeof arg.children[0] === 'string') names.add(arg.children[0]);
+    }
+  }
+  for (const child of ast.children) collectAttrNames(child, names);
+  return names;
+}
+
 // Instance methods of the class being transpiled: a receiver-less call to one is a call on `self` (`this.name(...)`).
 // Handled here rather than by a separate filter: a filter that returns without passing the node on ends the chain, so a
 // second filter placed before this one made the zero-argument heuristic below unreachable for every class with methods.

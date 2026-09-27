@@ -110,6 +110,23 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
 
 ## Recent (coord-tracked)
 
+- **T126 — Browser smoke harness wired into npm test (done).** `tools/test-smoke.mjs` spawns
+  `tools/test-browser.mjs` as its last section (30-minute cap, output streamed, summary pinned as a
+  `browser harness ok (...)` note), so regressions are caught without a manual run. `MWGP_BROWSER=0`
+  skips it loudly, and a machine with no playable browser (no playwright/chromium) now skips loudly
+  with exit 0 instead of failing — only a harness that runs and finds failures fails the suite.
+  Verified with a full `npm test`: 5/5 projects PASS in real Chromium with 0 console errors, unblocking
+  T120. `AGENTS.md` commands section updated to match.
+
+- **T117 — Converter half done (RGSS 111/122 upgrade).** `tools/convert-rgss.js` now tracks branch/
+  operand fallback sites and promotes 111/122 to `supported` when empty, mirroring MV. Verified by
+  two full Void reconversions to `/tmp` (111 supported ×339, 122 supported ×129, counts match the
+  shipped manifests) plus `npm test` green. Shipped manifests still read partial until the next
+  reconversion; the committed smoke guard waits for the tile-fix WIP in `test-smoke.mjs` to land.
+- **T116 — Script/plugin depth (closed as designedly-partial).** Ruling (michel, option a): 355/356
+  stay partial by nature — game JS runs in the plugin sandbox, unknown calls warn loudly, and the
+  old per-family adapter plan is superseded since T143. No code change; future runtime script
+  failures get their own tasks from playthrough evidence. Ruling recorded in the task description.
 - **T172 — Walkable pond (human report, faithful).** No code change: the map-2 pond is flagged
   passable+bush in the project's own tileset, so the shipped `checkPassage` walks it too — verified
   cell-for-cell against our `passageAllowsStep`. Logged in `docs/play-checklist.md`.
@@ -117,12 +134,14 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
   anywhere in the opening (tutorial texts, +5G step, "List other Controls" loop, map 1 → map 2
   transfer); chest +40G applied; gold reads correctly in the menu (Esc), absent from the map as in
   MV. The scripted-run stalls were bot-pacing artifacts. Logged in `docs/play-checklist.md`.
-- **T170 — MWG improvement bilan (done).** `4MWG/` refreshed against 0.19.0: §18 still open
+- **T170 — MWG improvement bilan (done, refreshed for 0.20.0).** `4MWG/` refreshed against 0.20.0: §18 still open
   (null-texture `_updateGpuText`, deterministic confirm-spam repro stands), new §19 asks for a loud
   unknown-command hook in `EventRunner.step()` (found via T127: unknown keys fall through silent),
   §20 refreshes the adoption backlog (portrait seam, MoveRouteRunner, World swap, per-kind bus
   volume — all still adapter-side, verified in `player-core.js`), §21 proposes adopting 0.19.0's
-  SoundFont subsetting at convert time. Notes-only, no code touched.
+  SoundFont subsetting at convert time, §22 adopts 0.20.0's worker MIDI render (`renderMidiToBufferAsync`
+  in `audio-manager.js` with sync fallback, pinned in `npm test`; threads/chess/compress deliberately
+  not adopted).
 - **T158 — Browser harness prints every note (done).** One-line fix in `tools/test-browser.mjs`: the
   PASS summary loop no longer truncates `result.notes` to the first 2, so battle/audio lines are visible
   again (the per-note 160-char cap stays). Verified live (`--only Elementals`, audio/battle/menu probes

@@ -2,9 +2,9 @@
 // definition, leaving the call to `__x` pointing at nothing (and, for `initialize`, a derived constructor that uses `this`
 // before `super`). Resolved on the Ruby source instead: the earlier `def original` (same indentation as the alias) becomes
 // `def __x`, so the chain is preserved. For `initialize` the renamed original also loses its own `super`, and the last
-// `initialize` starts with that original `super(...)`: constructor -> super -> the renamed originals.
+// `initialize` starts with that original `super(...)`: constructor -> super -> the renamed originals. A setter aliased under a plain name (`alias __shadow_hpeq hp=`, invoked as `__shadow_hpeq(value)`) keeps a plain `def`: Ruby lets an aliased setter body run as an ordinary call, but a transpiled JS setter is not callable.
 export function resolveInitializeAliases(source) {
-  const aliasPattern = /^([ \t]*)alias(?:_method)?[ \t]+:?(\w+[?!]?),?[ \t]+:?(\w+[?!]?)(?!\w)[^\n]*$/m;
+  const aliasPattern = /^([ \t]*)alias(?:_method)?[ \t]+:?(\w+[?!]?),?[ \t]+:?(\w+[?!]?)(=)?(?!\w)[^\n]*$/m;
   const escapeName = name => name.replace(/[?!]/g, char => '\\' + char);
   const methods = new Set();
   let rootSuper = null;
@@ -21,7 +21,7 @@ export function resolveInitializeAliases(source) {
       from = key + found[0].length;
     }
     if (!alias) break;
-    const [line, indent, name, original] = alias;
+    const [line, indent, name, original, setterOriginal] = alias;
     const before = source.slice(0, alias.index);
     const defPattern = new RegExp(`^${indent}def ${escapeName(original)}(?![\\w?!])[^\\n]*$`, 'gm');
     let last = null, found;
@@ -63,6 +63,7 @@ export function resolveInitializeAliases(source) {
       block = block.replace(argsuper, '').replace(zsuper, '');
     }
     block = block.replace(new RegExp(`def ${escapeName(original)}(?![\\w?!])`), `def ${name}`);
+    if (setterOriginal) block = block.replace(new RegExp(`def ${escapeName(name)}=`), `def ${name}`);
     source = source.slice(0, last.index) + block + source.slice(blockEnd);
     methods.add(name.replace(/[?!]$/, ''));
   }

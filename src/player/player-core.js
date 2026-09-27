@@ -2853,8 +2853,20 @@ export function tileToFrame(tile, sheetEntries, sheets, mwg, isXp = false, tiles
   const slot = tile >= 2048 && tile < 2816 ? 0 : tile >= 2816 && tile < 4352 ? 1 : tile >= 4352 && tile < 5888 ? 2 : tile >= 5888 && tile < 8192 ? 3 : tile >= 1536 && tile < 1664 ? 4 : tile < 256 ? 5 : tile < 512 ? 6 : tile < 768 ? 7 : tile < 1024 ? 8 : -1;
   const sheet = sheetEntries.findIndex(entry => entry.slot === slot);
   if (sheet < 0) return mwg.EMPTY;
-  const base = slot === 0 ? 2048 : slot === 1 ? 2816 : slot === 2 ? 4352 : slot === 3 ? 5888 : slot === 4 ? 1536 : slot === 5 ? 0 : slot === 6 ? 256 : slot === 7 ? 512 : 768;
+  if (slot >= 5) return safeTileFrame(mwg, sheet, normalTileFrame(tile), sheets);
+  const base = slot === 0 ? 2048 : slot === 1 ? 2816 : slot === 2 ? 4352 : slot === 3 ? 5888 : 1536;
   return safeTileFrame(mwg, sheet, tile - base, sheets);
+}
+
+// B-E sheets are addressed in 8-column halves, not row-major-16:
+// col = (floor(id/128)%2)*8 + id%8, row = floor((id%256)/8)%16, frame =
+// row*16+col (rpg_core.js Tilemap._drawNormalTile, both renderers).
+// Row-major lands on unrelated art — e.g. Karryn's BBgradation2 dev-marker
+// badges. Pure so tests can pin it.
+export function normalTileFrame(tile) {
+  const col = (Math.floor(tile / 128) % 2) * 8 + (tile % 8);
+  const row = Math.floor((tile % 256) / 8) % 16;
+  return row * 16 + col;
 }
 
 // A character cell past the end of its sheet (the measured grid disagrees with the image) must not abort the scene:

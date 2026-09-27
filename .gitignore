@@ -14,3 +14,7 @@
 # deeper file wins), so those specific paths are `git add -f`orced instead, to keep this repo
 # runnable from a fresh clone without a Ruby toolchain.
 .aider*
+/.agents/
+/.opencode/
+/.playwright-mcp/
+/.coord-session

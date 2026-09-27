@@ -40,9 +40,10 @@ assets into the output folder; without any flag the manifest references the orig
 folder in place and the player falls back to a placeholder tile sheet.
 
 `npm test` runs `tools/test-smoke.mjs` (converter/validator/runtime checks on synthetic and locally installed
-projects, plus the audio, SoundFont-licence and RGSS-coverage checks); `node tools/test-browser.mjs` is the separate
-browser harness (every converted project in a real Chromium: boot, movement, save/load, map BGM, one track of every
-audio format). `validate:mwgp` checks a generated manifest and its event command tree. Beyond that, verify changes by
+projects, plus the audio, SoundFont-licence and RGSS-coverage checks, then the browser harness as its last
+section: every converted project in a real Chromium — boot, movement, save/load, map BGM, one track of every
+audio format — loudly skipped with `MWGP_BROWSER=0` or when no playwright/chromium is installed);
+`node tools/test-browser.mjs` also runs standalone with the same debug aids plus `--only`, `--maps` and `--soak`. `validate:mwgp` checks a generated manifest and its event command tree. Beyond that, verify changes by
 running `npm start` and playing a converted project in the browser. Debug aids for the browser harness:
 `MWGP_SMOKE_DEBUG=1` (echo page console), `MWGP_SMOKE_SHOT=<png>`, `MWGP_SMOKE_SETTLE=<ms>`,
 `MWGP_SMOKE_DISMISS=<n>`, `MWGP_SMOKE_NOAUDIO=1`, `MWGP_SMOKE_NOBATTLE=1`, `MWGP_SMOKE_NOMENU=1`, `MWGP_SMOKE_JOBS=<n>` (map boots in parallel, defaults to core count), `MWGP_SMOKE_PROGRESS=<file>` (live per-map progress log, defaults into the OS temp dir), `MWGP_SMOKE_RESUME=1` (skip maps the log already records as ok, so an interrupted sweep relaunches for the remaining maps only; fresh runs truncate their project's old lines), `--only <project>`, and
@@ -219,9 +220,10 @@ at `/audio-manager.js`, shared by the title screen in `public/player.js` and the
 `player-core.js`) is the thin adapter over it and holds only what the library leaves to the game:
 - **finding files** through the manifest's `audio` section (below);
 - **decoding**: `decodeAudioData` for real audio plus the MV/MZ `LOOPSTART`/`LOOPLENGTH` Vorbis loop
-  tags; MIDI through `parseMidi` -> `renderMidiToBuffer` (about 0.7 s for a track with the project's
-  SoundFont), the PCM cached in IndexedDB (`cacheVersion` = `source.convertedAt`) because every map
-  change reloads the page;
+  tags; MIDI through `renderMidiToBufferAsync` on a worker thread (mw_games 0.20+, bit-identical
+  to the sync `parseMidi` -> `renderMidiToBuffer` path it falls back to — about 0.7 s for a track
+  with the project's SoundFont, now off the main thread), the PCM cached in IndexedDB
+  (`cacheVersion` = `source.convertedAt`) because every map change reloads the page;
 - **the player's mixer**: master, per-kind volumes and mute in `localStorage` (`M` toggles mute in
   game; sliders in the title Options panel), scaled on top of each track's own volume, with snapshots
   reporting the level the game asked for;
@@ -269,8 +271,8 @@ through the real dialogue UI (`MWGP_SMOKE_NOBATTLE=1` skips it).
 
 **XP database (`tools/rgss-database.mjs`):** `convert-rgss.js` converts `Actors/Classes/Skills/Items/Weapons/Armors/
 Enemies/Troops/States/System.rxdata` into the same MV-shaped `database`, so XP games with the default battle system
-use this runner and menu unchanged. (VX `.rvdata` files are discovered and its maps/events/scripts convert, but the
-mapper stays XP-only: VX manifests ship `database: {}`.) Stats map to params (mhp, mmp, atk = weapon atk, def = pdef, mat = int, mdf = mdef,
+use this runner and menu unchanged. (VX `.rvdata` / Ace `.rvdata2` files are discovered and their maps/events/scripts convert, but the
+mapper stays XP-only: VX/Ace manifests ship `database: {}`.) Stats map to params (mhp, mmp, atk = weapon atk, def = pdef, mat = int, mdf = mdef,
 agi, luk = dex, and param 8 = str); each skill's power/stat factors are written out as an XP damage formula string; the
 per-actor stat tables (`actor.params[param][level]`) and XP's exp curve (`actor.expCurve`) live on the actor; element/
 state ranks become trait 11/13 rates; troop pages convert through the same event converter. XP's own records use ids 1
@@ -466,11 +468,15 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   real menus) is untested. A person playing is the next real check.
 - **Timing** — snippets that do not wait on frames are synchronous; their dialogue/balloons/animations are queued and
   awaited in order after the snippet. Code that waits on frames is lifted to async (see above). Conditions and
-  Control Variables scripts stay synchronous (never lifted). Not covered: the Ace *converter* (only XP `.rxdata`
-  and VX `.rvdata` exist), move-route script steps. VX converts end to end (`tools/rgss-vx.mjs` tables, synthetic
-  VX/XP fixtures in `npm test`) but ships `database: {}` (flat VX stats unmapped: duel-fallback battles, minimal
-  menu) and empty tile-passage flags (no database source: movement unclamped), and no local VX game has been
-  played through yet.
+  Control Variables scripts stay synchronous (never lifted). Not covered: move-route script steps.
+  VX converts end to end (`tools/rgss-vx.mjs` tables, synthetic VX/XP fixtures in `npm test`) but ships
+  `database: {}` (flat VX stats unmapped: duel-fallback battles, minimal menu) and empty tile-passage
+  flags (no database source: movement unclamped), and no local VX game has been played through yet.
+  Ace converts end to end the same way (`tools/rgss-ace.mjs`, synthetic Ace fixture in `npm test`,
+  `.rgss3a` archives extract): it shares VX's event numbering (assumed, unverified against a real Ace
+  project — no local Ace game or RGSS3 binary exists yet) but reads its own `Tilesets.rvdata2` passage
+  flags and per-map tileset ids, so movement is clamped where VX's is not; database and real-project
+  playthrough stay open.
 - `npm test` runs a made-up game (Interpreter + Game_Event + module + helper `def`) through the
   whole pipeline, plus an MV script; both real Pokémon Void games transpile 100% of event
   scripts and ~96% of library units (`compatibility.scripts`, `rubyLibrary.failed`).

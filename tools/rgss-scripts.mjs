@@ -49,10 +49,12 @@ const inflate = bytes => inflateSync(bytes).toString('utf8');
 
 // Returns [{ name, source }] in load order (Scripts first, then plugin scripts).
 // T122: VX ships the same container as Scripts.rvdata (RGSS2 Ruby goes
-// through the same pipeline; only the filename differs).
+// through the same pipeline; only the filename differs). T123: Ace's
+// Scripts.rvdata2 is assumed to be the same container (RGSS3 Ruby goes
+// through the same pipeline); unverified against a real Ace project.
 export async function readRgssScripts(dataDir) {
   const scripts = [];
-  for (const file of ['Scripts.rxdata', 'Scripts.rvdata', 'PluginScripts.rxdata']) {
+  for (const file of ['Scripts.rxdata', 'Scripts.rvdata', 'Scripts.rvdata2', 'PluginScripts.rxdata']) {
     let buffer;
     try { buffer = await readFile(join(dataDir, file)); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }

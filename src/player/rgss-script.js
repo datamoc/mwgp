@@ -101,6 +101,7 @@ function installRubyCore() {
   define(Number.prototype, 'to_i', function () { return Math.trunc(this); });
   define(Number.prototype, 'to_f', function () { return Number(this); });
   define(Number.prototype, 'to_s', function (base = 10) { return this.toString(base); });
+  define(Number.prototype, 'clamp', function (min, max) { return Math.min(Math.max(Number(this), min), max); });
   // `disposed?` on an object that never had a disposable resource (a game wrapper around the inert display layer).
   define(Object.prototype, 'disposed', function () { return false; });
   // Hash#keys / #values as properties (Ruby2JS reads a Hash's `.keys` without a call): accessors on Object.prototype, so
@@ -183,14 +184,17 @@ function installRubyCore() {
 function installRubyHashIterator(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.hasOwn(value, Symbol.iterator)) return value;
   // Ruby2JS lowers `hash.keys` to a property access in a few generated
-  // library units (e.g. constant token tables). Keep a
-  // snapshot alongside the iterator so frozen Hash literals still expose
-  // the Ruby API without turning `keys` into an eager function call.
+  // library units (e.g. constant token tables). Read live, not snapshotted:
+  // registry hashes (GameData::X::DATA) are empty at load and fill later from
+  // boot statements; frozen Hash literals never mutate, so both read the same.
   if (!Object.hasOwn(value, 'keys')) Object.defineProperty(value, 'keys', {
     configurable: true,
-    value: Object.keys(value),
+    get() { return Object.keys(this); },
     enumerable: false
   });
+  for (const name of ['length', 'size']) {
+    if (!Object.hasOwn(value, name)) Object.defineProperty(value, name, { configurable: true, enumerable: false, get() { return Object.keys(this).length; } });
+  }
   Object.defineProperty(value, Symbol.iterator, {
     configurable: true,
     value: function* () {
@@ -293,7 +297,15 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       if (typeof key === 'symbol') return undefined;
       if (key in target) return target[key];
       const stored = rgss().data[`${name}.${key}`];
-      if (stored !== undefined) return stored;
+      if (stored !== undefined) {
+        // A stored value under a name the game calls as a method (the
+        // converter forces parens for known method names, including plain
+        // value readers like `memorized_bgm`): the stored value shadows the
+        // borrowed reader, so answer as a callable reader like game
+        // instances do and `x()` keeps working after `x = value`.
+        if (typeof stored !== 'function' && typeof key === 'string' && !key.startsWith('_') && callableMethods.has(key)) return () => stored;
+        return stored;
+      }
       const Class = className ? unit(className) : null;
       const descriptor = Class?.prototype ? Object.getOwnPropertyDescriptor(Class.prototype, key) : undefined;
       if (descriptor) {
@@ -627,7 +639,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       get width() { return reader('width', () => mapWidth); },
       get height() { return reader('height', () => mapHeight); },
       // A plain object (not a Proxy) so `events.values`/iteration behave like Ruby's Hash.
-      get events() { return eventsObject; },
+      get events() { return reader('events', () => eventsObject); },
       // The instance data the game's own Game_Map methods read (`@map.data`, `@passages`, ...), from the manifest.
       get _map() { return mapModel().map; }, get map() { return mapModel().map; },
       get _tileset_id() { return mapModel().tilesetId; }, get tileset_id() { return mapModel().tilesetId; },
@@ -701,9 +713,15 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     // Ruby's `$~` (English: `$MATCH`): the last `str =~ /re/` match.
     get $MATCH() { return lastMatch ? { pre_match: lastMatch.text.slice(0, lastMatch.index), post_match: lastMatch.text.slice(lastMatch.index + lastMatch.groups[0].length), to_a: lastMatch.groups, ...lastMatch.groups } : null; },
     __mixin: (target, descriptors) => { for (const key of Reflect.ownKeys(descriptors)) if (!Object.prototype.hasOwnProperty.call(target, key)) Object.defineProperty(target, key, descriptors[key]); return target; },
+    // Ruby's respond_to? is total (nil, strings and numbers answer false);
+    // the transpiler lowers a literal check to `"lit" in obj`, which throws
+    // on a primitive, so literal checks are rewritten to this at conversion.
+    __respond_to: (obj, name) => (typeof obj === 'object' || typeof obj === 'function') && obj !== null && String(name) in Object(obj),
     // Ruby's `!x`: only nil/false are falsy (the converter rewrites `!x` to `__falsy(x)` for a bare value read).
     __falsy: value => value === null || value === undefined || value === false,
-    __values: value => (value != null && typeof value === 'object' && typeof value[Symbol.iterator] !== 'function' ? Object.values(value) : value),
+    // A values context (`DATA.each_value`, `.values.each`): plain-prototype objects are Ruby hashes even when
+    // `installRubyHashIterator` gave them a pair-yielding iterator for `for...of` loops, so they still read as values.
+    __values: value => (value != null && typeof value === 'object' && (typeof value[Symbol.iterator] !== 'function' || Object.getPrototypeOf(value) === Object.prototype) ? Object.values(value) : value),
     __each: value => (value != null && typeof value[Symbol.iterator] !== 'function' && typeof value === 'object' ? Object.entries(value) : value),
     ...Object.fromEntries(Object.entries(rgssClasses).map(([name, Class]) => [name, callableAttributes(Class)])),
     // Class-body macros that Ruby2JS leaves as calls when they sit in a module body; nothing to do

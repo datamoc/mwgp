@@ -17,6 +17,7 @@
 import { convert } from '../transpilers/ruby2js-master/demo/selfhost/ruby2js.js';
 import Functions from '../transpilers/ruby2js-master/demo/selfhost/filters/functions.js';
 import { RgssCalls, setSelfMethods } from './rgss-call-filter.mjs';
+import { rewriteLiteralRespondTo } from './rgss-library.mjs';
 
 // Snippets run as bodies of the game's Interpreter methods: bare calls to those methods
 // become `this.<name>()`. The set comes from the game's scripts (tools/rgss-library.mjs).
@@ -34,7 +35,8 @@ const compile = ruby => { setSelfMethods(interpreterNames); return convert(ruby,
 // { error } so the converter can keep the Ruby text and report the failure
 // instead of aborting a whole project on one exotic snippet.
 export function transpileSnippet(ruby, kind = 'call') {
-  const source = String(ruby ?? '').replace(/\r\n?/g, '\n').trim();
+  // Literal respond_to? checks need the nil-safe helper in snippets too.
+  const source = rewriteLiteralRespondTo(String(ruby ?? '').replace(/\r\n?/g, '\n').trim());
   if (!source) return { js: '' };
   try {
     if (kind === 'cond') {
