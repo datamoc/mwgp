@@ -32,3 +32,17 @@ export function spliceMapEntry(index, full) {
   else maps.push(full);
   return { ...index, maps };
 }
+
+// Versioned gzip cache keys for the generated JSON payloads: a reconvert
+// changes mtime/size, so both the parsed manifest and its compressed
+// children invalidate together (a map key without the version served the
+// previous conversion's JSON after a reconvert).
+export function manifestVersion(stat) {
+  return `${stat?.mtimeMs}:${stat?.size}`;
+}
+export function indexCacheKey(file, stat) {
+  return `${file}:${manifestVersion(stat)}:index`;
+}
+export function mapCacheKey(file, stat, mapId) {
+  return `${file}:${manifestVersion(stat)}:map:${mapId}`;
+}

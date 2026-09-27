@@ -1651,7 +1651,14 @@ try {
 // 6: lazy per-map index (T119) - stubs keep id+info and drop data/mwgEvents,
 // every stub resolves back to its full entry, and the index is far smaller.
 try {
-  const { buildMapIndex, findMapEntry, spliceMapEntry } = await import(pathToFileURL(join(root, 'src', 'map-index.js')).href);
+  const { buildMapIndex, findMapEntry, spliceMapEntry, manifestVersion, indexCacheKey, mapCacheKey } = await import(pathToFileURL(join(root, 'src', 'map-index.js')).href);
+  // Cache keys invalidate with the file version: a reconvert (new mtime/size)
+  // must not serve the previous conversion's compressed payloads.
+  const statA = { mtimeMs: 1000, size: 71 }, statB = { mtimeMs: 2000, size: 71 };
+  if (manifestVersion(statA) === manifestVersion(statB)) fail('manifest version must change with mtime');
+  if (indexCacheKey('f', statA) === indexCacheKey('f', statB)) fail('index cache key must change with mtime');
+  if (mapCacheKey('f', statA, 3) === mapCacheKey('f', statB, 3)) fail('map cache key must change with mtime');
+  if (mapCacheKey('f', statA, 3) === mapCacheKey('f', statA, 4)) fail('map cache key must change with map id');
   const fake = { maps: [{ id: 3, info: { name: 'Town' }, data: { width: 20 }, mwgEvents: [1] }, { id: 7, info: null, data: {}, mwgEvents: [] }] };
   const fakeIndex = buildMapIndex(fake);
   if (fakeIndex.maps.length !== 2 || fakeIndex.maps.some(stub => stub.data !== undefined || stub.mwgEvents !== undefined)) fail('map index stubs must drop data/mwgEvents');

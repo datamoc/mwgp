@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { buildMapIndex, findMapEntry } from './map-index.js';
+import { buildMapIndex, findMapEntry, indexCacheKey, mapCacheKey } from './map-index.js';
 
 // Text responses (manifests, plugin/engine sources) are large and compress ~8x: gzip them for clients that
 // accept it, keeping the compressed copy per file version so the cost is paid once.
@@ -149,14 +149,13 @@ const server = createServer(async (req, res) => {
       if (resolved.error) return json(res, 404, { error: resolved.error });
       const entry = findMapEntry(await loadManifest(resolved.manifest), mapIdRaw);
       if (!entry) return json(res, 404, { error: 'MWGP map not found' });
-      return sendJson(req, res, JSON.stringify(entry), `${resolved.manifest}:map:${entry.id}`);
+      return sendJson(req, res, JSON.stringify(entry), mapCacheKey(resolved.manifest, statSafe(resolved.manifest), entry.id));
     }
     if (rest.endsWith('/index')) {
       const resolved = resolveProject(rest.slice(0, -'/index'.length));
       if (resolved.error) return json(res, 404, { error: resolved.error });
-      const stat = statSafe(resolved.manifest);
       const payload = JSON.stringify(buildMapIndex(await loadManifest(resolved.manifest)));
-      return sendJson(req, res, payload, `${resolved.manifest}:${stat?.mtimeMs}:${stat?.size}:index`);
+      return sendJson(req, res, payload, indexCacheKey(resolved.manifest, statSafe(resolved.manifest)));
     }
     const resolved = resolveProject(rest);
     if (resolved.error) return json(res, 404, { error: resolved.error });
