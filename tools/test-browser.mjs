@@ -14,8 +14,15 @@
 // MWGP_SMOKE_DEBUG=1 echoes every page console message.
 // It starts its own server on RPGM_SMOKE_PORT (default 4199) unless
 // MWGP_SMOKE_BASE points at an already-running one.
-import { existsSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import { join } from 'node:path';
+import { filterResumedMaps, parseResumeSkips, pruneProjectLines } from './resume-log.mjs';
+// Progress log: one line per booted map, flushed synchronously so an
+// interrupted run still shows how far it got. The console output may be
+// piped through tail (invisible until the end); this file is the live view.
+const progressFile = process.env.MWGP_SMOKE_PROGRESS || join(os.tmpdir(), 'mwgp-maps-progress.log');
+const logProgress = line => { try { appendFileSync(progressFile, `${new Date().toISOString()} ${line}\n`); } catch { /* progress must never fail the run */ } };
 import { spawn, execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -413,8 +420,33 @@ async function sweepMaps(name, limit) {
   let maps = (project.maps || []).filter(map => map?.data?.width > 0);
   if (process.env.MWGP_SMOKE_MAPIDS) { const wanted = new Set(process.env.MWGP_SMOKE_MAPIDS.split(',').map(Number)); maps = maps.filter(map => wanted.has(Number(map.id))); }
   if (Number.isFinite(limit) && limit > 0 && maps.length > limit) { const step = maps.length / limit; maps = Array.from({ length: limit }, (_, index) => maps[Math.floor(index * step)]); }
+  // Resume: skip maps this log already records as ok, so an interrupted run
+  // can be relaunched for the remaining maps only. PROBLEM maps are retried.
+  // Only use it when neither the harness, the player nor the manifests changed
+  // since the logged oks - otherwise start fresh (the default).
+  // A fresh sweep truncates the log so the file always reflects the current run.
+  if (process.env.MWGP_SMOKE_RESUME) {
+    let resumed = { maps, skipped: 0 };
+    try {
+      resumed = filterResumedMaps(maps, parseResumeSkips(readFileSync(progressFile, 'utf8'), name));
+    } catch { /* no usable log yet: test everything */ }
+    maps = resumed.maps;
+    if (resumed.skipped) console.log(`  ... resumed: skipping ${resumed.skipped} map(s) already ok`);
+  } else {
+    // Fresh run: drop the previous run's lines for this project so a later
+    // resume cannot trust oks from an older run of it.
+    try {
+      if (existsSync(progressFile)) writeFileSync(progressFile, pruneProjectLines(readFileSync(progressFile, 'utf8'), name));
+    } catch { /* progress must never fail the run */ }
+  }
   const problems = [], loops = [], gameNotes = [];
-  for (const map of maps) {
+  // Map boots are independent (own context, no keyboard) and barely use CPU one
+  // at a time, so run one worker per core. Override with MWGP_SMOKE_JOBS=<n>.
+  const jobs = Math.max(1, Math.floor(Number(process.env.MWGP_SMOKE_JOBS) || os.availableParallelism?.() || 4));
+  console.log(`  ... ${maps.length} map(s), ${Math.min(jobs, maps.length)} parallel worker(s)`);
+  logProgress(`${name}: sweep start, ${maps.length}/${(project.maps || []).length} maps`);
+  const queue = [...maps];
+  const sweepOne = async map => {
     const context = await browser.newContext({ viewport: { width: 900, height: 640 } });
     const page = await context.newPage();
     const errors = [];
@@ -445,7 +477,10 @@ async function sweepMaps(name, limit) {
       }
     } catch (error) { problems.push(`map ${map.id}: exception ${String(error?.message || error).slice(0, 120)}`); }
     await context.close().catch(() => {});
-  }
+    logProgress(`${name}: map ${map.id} ${problems.some(p => p.startsWith(`map ${map.id}:`)) ? 'PROBLEM' : 'ok'}`);
+  };
+  await Promise.all(Array.from({ length: Math.min(jobs, queue.length) }, async () => { let map; while ((map = queue.shift())) await sweepOne(map); }));
+  problems.sort((a, b) => Number(String(a.match(/map (\d+)/)?.[1] ?? 0)) - Number(String(b.match(/map (\d+)/)?.[1] ?? 0)));
   return { name, tested: maps.length, total: (project.maps || []).length, problems, loops: loops.concat(gameNotes) };
 }
 

@@ -1679,6 +1679,28 @@ try {
   fail(`map index check failed: ${String(error.message).slice(0, 200)}`);
 }
 
+// 8: maps-sweep resume log - parse/filter/prune rules over synthetic log text.
+try {
+  const { filterResumedMaps, parseResumeSkips, pruneProjectLines } = await import(pathToFileURL(join(root, 'tools', 'resume-log.mjs')).href);
+  const fakeLog = [
+    '2026-09-27T00:00:00.000Z Elementals: sweep start, 3/89 maps',
+    '2026-09-27T00:00:01.000Z Elementals: map 1 ok',
+    '2026-09-27T00:00:02.000Z Elementals: map 2 PROBLEM',
+    '2026-09-27T00:00:03.000Z Karryn: map 1 ok',
+    '2026-09-27T00:00:04.000Z Elementals: map 3 ok',
+    ''
+  ].join('\n');
+  const done = parseResumeSkips(fakeLog, 'Elementals');
+  if (done.size !== 2 || !done.has(1) || !done.has(3)) fail('resume log must collect only ok maps of the project');
+  const { maps, skipped } = filterResumedMaps([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }], done);
+  if (skipped !== 2 || maps.map(map => map.id).join(',') !== '2,4') fail('resume filter must drop ok maps and retry PROBLEM/untested ones');
+  const pruned = pruneProjectLines(fakeLog, 'Elementals');
+  if (/Elementals: (map|sweep start)/.test(pruned) || !/Karryn: map 1 ok/.test(pruned)) fail('fresh runs must prune only their own project lines');
+  else notes.push('maps-sweep resume log ok (parse/filter/prune)');
+} catch (error) {
+  fail(`resume log check failed: ${String(error.message).slice(0, 200)}`);
+}
+
 if (failures.length) {
   console.error(`smoke test FAILED (${failures.length}):\n- ${failures.join('\n- ')}`);
   process.exit(1);

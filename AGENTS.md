@@ -45,7 +45,7 @@ browser harness (every converted project in a real Chromium: boot, movement, sav
 audio format). `validate:mwgp` checks a generated manifest and its event command tree. Beyond that, verify changes by
 running `npm start` and playing a converted project in the browser. Debug aids for the browser harness:
 `MWGP_SMOKE_DEBUG=1` (echo page console), `MWGP_SMOKE_SHOT=<png>`, `MWGP_SMOKE_SETTLE=<ms>`,
-`MWGP_SMOKE_DISMISS=<n>`, `MWGP_SMOKE_NOAUDIO=1`, `MWGP_SMOKE_NOBATTLE=1`, `MWGP_SMOKE_NOMENU=1`, `--only <project>`, and
+`MWGP_SMOKE_DISMISS=<n>`, `MWGP_SMOKE_NOAUDIO=1`, `MWGP_SMOKE_NOBATTLE=1`, `MWGP_SMOKE_NOMENU=1`, `MWGP_SMOKE_JOBS=<n>` (map boots in parallel, defaults to core count), `MWGP_SMOKE_PROGRESS=<file>` (live per-map progress log, defaults into the OS temp dir), `MWGP_SMOKE_RESUME=1` (skip maps the log already records as ok, so an interrupted sweep relaunches for the remaining maps only; fresh runs truncate their project's old lines), `--only <project>`, and
 `--soak [seconds]` (a bot plays a new game of each project: walks, presses Enter/Esc; reports maps reached, dialogues opened and fails on runtime/uncaught errors or a page that stops answering; `MWGP_SMOKE_DEBUG=1` prints the error stacks), and
 `--maps [N]`, which also boots every map of each project (or N evenly spread ones) on its own and fails on maps that
 crash, log runtime (`MWGP ...`) or uncaught errors or draw nothing (errors the game's own code logs and recovers from are printed as notes) (`npm run` is not needed: `node tools/test-browser.mjs --maps`).
