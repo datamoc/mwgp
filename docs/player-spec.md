@@ -75,9 +75,10 @@ Two branches, picked from `manifest.titleScreen`, the same for every engine:
   shadow/outline, gradients, get/set_pixel). `Window` is not drawn yet (games
   that build their windows from Sprites still show their text); tone/flash and
   blend types are pending.
-- Map transfers carry `GameState` through `SaveSystem` and a full page reload
-  (`?map=&x=&y=` + `runtime-transition` payload) rather than an in-memory
-  scene swap; music resumes from its playhead across the reload.
+- Map transfers carry `GameState` through `SaveSystem` (`runtime-transition`
+  payload) into a scene rebuilt in the same page (`switchMap`; the URL follows
+  via `history.replaceState`); music resumes from its playhead. A failed switch
+  falls back to reloading the page.
 
 ## 4. Events and dialogue
 

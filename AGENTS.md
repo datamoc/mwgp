@@ -303,8 +303,12 @@ manifest for `?id=`, then tries the real player and falls back on failure:
   client-side (`buildAutotileSheet` + the `FLOOR_AUTOTILE_TABLE`/`WALL_AUTOTILE_TABLE` shape
   tables — mirrored in `4MWG/extracts/rpgm-autotiles.js` as a reference for upstreaming this
   into `mw_games` itself), drives events/dialogue/pictures/sound through the vocabulary above,
-  and carries `GameState` across map transfers by round-tripping through `SaveSystem` and a
-  full page reload (`location.href` with `?map=&x=&y=`) rather than an in-memory scene swap.
+  and carries `GameState` across map transfers (and Change Tileset, and loading a save on another map) by round-tripping
+  through `SaveSystem` (`runtime-transition`) into a rebuilt scene: `startMwgPlayer` keeps the page, the `Game`, the
+  audio manager and the loaded plugin/Ruby libraries, and `switchMap` builds the next map's scene (`buildScene`), points
+  the URL at it (`history.replaceState`, so a reload lands on the same map) and calls `Game.switchScene`; the old scene's
+  `teardown` runs and the event that asked unwinds (`ExitEventSignal`). A failed switch falls back to the full reload.
+  The library's `World` is not used: its factories are synchronous and a built scene captures its spawn point.
   `F5`/`F9` save/load slot 1 the same way.
 - `src/player/fallback-core.js` (`MwgPlayer`) — a minimal `<canvas>` 2D fallback with no asset
   dependency (flat-colored tiles), used only when the Pixi/mw_games 2D runtime is unavailable.

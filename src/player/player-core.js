@@ -215,8 +215,18 @@ export async function startMwgPlayer(canvas, project) {
   const { createRgssRuntime } = await import(`/rgss-script.js?v=${Date.now()}`);
   const mwg = globalThis.mw_games;
   if (!mwg?.Game || !mwg?.Scene2D || !mwg?.TileMap || !mwg?.SpriteSheet) throw new Error('mw_games 2D runtime is unavailable');
-  // Transfers and cross-map loads round-trip through the URL. Prefer the
-  // requested map when present, while retaining the manifest start map for a
+  // Construct Game before creating/loading any textures. MWG's pixelArt option
+  // sets Pixi's default atlas sampling to nearest-neighbour; doing this after
+  // Resources.load() leaves already-created frames with linear filtering and
+  // can expose one-pixel seams at tile boundaries.
+  const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
+  // Set up once per page: the Game, and the audio manager (its tracks and decoded music outlive a map).
+  let audioManager = null;
+  // Builds the scene class for the map the URL names, with everything that belongs to that map (tileset sheets, event and
+  // portrait art, tile layers) in its closure. A map transfer runs it again for the next map (see switchMap below).
+  const buildScene = async () => {
+  // The URL names the map: a transfer keeps it current (history.replaceState), so a reload lands on the same map.
+  // Prefer the requested map when present, while retaining the manifest start map for a
   // clean launch and a safe fallback for malformed/stale URLs.
   const params = new URLSearchParams(globalThis.location?.search || '');
   const requestedMapId = params.has('map') ? Number(params.get('map')) : NaN;
@@ -248,11 +258,6 @@ export async function startMwgPlayer(canvas, project) {
   const sheetEntries = assetRoot && realSheets.length ? realSheets : [{ slot: 5, url: placeholderSheet() }];
   const xpAutotileEntries = isXp && assetRoot ? (tileset?.autotileNames || []).map((name, index) => name ? { index, url: `${assetRoot}/graphics/Autotiles/${encodeURIComponent(name)}.png` } : null).filter(Boolean) : [];
   const sheetUrls = sheetEntries.map(entry => entry.url);
-  // Construct Game before creating/loading any textures. MWG's pixelArt option
-  // sets Pixi's default atlas sampling to nearest-neighbour; doing this after
-  // Resources.load() leaves already-created frames with linear filtering and
-  // can expose one-pixel seams at tile boundaries.
-  const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
   // A single broken or stalled optional asset must not hold the complete game
   // startup hostage. The underlying request may finish later and be cached by
   // MWG, but scene creation gets a bounded failure and can use its normal
@@ -283,6 +288,8 @@ export async function startMwgPlayer(canvas, project) {
   const sheets = await Promise.all(renderSheetEntries.map(entry => entry.slot < 4 && !(mvA4Native && entry.slot === 3)
     ? buildAutotileSheet(entry.url, entry.slot, mwg, tilesetFlags)
     : Promise.resolve(mwg.SpriteSheet.grid(entry.url, tileSize))));
+  // The static autotile atlases drawn onto canvases belong to this map's scene and go with it.
+  const ownedAtlases = sheets.filter((_, index) => renderSheetEntries[index].slot < 4 && !(mvA4Native && renderSheetEntries[index].slot === 3));
   const mvA4Sheet = mvA4Native ? sheets[renderSheetEntries.findIndex(entry => entry.slot === 3)] : null;
   // The A2 sheet stays on the atlas; its table-edge strips read the raw sheet.
   const mvA2Entry = renderSheetEntries.find(entry => entry.slot === 1 && entry.url !== placeholderUrl);
@@ -341,7 +348,7 @@ export async function startMwgPlayer(canvas, project) {
   // Audio: BGM/BGS/ME/SE with volume, pitch and pan, format-independent (see audio-manager.js).
   // The manager is created only for decoded projects; tracks decode lazily on first use, and the
   // sounds this map's events and the engine itself use are warmed up front.
-  const audio = assetRoot && project.assets?.audio ? new AudioManager({ root: assetRoot, lib: mwg.Audio, index: project.audio?.index, cacheVersion: project.source?.convertedAt || '', soundfontUrls: [project.audio?.soundfont ? `${assetRoot}/audio/${project.audio.soundfont}` : null, '/soundfont.sf2'].filter(Boolean) }) : null;
+  const audio = audioManager ??= (assetRoot && project.assets?.audio ? new AudioManager({ root: assetRoot, lib: mwg.Audio, index: project.audio?.index, cacheVersion: project.source?.convertedAt || '', soundfontUrls: [project.audio?.soundfont ? `${assetRoot}/audio/${project.audio.soundfont}` : null, '/soundfont.sf2'].filter(Boolean) }) : null);
   if (audio) {
     const systemTracks = project.audio?.system || {};
     audio.preload([
@@ -729,6 +736,8 @@ export async function startMwgPlayer(canvas, project) {
           }
         }
       }
+      // A map switch is being built: this scene is done, so it takes no more input or events.
+      if (this.transferring) return;
       if (this.dialogue) return;
       if (this.confirmLock) {
         // A browser/embedded keyboard can lose the matching keyup while a
@@ -2368,7 +2377,9 @@ export async function startMwgPlayer(canvas, project) {
       params.delete('tileset');
       const changed = this.rpgExtra.mapTilesets?.[String(mapId)];
       if (changed !== undefined) params.set('tileset', String(changed));
-      location.href = `${location.pathname}?${params}`;
+      switchMap(params);
+      // The event that asked has nothing left to do on this map: unwind it (a reload used to cut it off).
+      throw new ExitEventSignal();
     }
     // 282 Change Tileset: the map is rebuilt with the new tileset at the player's position, carrying all state through the
     // same save-and-reload a transfer uses. The event that asked restarts from its first command once after the reload (the
@@ -2385,7 +2396,8 @@ export async function startMwgPlayer(canvas, project) {
       this.transferring = true;
       const query = new URLSearchParams(location.search);
       query.set('map', String(mapEntry.id)); query.set('x', String(this.mover.x)); query.set('y', String(this.mover.y)); query.set('tileset', String(target));
-      location.href = `${location.pathname}?${query}`;
+      switchMap(query);
+      throw new ExitEventSignal();
     }
     // Save/load feedback is a title flash plus a console line: loud enough to
     // tell a working key from a swallowed one, with no new UI primitives.
@@ -2481,7 +2493,8 @@ export async function startMwgPlayer(canvas, project) {
           } catch (error) { console.warn('MWGP load carry-over save failed; loading the map without carried state', error); }
           const params = new URLSearchParams(location.search);
           params.set('map', String(Number(entry.id))); params.set('x', String(pos.x)); params.set('y', String(pos.y));
-          location.href = `${location.pathname}?${params}`;
+          this.transferring = true;
+          switchMap(params);
           return true;
         }
         position.x = pos.x; position.y = pos.y; this.facing = state.facing || 'down';
@@ -2502,9 +2515,24 @@ export async function startMwgPlayer(canvas, project) {
         return true;
       } catch (error) { console.error('MWGP load failed', error); this.flashTitle('✗ Load failed — see console (F12)'); return false; }
     }
-    teardown() { window.removeEventListener('keydown', this.saveKey); this.audio?.stopAll(); this.windows?.destroy(); }
+    teardown() { window.removeEventListener('keydown', this.saveKey); this.audio?.stopAll(); this.windows?.destroy(); for (const sheet of ownedAtlases) sheet.texture?.destroy?.(true); }
   };
-  await game.start(PlayerScene);
+  return PlayerScene;
+  };
+  // Enters another map without reloading the page: the caller has saved 'runtime-transition' (as a reload would need) and
+  // this builds the next map's scene, points the URL at it and swaps scenes. Any failure falls back to the full reload.
+  const switchMap = async nextParams => {
+    const url = `${globalThis.location.pathname}?${nextParams}`;
+    try {
+      if (typeof project.loadMap === 'function') await project.loadMap(Number(nextParams.get('map')));
+      history.replaceState(null, '', url);
+      game.switchScene(await buildScene());
+    } catch (error) {
+      console.warn('MWGP in-page map switch failed; reloading the page instead', error);
+      globalThis.location.href = url;
+    }
+  };
+  await game.start(await buildScene());
   return game;
 }
 

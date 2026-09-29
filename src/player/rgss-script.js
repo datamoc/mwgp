@@ -877,7 +877,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   };
   // Second phase, after the plugins have wrapped the engine: database post-processing hook and
   // the game objects themselves.
-  // Engine objects are rebuilt on every page load (map transfers reload the page), so their
+  // Engine objects are rebuilt on every page load (a map transfer builds a new scene, and its runtime with it), so their
   // own state rides in `rpgExtra.mvEngine`, serialized with the engine's JsonEx. Gold, items
   // and members already live in rpgExtra through the party bridge and are left out.
   const BRIDGED_PARTY_KEYS = new Set(['_gold', '_items', '_weapons', '_armors', '_actors']);
