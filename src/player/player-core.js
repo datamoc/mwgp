@@ -224,16 +224,19 @@ export async function startMwgPlayer(canvas, project) {
   let audioManager = null;
   // Builds the scene class for the map the URL names, with everything that belongs to that map (tileset sheets, event and
   // portrait art, tile layers) in its closure. A map transfer runs it again for the next map (see switchMap below).
-  const buildScene = async () => {
+  const buildScene = async (params = new URLSearchParams(globalThis.location?.search || '')) => {
   // The URL names the map: a transfer keeps it current (history.replaceState), so a reload lands on the same map.
   // Prefer the requested map when present, while retaining the manifest start map for a
   // clean launch and a safe fallback for malformed/stale URLs.
-  const params = new URLSearchParams(globalThis.location?.search || '');
   const requestedMapId = params.has('map') ? Number(params.get('map')) : NaN;
   const startMapId = Number(project.initialMapId);
-  const mapEntry = project.maps.find(map => Number(map.id) === requestedMapId)
+  const foundEntry = project.maps.find(map => Number(map.id) === requestedMapId)
     || project.maps.find(map => Number(map.id) === startMapId)
     || project.maps[0];
+  // The scene moves and re-images events in place, so it plays on its own copy: the loaded map stays pristine for the next
+  // visit (and for a preloaded scene that is never used).
+  const pristineEvents = foundEntry?.mwgEvents ?? [];
+  const mapEntry = foundEntry && { ...foundEntry, mwgEvents: structuredClone(pristineEvents) };
   const map = mapEntry?.data;
   const tileSize = project.display?.tileSize || 48;
   const isXp = project.source?.engine === 'rpg-maker-xp';
@@ -541,6 +544,7 @@ export async function startMwgPlayer(canvas, project) {
       this.pendingRuntimeState = null;
       this.eventRunning = false;
       this.parallelTimer = 0;
+      this.preloadTimer = 0;
       const playerIndex = Number(project.playerSprite?.index) || 0;
       const initialPlayerTexture = playerSheet?.get(characterCellIndex(playerGeom, playerIndex, 2, 1));
       this.player = playerSheet ? new mwg.AnimatedSprite({ texture: initialPlayerTexture }) : new mwg.TintedSprite({ texture: mwg.Resources.texture(fallbackSheetUrl) });
@@ -725,6 +729,7 @@ export async function startMwgPlayer(canvas, project) {
       this.updateBattlePoses(dt);
       this.updateCameraPan(dt);
       this.updateRoutes(dt);
+      this.updatePreload(dt);
       if (nativeAutotilesReady) {
         this.autotileElapsed += dt;
         if (this.autotileElapsed >= 0.5) {
@@ -1472,6 +1477,30 @@ export async function startMwgPlayer(canvas, project) {
       mover.x = event.x; mover.y = event.y;
       mover.facing = event.facing || 'down';
       return mover;
+    }
+    // Walking towards a door: once a transfer whose destination is fixed is within PRELOAD_DISTANCE cells, its map is built in
+    // the background so the switch finds it ready.
+    updatePreload(dt) {
+      this.preloadTimer -= dt;
+      if (this.preloadTimer > 0 || this.transferring || !this.mover) return;
+      this.preloadTimer = 0.5;
+      let nearest = null, nearestDistance = PRELOAD_DISTANCE + 1;
+      // Only an unambiguous door counts: an event whose active page can send the player to several places says nothing about
+      // where they are going.
+      for (const event of mapEntry.mwgEvents) {
+        const distance = Math.abs(event.x - this.mover.x) + Math.abs(event.y - this.mover.y);
+        if (distance >= nearestDistance || this.erasedEvents.has(event.id)) continue;
+        const targets = transferTargetsOfPage(mwg.Rpg.activePage(event, this.gameState));
+        const first = targets[0];
+        if (!first || Number(first.mapId) === Number(mapEntry.id) || targets.some(t => t.mapId !== first.mapId || t.x !== first.x || t.y !== first.y)) continue;
+        nearest = first; nearestDistance = distance;
+      }
+      if (!nearest) return;
+      const next = new URLSearchParams(globalThis.location?.search || '');
+      next.set('map', String(nearest.mapId)); next.set('x', String(nearest.x)); next.set('y', String(nearest.y)); next.delete('tileset');
+      const changed = this.rpgExtra.mapTilesets?.[String(nearest.mapId)];
+      if (changed !== undefined) next.set('tileset', String(changed));
+      preloadMap(next);
     }
     updateRoutes(dt) {
       for (const route of [...this.activeRoutes]) {
@@ -2515,9 +2544,36 @@ export async function startMwgPlayer(canvas, project) {
         return true;
       } catch (error) { console.error('MWGP load failed', error); this.flashTitle('✗ Load failed — see console (F12)'); return false; }
     }
-    teardown() { window.removeEventListener('keydown', this.saveKey); this.audio?.stopAll(); this.windows?.destroy(); for (const sheet of ownedAtlases) sheet.texture?.destroy?.(true); }
+    teardown() { window.removeEventListener('keydown', this.saveKey); this.audio?.stopAll(); this.windows?.destroy(); }
   };
+  // What the scene cache needs to know about a built map. The class is reusable: entering it again only has to place the
+  // player and start the events from their initial state; its atlases are freed when the cache lets it go.
+  PlayerScene.cacheKey = `${Number(mapEntry.id)}:${params.has('tileset') ? params.get('tileset') : 'map'}`;
+  PlayerScene.enterAt = (x, y) => {
+    if (Number.isFinite(x)) position.x = x;
+    if (Number.isFinite(y)) position.y = y;
+    mapEntry.mwgEvents = structuredClone(pristineEvents);
+  };
+  PlayerScene.dispose = () => { for (const sheet of ownedAtlases) sheet.texture?.destroy?.(true); };
   return PlayerScene;
+  };
+  // Scenes kept warm: the map being played, the one just left (a player who turns back finds it built) and one preloaded
+  // ahead of a transfer the player is walking towards. Anything else is disposed.
+  let active = null, previous = null, preloaded = null, preloading = null;
+  const paramsKey = params => `${Number(params.get('map'))}:${params.has('tileset') ? params.get('tileset') : 'map'}`;
+  const warm = key => [active, previous, preloaded].find(scene => scene && scene.cacheKey === key) || null;
+  const release = scene => { if (scene && scene !== active && scene !== previous && scene !== preloaded) scene.dispose(); };
+  const preloadMap = async nextParams => {
+    const key = paramsKey(nextParams);
+    if (warm(key) || preloading === key) return;
+    preloading = key;
+    try {
+      if (typeof project.loadMap === 'function') await project.loadMap(Number(nextParams.get('map')));
+      const scene = await buildScene(nextParams);
+      if (warm(scene.cacheKey)) scene.dispose();
+      else { const stale = preloaded; preloaded = scene; release(stale); console.info(`MWGP map ${nextParams.get('map')} preloaded`); }
+    } catch (error) { console.warn('MWGP map preload failed; the map will load when the player gets there', error); }
+    finally { preloading = null; }
   };
   // Enters another map without reloading the page: the caller has saved 'runtime-transition' (as a reload would need) and
   // this builds the next map's scene, points the URL at it and swaps scenes. Any failure falls back to the full reload.
@@ -2526,13 +2582,23 @@ export async function startMwgPlayer(canvas, project) {
     try {
       if (typeof project.loadMap === 'function') await project.loadMap(Number(nextParams.get('map')));
       history.replaceState(null, '', url);
-      game.switchScene(await buildScene());
+      const ready = warm(paramsKey(nextParams));
+      console.info(`MWGP map ${nextParams.get('map')}: ${ready ? (ready === previous ? 'back to the previous map, still built' : 'preloaded') : 'building'}`);
+      const scene = ready || await buildScene(nextParams);
+      scene.enterAt(Number(nextParams.get('x')), Number(nextParams.get('y')));
+      const staleNeighbour = previous;
+      if (scene === preloaded) preloaded = null;
+      if (active !== scene) previous = active;
+      active = scene;
+      release(staleNeighbour);
+      game.switchScene(scene);
     } catch (error) {
       console.warn('MWGP in-page map switch failed; reloading the page instead', error);
       globalThis.location.href = url;
     }
   };
-  await game.start(await buildScene());
+  active = await buildScene();
+  await game.start(active);
   return game;
 }
 
@@ -2829,6 +2895,30 @@ function assertMoveRouteSupport(mwg) {
   const runner = mwg.Rpg.MoveRouteRunner ? new mwg.Rpg.MoveRouteRunner(probe, { steps: [{ step: { dx: 1, dy: 1 } }] }) : null;
   try { runner?.update(1); probe.update(1); } catch { /* reported below */ }
   if (probe.x !== 2 || probe.y !== 2) throw new Error('This mw_games build is too old: its MoveRouteRunner lacks diagonal, forward/backward and aimed steps (needs the release after 0.22.0).');
+}
+
+// How far (in cells) from a transfer the player is when its destination map starts building in the background.
+const PRELOAD_DISTANCE = 20;
+
+// The fixed-destination transfers one event page can make (a variable destination cannot be known ahead), by page.
+const transferTargetCache = new WeakMap();
+export function transferTargetsOfPage(page) {
+  if (!page) return [];
+  let targets = transferTargetCache.get(page);
+  if (targets) return targets;
+  targets = [];
+  const walk = commands => {
+    for (const command of commands || []) {
+      const t = command.transfer;
+      if (t && typeof t === 'object' && t.mapVar === undefined && t.xVar === undefined && t.yVar === undefined && [t.mapId, t.x, t.y].every(value => Number.isFinite(Number(value)))) {
+        targets.push({ mapId: Number(t.mapId), x: Number(t.x), y: Number(t.y) });
+      }
+      for (const block of childBlocks(command)) walk(block);
+    }
+  };
+  walk(page.commands);
+  transferTargetCache.set(page, targets);
+  return targets;
 }
 
 // The converter's move-step descriptors as MoveRouteRunner steps. `aim` answers where "the player" is for toward/away

@@ -1805,6 +1805,14 @@ else notes.push('RGSS label fallthrough order preserved ok');
     for (let i = 0; i < 8 && !runner.done; i++) { runner.update(1); mover.update(1); }
     if (mover.x !== 3 || mover.y !== 3) { fail(`route through MoveRouteRunner ended at (${mover.x}, ${mover.y}), wanted (3, 3)`); stepFailures++; }
   }
+  {
+    const { transferTargetsOfPage } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
+    const page = { commands: [{ say: 'x' }, { if: { switch: '1' }, then: [{ transfer: { mapId: 4, x: 1, y: 2 } }], else: [{ transfer: { mapId: 9, x: 3, y: 4 } }] }, { transfer: { mapVar: 5, x: 0, y: 0 } }, { transfer: { mapId: 'nope', x: 0, y: 0 } }] };
+    const found = transferTargetsOfPage(page);
+    if (JSON.stringify(found) !== JSON.stringify([{ mapId: 4, x: 1, y: 2 }, { mapId: 9, x: 3, y: 4 }])) { fail(`transferTargetsOfPage returned ${JSON.stringify(found)}`); stepFailures++; }
+    if (transferTargetsOfPage(page) !== found) { fail('transferTargetsOfPage did not cache per page'); stepFailures++; }
+    if (transferTargetsOfPage(null).length !== 0) { fail('transferTargetsOfPage(null) should be empty'); stepFailures++; }
+  }
   if (!stepFailures) notes.push('toRouteSteps descriptor table + MoveRouteRunner ok');
 
   // 5c: autotile source math and character frame geometry (engine rules the

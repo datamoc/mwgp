@@ -308,7 +308,11 @@ manifest for `?id=`, then tries the real player and falls back on failure:
   audio manager and the loaded plugin/Ruby libraries, and `switchMap` builds the next map's scene (`buildScene`), points
   the URL at it (`history.replaceState`, so a reload lands on the same map) and calls `Game.switchScene`; the old scene's
   `teardown` runs and the event that asked unwinds (`ExitEventSignal`). A failed switch falls back to the full reload.
-  The library's `World` is not used: its factories are synchronous and a built scene captures its spawn point.
+  Built scene classes stay warm in a small cache: the map in play, the one just left (turning back is instant) and one
+  preloaded ahead of a door (an event within `PRELOAD_DISTANCE` = 20 cells whose active page has a single fixed transfer
+  destination starts building its map in the background); anything else is disposed with its autotile atlases. A class is
+  reusable because `enterAt` places the player and gives the scene a fresh copy of the map's events. The library's `World`
+  is not used: its factories are synchronous and a built scene captures its spawn point.
   `F5`/`F9` save/load slot 1 the same way.
 - `src/player/fallback-core.js` (`MwgPlayer`) — a minimal `<canvas>` 2D fallback with no asset
   dependency (flat-colored tiles), used only when the Pixi/mw_games 2D runtime is unavailable.
