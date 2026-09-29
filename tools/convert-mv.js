@@ -559,7 +559,7 @@ function convertCommand(command, context = {}) {
   // Step codes are MV's Game_Character.ROUTE_* constants (see rpg_objects.js in
   // any MV project). Steps needing runtime state (facing/position) are emitted
   // as descriptors ({ random, forward, backward, jump }) that the player's
-  // resolveRouteStep interprets; speed/frequency/animation/fix/blend steps
+  // toRouteSteps hands to the library's MoveRouteRunner; speed/frequency/animation/fix/blend steps
   // (29-36, 43) remain partial, while through, transparency, image changes,
   // scripts, and SE retain their observable side effects.
   if (command.code === 205) {

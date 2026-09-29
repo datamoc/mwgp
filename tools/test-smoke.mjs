@@ -1775,37 +1775,37 @@ else notes.push('RGSS label fallthrough order preserved ok');
     rmSync(probeDir, { recursive: true, force: true });
   }
 
-  // 5b: move-step descriptor table (converter emits, runMoveRoute resolves).
-    const { resolveRouteStep } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
+  // 5b: move-step descriptor table (converter emits, toRouteSteps hands to the library's MoveRouteRunner).
+  const { toRouteSteps } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
+  const aim = () => ({ x: 4, y: 2 });
   const stepCases = [
-    [{ dx: 1, dy: -1 }, 'down', { dx: 1, dy: -1 }],
-    [{ jump: { dx: 0, dy: 2 } }, 'up', { jump: { dx: 0, dy: 2 } }],
-    [{ forward: true }, 'left', { dx: -1, dy: 0 }],
-    [{ backward: true }, 'left', { dx: 1, dy: 0 }],
-    [{ forward: true }, 'up', { dx: 0, dy: -1 }],
-    [{ toward: true }, 'down', null],
-    [{ away: true }, 'down', null],
-    [{}, 'down', null],
-    [null, 'down', null],
+    [[{ dx: 1, dy: -1 }], null, [{ step: { dx: 1, dy: -1 } }]],
+    [[{ jump: { dx: 0, dy: 2 } }], null, [{ jump: { dx: 0, dy: 2 } }]],
+    [[{ forward: true }, { backward: true }], null, [{ dir: 'forward' }, { dir: 'backward' }]],
+    [[{ random: true }], null, [{ dir: 'random' }]],
+    [[{ wait: 0.5 }], null, [{ wait: 0.5 }]],
+    [[{ turn: 'left90' }, { turn: 'down' }, { turn: 'random' }], null, [{ turn: 'left90' }, { turn: 'down' }, { turn: 'random' }]],
+    [[{ toward: true }, { away: true }, { turn: 'toward' }], null, []],
+    [[{ toward: true }, { away: true }, { turn: 'away' }], aim, [{ dir: 'toward', target: aim }, { dir: 'away', target: aim }, { turn: 'away', target: aim }]],
+    [[{}, null, 3], null, []],
+    [null, null, []],
   ];
   let stepFailures = 0;
-  for (const [step, facing, expected] of stepCases) {
-    if (JSON.stringify(resolveRouteStep(step, facing)) !== JSON.stringify(expected)) {
-      fail(`resolveRouteStep(${JSON.stringify(step)}, ${facing}) mismatch`);
+  for (const [steps, target, expected] of stepCases) {
+    if (JSON.stringify(toRouteSteps(steps, target)) !== JSON.stringify(expected)) {
+      fail(`toRouteSteps(${JSON.stringify(steps)}) mismatch`);
       stepFailures++;
     }
   }
-  for (let i = 0; i < 20; i++) {
-    const resolved = resolveRouteStep({ random: true }, 'down');
-    if (![[0, 1], [0, -1], [-1, 0], [1, 0]].some(([dx, dy]) => resolved?.dx === dx && resolved?.dy === dy)) {
-      fail('resolveRouteStep random left the cardinal set');
-      stepFailures++;
-      break;
-    }
+  // The steps drive the library's runner: diagonal, facing-relative and aimed moves all land where MV puts them.
+  {
+    const mwgLib = await import(pathToFileURL(join(root, 'node_modules', '@datamoc', 'mw_games', 'dist', 'rpg', 'index.js')).href);
+    const mover = new mwgLib.GridMover({ x: 0, y: 0 }, 2, 2, { tileWidth: 1, tileHeight: 1, speed: 1e6 });
+    const runner = new mwgLib.MoveRouteRunner(mover, { steps: toRouteSteps([{ dx: 1, dy: 1 }, { turn: 'left' }, { forward: true }, { toward: true }], () => ({ x: 9, y: 3 })), skippable: true });
+    for (let i = 0; i < 8 && !runner.done; i++) { runner.update(1); mover.update(1); }
+    if (mover.x !== 3 || mover.y !== 3) { fail(`route through MoveRouteRunner ended at (${mover.x}, ${mover.y}), wanted (3, 3)`); stepFailures++; }
   }
-  const toward = resolveRouteStep({ toward: true }, 'down', { x: 2, y: 2 }, { x: 4, y: 2 });
-  if (JSON.stringify(toward) !== JSON.stringify({ dx: 1, dy: 0 })) { fail('resolveRouteStep toward did not close on the player'); stepFailures++; }
-  if (!stepFailures) notes.push('resolveRouteStep descriptor table ok');
+  if (!stepFailures) notes.push('toRouteSteps descriptor table + MoveRouteRunner ok');
 
   // 5c: autotile source math and character frame geometry (engine rules the
   // converter measures and the player renders by; see rpg_core.js Tilemap

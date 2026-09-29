@@ -276,6 +276,9 @@ export async function startMwgPlayer(canvas, project) {
   // when the library also carries the table-edge strip and shadow layer this player pairs with it; older libraries
   // keep the static atlas for every family. A placeholder standing in for a missing sheet has no autotile art to sample.
   const hasEngineExtras = typeof mwg.TileMap.prototype?.addShadowLayer === 'function';
+  // Event movement runs on the library's MoveRouteRunner, including the diagonal, facing-relative and aimed steps that only
+  // releases after 0.22.0 have; refuse loudly rather than let a route throw in the middle of a cutscene.
+  assertMoveRouteSupport(mwg);
   const mvA4Native = hasNativeAutotiles && hasEngineExtras && !isXp && renderSheetEntries.some(entry => entry.slot === 3 && entry.url !== placeholderUrl);
   const sheets = await Promise.all(renderSheetEntries.map(entry => entry.slot < 4 && !(mvA4Native && entry.slot === 3)
     ? buildAutotileSheet(entry.url, entry.slot, mwg, tilesetFlags)
@@ -522,6 +525,8 @@ export async function startMwgPlayer(canvas, project) {
       this.confirmLockUntil = 0;
       this.eventQueue = Promise.resolve();
       this.backgroundRoutes = new Map();
+      this.activeRoutes = new Set();
+      this.eventMovers = new Map();
       this.routeThrough = new Map();
       this.routeOptions = new Map();
       this.restoreRuntimeState(this.pendingRuntimeState);
@@ -712,6 +717,7 @@ export async function startMwgPlayer(canvas, project) {
       this.updateBattleFx(dt);
       this.updateBattlePoses(dt);
       this.updateCameraPan(dt);
+      this.updateRoutes(dt);
       if (nativeAutotilesReady) {
         this.autotileElapsed += dt;
         if (this.autotileElapsed >= 0.5) {
@@ -1429,45 +1435,52 @@ export async function startMwgPlayer(canvas, project) {
       event.routeImage = { ...route.image };
       this.refreshEventSprites();
     }
-    async runMoveRoute(target, steps, options = {}) {
+    runMoveRoute(target, steps, options = {}) {
       const isPlayer = target === 'player';
       const eventId = target === 'self' && this.currentEvent ? String(this.currentEvent.id)
         : String(target || '').startsWith('event:') ? String(target).slice(6) : null;
       const event = eventId ? (mapEntry?.mwgEvents || []).find(candidate => String(candidate.id) === eventId) : null;
-      if (!isPlayer && !event) { console.warn(`MWGP movement route target "${target}" is not on this map; skipping`); return; }
-      let facing = isPlayer ? this.facing : (event.facing || 'down');
-      const coordinate = () => isPlayer ? { x: this.mover.x, y: this.mover.y } : { x: event.x, y: event.y };
-      const execute = async () => { for (const step of steps || []) {
-        if (step.wait !== undefined) { await new Promise(resolve => setTimeout(resolve, Math.max(0, Number(step.wait) * 1000))); continue; }
-        const resolved = resolveRouteStep(step, facing, coordinate(), isPlayer ? null : { x: this.mover.x, y: this.mover.y });
-        if (!resolved) continue;
-        if (resolved.dx === undefined && resolved.dy === undefined && !resolved.jump) continue;
-        if (resolved.turn) { facing = resolved.turn === 'random' ? ['up', 'right', 'down', 'left'][Math.floor(Math.random() * 4)] : resolved.turn; if (!isPlayer) { event.facing = facing; this.refreshEventSprites(); } else this.turnPlayer(facing); continue; }
-        // MV jumps arc over intervening tiles, ignoring passability; without a
-        // jump animation the honest equivalent is an instant relocation.
-        if (resolved.jump) {
-          const current = coordinate();
-          const next = { x: current.x + resolved.jump.dx, y: current.y + resolved.jump.dy };
-          if (isPlayer) { this.mover.x = next.x; this.mover.y = next.y; position.x = next.x; position.y = next.y; this.updateCamera(); }
-          else { event.x = next.x; event.y = next.y; this.refreshEventSprites(); }
-          continue;
-        }
-        const current = coordinate();
-        const next = { x: current.x + resolved.dx, y: current.y + resolved.dy };
-        if (this.routeThrough.get(String(target)) !== true && !this.canStep(next.x, next.y, resolved.dx, resolved.dy)) continue;
-        if (this.routeOptions.get(String(target))?.directionFix !== true) facing = resolved.dy > 0 ? 'down' : resolved.dy < 0 ? 'up' : resolved.dx < 0 ? 'left' : 'right';
+      if (!isPlayer && !event) { console.warn(`MWGP movement route target "${target}" is not on this map; skipping`); return Promise.resolve(); }
+      // A route step aiming at "the player" (toward/away) is meaningless for the player's own route and is dropped.
+      const routeSteps = toRouteSteps(steps, isPlayer ? null : () => ({ x: this.mover.x, y: this.mover.y }));
+      if (!routeSteps.length) return Promise.resolve();
+      const key = String(target);
+      const mover = isPlayer ? this.mover : this.eventMover(event);
+      const runner = new mwg.Rpg.MoveRouteRunner(mover, { steps: routeSteps, repeat: options.repeat === true, skippable: true }, {
+        // A blocked step is skipped (the runner is skippable), as the player's routes always were; Through ignores passability.
+        canMove: (dx, dy) => this.routeThrough.get(key) === true || this.canStep(mover.x + dx, mover.y + dy, dx, dy)
+      });
+      return new Promise(resolve => this.activeRoutes.add({ runner, mover, isPlayer, event, key, resolve }));
+    }
+    // Map events are plain records; a route moves them through a GridMover over a bare sprite that finishes each step within
+    // the frame (events have always jumped tile to tile), and the record follows the mover in updateRoutes.
+    eventMover(event) {
+      let mover = this.eventMovers.get(event.id);
+      if (!mover) {
+        mover = new mwg.Rpg.GridMover({ x: 0, y: 0 }, event.x, event.y, { tileWidth: 1, tileHeight: 1, speed: 1e6 });
+        this.eventMovers.set(event.id, mover);
+      }
+      mover.x = event.x; mover.y = event.y;
+      mover.facing = event.facing || 'down';
+      return mover;
+    }
+    updateRoutes(dt) {
+      for (const route of [...this.activeRoutes]) {
+        const { runner, mover, isPlayer, event, key } = route;
+        runner.update(dt);
+        const fixed = this.routeOptions.get(key)?.directionFix === true;
         if (isPlayer) {
-          this.facing = facing;
-          if (!this.mover.moveBy(resolved.dx, resolved.dy)) continue;
-          await new Promise(resolve => {
-            const check = () => this.mover.isMoving ? setTimeout(check, 16) : resolve();
-            check();
-          });
-          position.x = this.mover.x;
-          position.y = this.mover.y;
-        } else { event.x = next.x; event.y = next.y; event.facing = facing; this.refreshEventSprites(); }
-      } };
-      do { await execute(); if (options.repeat) await new Promise(resolve => setTimeout(resolve, 16)); } while (options.repeat);
+          if (!mover.isMoving) { position.x = mover.x; position.y = mover.y; }
+          if (!fixed) this.facing = mover.facing;
+        } else {
+          mover.update(dt);
+          const changed = event.x !== mover.x || event.y !== mover.y || (!fixed && event.facing !== mover.facing);
+          event.x = mover.x; event.y = mover.y;
+          if (!fixed) event.facing = mover.facing;
+          if (changed) this.refreshEventSprites();
+        }
+        if (runner.done && !mover.isMoving) { this.activeRoutes.delete(route); route.resolve(); }
+      }
     }
     turnPlayer(direction) {
       const vectors = { down: [0, 1], left: [-1, 0], right: [1, 0], up: [0, -1] };
@@ -2783,35 +2796,33 @@ export function resolveTransferTarget(target, variable, maps) {
   return { mapId: Number(entry.id), x: pos.x, y: pos.y };
 }
 
-// Resolves one converter-emitted move step against the live facing. Pure (no
-// scene) so tools/test-smoke.mjs can cover the descriptor table in Node.
-// Returns { dx, dy }, { jump } or null (degenerate/unknown: toward/away from
-// the player itself when the route target is the player).
-export function resolveRouteStep(step, facing, origin = null, target = null) {
-  if (!step || typeof step !== 'object') return null;
-  if (step.turn) return { turn: step.turn };
-  if (Number.isFinite(step.dx) && Number.isFinite(step.dy)) return { dx: step.dx, dy: step.dy };
-  if (step.jump && Number.isFinite(step.jump.dx) && Number.isFinite(step.jump.dy)) {
-    return { jump: { dx: step.jump.dx, dy: step.jump.dy } };
+function assertMoveRouteSupport(mwg) {
+  const probe = new mwg.Rpg.GridMover({ x: 0, y: 0 }, 1, 1, { tileWidth: 1, tileHeight: 1, speed: 1e6 });
+  const runner = mwg.Rpg.MoveRouteRunner ? new mwg.Rpg.MoveRouteRunner(probe, { steps: [{ step: { dx: 1, dy: 1 } }] }) : null;
+  try { runner?.update(1); probe.update(1); } catch { /* reported below */ }
+  if (probe.x !== 2 || probe.y !== 2) throw new Error('This mw_games build is too old: its MoveRouteRunner lacks diagonal, forward/backward and aimed steps (needs the release after 0.22.0).');
+}
+
+// The converter's move-step descriptors as MoveRouteRunner steps. `aim` answers where "the player" is for toward/away
+// (null for a route with nothing to aim at, which drops those steps). A step it does not know is dropped.
+export function toRouteSteps(steps, aim = null) {
+  const out = [];
+  for (const step of steps || []) {
+    if (!step || typeof step !== 'object') continue;
+    if (step.wait !== undefined) out.push({ wait: Math.max(0, Number(step.wait) || 0) });
+    else if (step.turn) {
+      if (step.turn === 'toward' || step.turn === 'away') { if (aim) out.push({ turn: step.turn, target: aim }); }
+      else out.push({ turn: step.turn });
+    }
+    else if (Number.isFinite(step.dx) && Number.isFinite(step.dy)) out.push({ step: { dx: step.dx, dy: step.dy } });
+    else if (step.jump && Number.isFinite(step.jump.dx) && Number.isFinite(step.jump.dy)) out.push({ jump: { dx: step.jump.dx, dy: step.jump.dy } });
+    // MV picks a random cardinal direction; diagonals never come out of random.
+    else if (step.random) out.push({ dir: 'random' });
+    else if (step.forward) out.push({ dir: 'forward' });
+    else if (step.backward) out.push({ dir: 'backward' });
+    else if ((step.toward || step.away) && aim) out.push({ dir: step.toward ? 'toward' : 'away', target: aim });
   }
-  // MV picks a random cardinal direction; diagonals never come out of random.
-  if (step.random) {
-    const dirs = [[0, 1], [0, -1], [-1, 0], [1, 0]];
-    const [dx, dy] = dirs[Math.floor(Math.random() * dirs.length)];
-    return { dx, dy };
-  }
-  const vectors = { down: [0, 1], left: [-1, 0], right: [1, 0], up: [0, -1] };
-  const [fx, fy] = vectors[facing] || [0, 1];
-  if (step.forward) return { dx: fx, dy: fy };
-  if (step.backward) return { dx: -fx, dy: -fy };
-  if ((step.toward || step.away) && origin && target) {
-    const sign = step.toward ? 1 : -1;
-    const dx = target.x - origin.x, dy = target.y - origin.y;
-    return Math.abs(dx) >= Math.abs(dy)
-      ? { dx: sign * Math.sign(dx), dy: 0 }
-      : { dx: 0, dy: sign * Math.sign(dy) };
-  }
-  return null;
+  return out;
 }
 
 // Foreground.js layer pick, pure so tools/test-smoke.mjs can pin it in Node:
