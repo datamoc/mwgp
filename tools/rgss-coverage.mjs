@@ -106,7 +106,7 @@ export function analyze(project, api, shim) {
   missing.sort((left, right) => right.count - left.count);
   return {
     classes: classSummary, statics: classReport, missing, instanceCalls: instanceReport,
-    kernel: [...kernel].map(([name, entry]) => ({ name, count: entry.count, shimmed: Boolean(shim?.builtins?.[name] || shim?.fallbacks?.includes(name)), where: [...entry.where] })).sort((left, right) => right.count - left.count),
+    kernel: [...kernel].map(([name, entry]) => ({ name, count: entry.count, shimmed: Boolean(shim?.builtins?.[name]), where: [...entry.where] })).sort((left, right) => right.count - left.count),
     reopened, totals: { sources: collectSources(project).length, staticReferences: [...statics.values()].reduce((sum, entry) => sum + entry.count, 0), instantiations: [...instantiations.values()].reduce((sum, entry) => sum + entry.count, 0) }
   };
 }

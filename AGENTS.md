@@ -4,8 +4,18 @@ This file provides guidance to AI coding agents (Claude Code, Codex, opencode, .
 
 ## What this is
 
-RPGM Player is a converter + local web player for RPG Maker games. It converts RPG Maker MV
-projects into a portable JSON manifest format called **MWGP** (`mwgp.json`), then plays that
+RPGM Player makes RPG Maker games playable in any browser. The goal is playing every game everywhere, by the
+simplest faithful route per engine:
+
+- **MV/MZ → web build** (`tools/build-web.js`, the `convert:auto` default). MV/MZ games are browser JavaScript;
+  nw.js only adds a few host APIs. A web build is the game's own engine and files, unchanged, plus
+  `src/web/nwjs-host.js`, a generic nw.js host layer (see "Web builds" below). Titles, menus, battles and plugins
+  run exactly as in RPG Maker; nothing is converted.
+- **XP/VX/Ace → mkxp-z web build** (`tools/build-web.js`, the `convert:auto` default): the game's original files
+  go into an uncompressed `.mkxpz`; our page runs them with the pinned mkxp-z libretro WebAssembly core.
+  `--mwgp` keeps the manifest converter/player path described below.
+
+The MWGP path converts a project into a portable JSON manifest format called **MWGP** (`mwgp.json`), then plays that
 manifest in the browser against **`@datamoc/mw_games`** (imported as `mw_games`), an external
 tile-game runtime library. This repo owns the MV→MWGP converter, the manifest format, and a
 player built on `mw_games`'s primitives; it does not implement its own game engine or an
@@ -23,6 +33,8 @@ npm install
 npm start                  # serves the launcher at http://127.0.0.1:4173 (port via RPGM_PORT)
 npm run scan                # same detection logic as `start`, but prints the catalog as JSON and exits
 npm run convert:mv -- "RPGM_versions\<project>" "MWGP_versions\<project>"
+npm run convert:auto -- RPGM_versions MWGP_versions [--jobs N] [--skip-existing] [--mwgp]   # every game, in parallel
+npm run build:web -- "RPGM_versions\<project>" "MWGP_versions\<project>"   # one MV/MZ or XP/VX/Ace web build
 npm run validate:mwgp -- "MWGP_versions\<project>\mwgp.json"
 npm run rgss:api -- "RPGM_versions/<project>/Game.exe" --out docs/rgss-api-xp.json        # RGSS class/method surface, from strings only
 npm run rgss:coverage -- "MWGP_versions/<project>/mwgp.json" --out docs/rgss-shim-coverage.md  # what the Ruby uses vs what the shim has
@@ -39,11 +51,23 @@ list.
 assets into the output folder; without any flag the manifest references the original `www`
 folder in place and the player falls back to a placeholder tile sheet.
 
+`convert:auto` detects each game's engine (MV/MZ → a web build, or with `--mwgp` the MWGP conversion
+`convert:mv --copy-assets`; XP/VX/Ace → a mkxp-z web build, or with `--mwgp` the RGSS manifest converter,
+extracting raw archives first) and converts
+the games in parallel, one process each,
+at most `--jobs N` at a time (default: the core count; lower it when memory is short). Each game gets a
+progress bar on stderr, fed by `@@progress` lines the converters write when `MWGP_PROGRESS` is set
+(`tools/progress.mjs`: 100 points split into weighted phases, per-item ticks); stdout stays the JSON
+summary.
+
 `npm test` runs `tools/test-smoke.mjs` (converter/validator/runtime checks on synthetic and locally installed
 projects, plus the audio, SoundFont-licence and RGSS-coverage checks, then the browser harness as its last
 section: every converted project in a real Chromium — boot, movement, save/load, map BGM, one track of every
 audio format — loudly skipped with `MWGP_BROWSER=0` or when no playwright/chromium is installed);
-`node tools/test-browser.mjs` also runs standalone with the same debug aids plus `--only`, `--maps` and `--soak`. `validate:mwgp` checks a generated manifest and its event command tree. Beyond that, verify changes by
+`node tools/test-browser.mjs` also runs standalone with the same debug aids plus `--only`, `--maps` and `--soak`.
+For each MV/MZ web build the harness boots the game's own engine to its first scene, starts a new game on a map,
+saves there, reloads, and loads the save back (stock `SceneManager`/`DataManager` APIs; uncaught errors fail, errors
+the game logs and recovers from are notes). `validate:mwgp` checks a generated manifest and its event command tree. Beyond that, verify changes by
 running `npm start` and playing a converted project in the browser. Debug aids for the browser harness:
 `MWGP_SMOKE_DEBUG=1` (echo page console), `MWGP_SMOKE_SHOT=<png>`, `MWGP_SMOKE_SETTLE=<ms>`,
 `MWGP_SMOKE_DISMISS=<n>`, `MWGP_SMOKE_NOAUDIO=1`, `MWGP_SMOKE_NOBATTLE=1`, `MWGP_SMOKE_NOMENU=1`, `MWGP_SMOKE_JOBS=<n>` (map boots in parallel, defaults to core count), `MWGP_SMOKE_PROGRESS=<file>` (live per-map progress log, defaults into the OS temp dir), `MWGP_SMOKE_RESUME=1` (skip maps the log already records as ok, so an interrupted sweep relaunches for the remaining maps only; fresh runs truncate their project's old lines), `--only <project>`, and
@@ -61,7 +85,59 @@ past verification stays re-runnable without cluttering the project. A substantia
 inline or heredoc command is still a script: write it to a reusable file under
 `/tmp` before executing it instead of leaving it only in shell history.
 
+## Where supporting material lives (`notes/` vs `docs/`)
+
+- `notes/` is the drawer for raw working material: downloaded documentation,
+  reference screenshots, and useful logs (e.g. a test run's output kept for
+  comparison). Anything tied to one specific investigation, not meant to be
+  read as documentation.
+- `docs/` is for documentation meant to be read: markdown files that explain,
+  summarize or guide (checklists, coverage reports, API notes). A readable
+  write-up always goes here, never in `notes/`.
+
 ## Architecture
+
+### Web builds (MV/MZ)
+
+`tools/build-web.js <project> <output>` copies the game's web root (`www/` for MV, the project root for MZ) as-is,
+encrypted assets included (the engine decrypts them itself); a native `save/` folder is left out. It adds
+`nwjs-host.js` (from `src/web/`), `files.json` and `directories.json` (the game's file and directory indexes) and `mwgp-web.json` (`format: "MWGP-web"`,
+title, engine, file count), and patches `index.html`: the host loads first in `<head>` and every game
+`<script src>` becomes a `data-mwgp-src` placeholder. A rebuild copies only changed files; a previous MWGP
+conversion in the same folder (`mwgp.json`, `assets/`) is replaced.
+
+`src/web/nwjs-host.js` knows no game. It provides what nw.js adds to a browser page:
+- `require('fs')`: reads over HTTP (synchronous XHR, like nw's synchronous fs); writes (saves, config) in memory,
+  persisted to IndexedDB (no localStorage size limit). On the local `npm start` server, generated FastCutIns cache
+  files are also written to the original project and web build; on static hosts they stay in browser storage.
+  `readdirSync`/`existsSync` use the file/directory indexes plus what the
+  game wrote; `mkdirSync` creates directories.
+- `path`, `process`, `os`, `util`, `events`, `nw.gui`/`nw` (window, shell, app).
+- Any other module (child_process, worker_threads, native add-ons such as Steam bindings) is a lenient object whose
+  calls do nothing, warned once per module.
+
+With `require` and `process` defined, the engine takes its nw.js paths (`Utils.isNwjs()`): saves go through `fs` to
+the host's store. Boot order matters. The host first loads the store and file list, then the game's scripts in
+document order. Then, like the browser's own `load` event, it waits for every script those scripts inserted (MV's
+`PluginManager.setup` adds the plugins that way) before running the page-load handlers the game registered
+(`window.onload`, `addEventListener('load')`). The output is a static folder any web host can serve; `npm start`
+serves it at `/web/<id>/`, and the launcher lists it with a "Play (web)" button. Known limits: a Linux static host
+is case-sensitive while RPG Maker projects are not; games that log to a folder beside the game log recoverable
+`ENOENT`s.
+When an MV project has `www/` and a sibling `mods/` folder, the build copies those mod files into output `mods/`
+and indexes them alongside the web root files. A `www/mods/` folder is copied with the web root.
+
+### Web builds (XP/VX/Ace)
+
+`tools/build-web.js` dispatches RGSS projects to `tools/build-rgss.mjs`. It packages their original files as stored
+ZIP64 entries in `game.mkxpz`, excluding Windows executables, DLLs, native saves and GPU caches. The build copies
+our `src/web/rgss-player.html` and `rgss-player.js`, Nostalgist, and the mkxp-z libretro core. The core is fetched
+once into gitignored `.cache/mkxp-z/` from a pinned upstream deployment and SHA-256 checked by `tools/mkxp-core.mjs`.
+The page uses OPFS for the archive and saves (IDBFS fallback), shows download progress, binds RPG Maker keys, and
+sets `mkxp-z_syntaxTransform` to 0 for a shipped modern Ruby runtime, 2 for classic RGSS. `npm start` serves
+`/web/<id>/` with COOP and COEP headers. `tools/test-browser.mjs` checks core preparation; gameplay needs a manual
+check because the automated browser cannot inspect the core's frames. Provenance, licenses and verification limits
+are in `docs/rgss-web-build.md`.
 
 ### Two on-disk game representations
 
@@ -109,8 +185,26 @@ animation, scroll, scrollMap, relocate, saveBgm, resumeBgm, me, menu, goto,
 changeState, recoverAll, changeSkill, changeEquipment, changeProfile, sound,
 stopSound, playBgm, fadeoutBgm, playBgs, fadeoutBgs, turn, screenFade, screenFlash,
 screenTint, screenShake, changeGold, changeItem, changeWeapon, changeArmor, changeParty,
-setTransparent, eraseEvent, script, pluginCommand, unsupported
+setTransparent, eraseEvent, script, pluginCommand, unsupported,
+systemFlag, changeActorStat, changeActorText, changeActorImages, timer, vehicleBoard, playMovie,
+forceAction, returnToTitle
 ```
+
+The last row (0.2.0) covers the Game_Interpreter codes the first converter left out: `systemFlag` folds 134-137 (save,
+menu, encounter, formation access), 138 (window tone), 132/133/139 (battle BGM, victory/defeat ME), 140/323 (vehicle
+BGM/image), 216 and 281 into `rpgExtra.system`; menu and save access, and the battle/victory/defeat audio, are honoured
+(Esc/X, the menu's Save entry, `startTroopBattle`), the rest is stored only. `changeActorStat` is 312/315/317/326 (MP, EXP
+with level-up, parameter bonus, TP), `changeActorText` 320/324, `changeActorImages` 322 (which the first converter wrongly
+stored as the profile; the profile is 325), `timer` 124 plus the `if.timer` condition (no on-screen counter), `vehicleBoard`
+206, `playMovie` 261 (a `<video>` overlay over `assets/movies/<name>.webm`, copied by the converter), `forceAction` 339
+(`runBattle`'s `hooks.onControls` hands the scene a `forceAction`, run at the point of the troop event; the cost is paid, canUse is
+skipped) and `returnToTitle` 354. Also `selectItem` 104, `rotatePicture` 233, `locationInfo` 285 (Game_Map's own terrain-tag/tile/region
+rules), `abortBattle` 340 (`hooks.onControls.abort`, escape result), `enemyRecoverAll` 334, and 283 (a `systemFlag` battleback the
+battle stage reads). 337 draws no animation (battles have none). 282 Change Tileset (`changeTileset`) rebuilds the map with the new tileset through the transfer's save-and-reload (`&tileset=<id>`, kept in `rpgExtra.mapTilesets` for later transfers back); the scene cannot be rebuilt in place, so the asking event restarts from its first command once after the reload (asking for the tileset already in use is a no-op, which ends the restart). Every command code of the engine is now converted or documented partial.
+284 Change Parallax and the map's own parallax (properties: image, loop, scroll speed, '!' prefix) are rendered as a `TiledSprite` behind the tilemap
+(`installParallax`/`updateParallax`, `Game_Map.parallaxOx` maths shared with the foreground layer); the converter decodes the images from `img/parallaxes`.
+Engine numbering for enemy commands is 331 HP, 332 MP, 333 State, 334 Recover All, 335 Appear, 336 Transform, 342 TP (the first
+converter had 333 as TP and 334 as a state change, and 322 as the profile; Karryn's Prison uses 333 x12 and 322 x37).
 
 `unsupported` is the explicit loud-fallback marker (never a silent drop): the
 converters emit `{ unsupported: { code, kind } }` for event-command shapes with
@@ -126,12 +220,18 @@ Party, gold and inventory counts have no home in `mw_games`' `GameState`
 (switches/variables only), so the player carries them as its own `rpgExtra`
 state through transfers and saves. MV `script` commands run through the bounded
 MV globals shim when conversion produced valid JavaScript; unsupported calls warn
-loudly. `pluginCommand` has a data-only adapter for the corpus' Quest commands
-(`Add`, `Show/Complete Objective`, `Set Completed`); any other MV plugin command is dispatched to the game's own
-`Game_Interpreter#pluginCommand` chain in the plugin sandbox (`rgss.pluginCommand`; plugin-added methods on
-`Game_Variables/Switches/SelfSwitches` run against the shim objects), and warns loudly only when no engine is loaded. The RGSS shim also keeps the
-common Pokémon Essentials quest, named-item, and named-Pokémon helpers in the
-same saved `rpgExtra` state when the export has no usable database tables.
+loudly. Every `pluginCommand` runs the game's own plugin code in the plugin sandbox (`rgss.pluginCommand`): MV 356
+through the `Game_Interpreter#pluginCommand` chain, MZ 357 (which keeps `plugin` and its `params` object) through
+the command that plugin registered (`PluginManager.callCommand`); plugin-added methods on
+`Game_Variables/Switches/SelfSwitches` run against the shim objects. It warns loudly when no engine is loaded or no
+plugin registered the MZ command. The plugins handling the events' command words ship in the plugin library (see
+`tools/mv-plugins.mjs`), and `compatibility.plugins` rates a command `partial` (with `handledBy`) exactly when one does.
+
+**No game-, framework- or plugin-specific code.** Nothing in the converters or players may name a particular game,
+a framework (Pokémon Essentials, ...) or a third-party plugin, or read a plugin's parameters by its name. What a
+game needs beyond the stock engine comes from running its own code (Ruby library, plugin JS) or stays a loud gap.
+The shims removed under this rule, with what they did and which game relied on them, are archived in
+`docs/removed-shims.md`; reinstating one is the wrong fix.
 
 Self switches (MV's per-map-event 'A'-'D' switches) are not a separate vocabulary entry —
 they're folded into `setSwitch`/the `if` condition's `switch` key via a synthesized
@@ -184,7 +284,9 @@ copying entire multi-gigabyte `img/pictures` or `audio` folders.
 `player` start position, `assets` (root path + which categories were decoded + encryption
 kind), the raw `tilesets` database table (for autotile flags and sheet names), `playerSprite`,
 detected `plugins` (names only, scraped from `www/js/plugins.js`), the `compatibility.commands`
-report, and `maps[]` — each map keeps the **raw MV map `data`** (the six-layer tile array, used
+report, `titleScreen` (the engine's stock title: title1/title2 names plus `drawTitle`/`commandOffset` from
+`System.json`; RGSS maps XP's `title_name`, VX's `System/Title` and Ace's `title1/title2_name` onto the same
+shape, copying the art to `img/titles1`/`img/titles2`), and `maps[]` — each map keeps the **raw MV map `data`** (the six-layer tile array, used
 directly by both players) alongside `mwgEvents` (the converted event pages). `database` holds
 the other raw MV database JSON files (actors, classes, skills, …) lowercased by filename,
 mostly unused by the player today beyond `playerSprite` lookup.
@@ -207,7 +309,7 @@ manifest for `?id=`, then tries the real player and falls back on failure:
 - `src/player/fallback-core.js` (`MwgPlayer`) — a minimal `<canvas>` 2D fallback with no asset
   dependency (flat-colored tiles), used only when the Pixi/mw_games 2D runtime is unavailable.
   It runs the converted event vocabulary through `Rpg.EventRunner` (native subset plus
-  fallback-side `transfer`/choice-branch rewrites, loud once-per-page warnings for the rest)
+  fallback-side `transfer`/choice-branch rewrites, loud once-per-kind warnings through `onUnknownCommand` (0.22+) for the rest)
   rather than interpreting raw MV codes; still no pictures, audio, menus, or battles.
 
 ### Sound and music (all RPG Maker generations)
@@ -220,13 +322,13 @@ at `/audio-manager.js`, shared by the title screen in `public/player.js` and the
 `player-core.js`) is the thin adapter over it and holds only what the library leaves to the game:
 - **finding files** through the manifest's `audio` section (below);
 - **decoding**: `decodeAudioData` for real audio plus the MV/MZ `LOOPSTART`/`LOOPLENGTH` Vorbis loop
-  tags; MIDI through `renderMidiToBufferAsync` on a worker thread (mw_games 0.20+, bit-identical
+  tags (read by the library's `parseVorbisLoopTags`/`loopRegionFromTags`, 0.22+); MIDI through `renderMidiToBufferAsync` on a worker thread (mw_games 0.20+, bit-identical
   to the sync `parseMidi` -> `renderMidiToBuffer` path it falls back to — about 0.7 s for a track
   with the project's SoundFont, now off the main thread), the PCM cached in IndexedDB
-  (`cacheVersion` = `source.convertedAt`) because every map change reloads the page;
+  (`cacheVersion` = `source.convertedAt`, plus a `libN` suffix bumped when the library's render changes: `lib2` for 0.22's voiced pitch bend) because every map change reloads the page;
 - **the player's mixer**: master, per-kind volumes and mute in `localStorage` (`M` toggles mute in
-  game; sliders in the title Options panel), scaled on top of each track's own volume, with snapshots
-  reporting the level the game asked for;
+  game; sliders in the title Options panel), applied through `AudioBus.setMixer` (0.22+) on top of each
+  track's own volume, so snapshots report the level the game asked for with no unmixing here;
 - the browser autoplay unlock and a small LRU of decoded music.
 `snapshot()`/`restore()` ride in `runtimeState().audio`, so music continues from its position across a
 map transfer. Commands `playBgm/playBgs/me/sound/fadeout*/saveBgm/resumeBgm/stopSound` route to it
@@ -262,7 +364,7 @@ victory (experience with level-ups and learned skills, gold, drops) or defeat. R
 player's actor records (`rpgExtra.actors`), inventory and gold. `startBattle` in `player-core.js` uses it whenever
 the manifest has a database (MV/MZ, or an XP project whose database was filled in, see below; otherwise the old dialogue duel stays);
 losing without "can lose" goes to Game Over. Presentation is the dialogue box with menus (paged five at a time);
-battle graphics are a stage only (`buildBattleStage` in `player-core.js`: the map's battle background (only maps that specify one; MV's terrain-derived default is not reproduced, so other maps get a dark base) each enemy's battler at its troop position and the party's side-view battlers (idle pose, MV's default formation), dimmed when defeated; the browser harness checks it draws when enemy art ships), with no animations, no motion or damage popups, TP, counters/reflection/substitute, or plugin damage engines.
+battle graphics are a stage only (`buildBattleStage` in `player-core.js`: the map's battle background (only maps that specify one; MV's terrain-derived default is not reproduced, so other maps get a dark base) each enemy's battler at its troop position and the party's side-view battlers (idle pose, MV's default formation), dimmed when defeated; the browser harness checks it draws when enemy art ships), with no animations, no motion or damage popups, or plugin damage engines. TP is modelled (a random 0-24 start unless the Preserve TP flag keeps the actor's value, TP charged by damage taken, TRG regeneration, `tpCost`, `tpGain`), as are counter attacks (CNT against physical skills), magic reflection (MRF against magical ones) and the Substitute flag (a dying ally is replaced by a holder, unless the skill never misses), in the order of `BattleManager.invokeAction`. Battles also draw feedback (0.2.0): damage/heal/MP popups through mw_games' `FloatingTextStack`, a hit shake and an attack step, and the skill's or weapon's database animation (`playBattleAnimation`, sheets loaded on demand; animation patterns 100+ read `animation2Name`), all driven by `runBattle`'s `hooks.onUse`/`hooks.onEffect` and never affecting the outcome. The party stands in a formation (`src/player/formation.js`: default, line, column, triangle, inverted, square, diamond, chevron, circle): the menu's Formation screen (hidden by Change Formation Access) reorders the party (only the first `maxBattleMembers`, default 4, fight) and picks the layout, and with two or more rows the front row draws more attacks (TGR x1.5, physical damage x1.10) while the back row is covered (TGR x0.6, x0.85). That row rule is this player's own extension, not RPG Maker's. Enemy target choice is TGR-weighted like the engine's `randomTarget`. The battle BGM (System.json or Change Battle BGM), the victory/defeat ME and a return to the map music are played.
 Damage formulas are evaluated only if they are plain expressions; empty ones or plugin code
 (`value = user.dmgFormula_x(target);`) fall back loudly to MV's stock attack/magic formula so a battle can still be
 won, and a class with no hit-rate trait hits always. `tools/test-smoke.mjs` covers the rules on a synthetic
@@ -280,6 +382,17 @@ and 2, so the runner's built-in attack/guard/escape/wait skills and guard state 
 `database.system.battleIds` (MV keeps 1/2/2). Command 301 (with Win/Escape/Lose blocks 601-603) converts to `battle`.
 A placeholder database (Essentials keeps blank names and empty troops and fights in Ruby) is not emitted, so those
 games keep their own menus. Verified on a made-up project in `npm test`; no local XP game ships a filled database.
+
+### Fonts, gauges and poses
+
+- **Font.** With decoded assets the converter copies the one font the game uses (MZ: `System.json` `advanced.mainFontFilename`/`fontSize`/`fallbackFonts`; MV: the `GameFont` `@font-face` in `fonts/gamefont.css`, size 28) and records it as `display.font`. `applyGameFont` loads it as `GameFont` and sets it as the window theme's font at the engine's size scaled to the canvas. **`setTheme` rebuilds from the library defaults, not from the current theme**: every call must merge with `mwg.theme()` (the font was silently reset by the window-skin call until it did), and `lineHeight` is a multiplier of the size, not pixels.
+- **Gauges.** `Window.png` is also the game's colour table (colour n at `(96 + n%8*12 + 6, 144 + floor(n/8)*12 + 6)`): the gauge back (19), HP (20/21), MP (22/23), TP (28/29) and text colours (0, crisis 17, knockout 18) are read from it (`readWindowPalette`, stock values as fallback). The battle draws a status panel top right (name, HP/MP/TP with the engine's gradients, the name in crisis/knockout colour); TP shows unless `optDisplayTp` is false.
+- **Poses.** Actors animate on their `sv_actors` sheet like `Sprite_Actor`: wait/guard/dying/abnormal/sleep/dead follow the battler, attack (thrust/swing/missile from the weapon's `attackMotions`), skill/spell (`magicSkills`)/item on use, damage on a hit, evade on a miss, victory when the fight is won (`svCell`/`svPattern`/`svIdleMotion`/`svActionMotion`, unit-tested). Enemies stay static, as in the engine.
+- **Old manifests.** The converter stamps `converter.version` as the second key of `mwgp.json`; `tools/converter-version.mjs` reads it from the first bytes, and `LAST_OUTPUT_CHANGE` (0.2.0) is what a manifest is compared against, so bump that constant when a conversion fix changes existing output. The launcher marks stale manifests ("reconvert"), the player shows a banner line for them, and `npm run convert:auto -- <src> <dst> --stale` reconverts only what is missing or stale.
+
+### Windows
+
+When assets are decoded the converter also decodes `img/system/Window.png` (`assets.windowSkin`). `applyWindowSkin` composes its 96x96 background and the frame's 24px corners/edges (the frame's middle holds the arrow sprites and is cleared) into one nine-patch and installs it as mw_games' window theme (`setTheme`), so dialogue, choice and menu windows all wear the game's own frame, with white text and a four-line message window. Without the file the library's default look stays.
 
 ### Menu (MV/MZ)
 
@@ -300,7 +413,7 @@ save or asks which; Game Over offers Continue (when a save exists), Restart (a n
 
 ### Event scripts (Ruby in XP/VX/Ace events, JavaScript in MV/MZ events)
 
-Game-agnostic: nothing in the converter or player names a particular game (sidecar `loc/*.json` text tables are discovered generically; message-text hooks are found as `def self.inline` modules and listed in `rubyLibrary.textFilters`; engine-framework `pb*` helpers are fallbacks used only when the game's library lacks the name; MV/MZ: the converter ships the project's own plugin JS that event scripts reach plus its engine logic files (`pluginLibrary`: `tools/mv-plugins.mjs`, name-reachability over `js/plugins/` and `rpg_core/managers/objects`), and the same runtime evaluates them in a `with`-scope sandbox: the real `Game_*` classes, `DataManager` hooks, `JsonEx` and plugin globals run for real; windows/scenes/sprites are auto-created inert stubs; display/audio singletons are inert; nw.js host APIs (`require`, `process`, `document.currentScript`) are shimmed. The real `Game_Party` is bridged onto `rpgExtra` (gold/items/members) and engine object state (system, actors, party extras, screen, timer) persists in `rpgExtra.mvEngine` across page reloads; the plugin/engine sources are written as files (`assets/plugins/`, `assets/engine/`, `externalizePluginLibrary`) that the player fetches at startup (`loadPluginFiles`), keeping them out of `mwgp.json` (Karryn: 26 MB -> 11 MB), and the server gzips manifests and text assets; the runtime's `introspect()` also lists every call it skipped loudly (`warned`), which the browser harness prints per game; switches/variables/map/player stay on `GameState` via the shim built-ins. Engine behaviour that needs the unloaded UI/scene layer fails loudly). One runtime,
+Game-agnostic: nothing in the converter or player names a particular game (sidecar `loc/*.json` text tables are discovered generically; message-text hooks are found as `def self.inline` modules and listed in `rubyLibrary.textFilters`; a framework helper the game's library does not define is a loud stub like any unknown name, never a built-in stand-in; MV/MZ: the converter ships the project's own plugin JS that event scripts or plugin commands reach plus its engine logic files (`pluginLibrary`: `tools/mv-plugins.mjs`, name-reachability over `js/plugins/` and `rpg_core/managers/objects`, plus plugin-command words found as string literals and the plugins MZ commands name), and the same runtime evaluates them in a `with`-scope sandbox: the real `Game_*` classes, `DataManager` hooks, `JsonEx` and plugin globals run for real; windows/scenes/sprites are auto-created inert stubs; display/audio singletons are inert; nw.js host APIs (`require`, `process`, `document.currentScript`) are shimmed. The real `Game_Party` is bridged onto `rpgExtra` (gold/items/members) and engine object state (system, actors, party extras, screen, timer) persists in `rpgExtra.mvEngine` across page reloads; the plugin/engine sources are written as files (`assets/plugins/`, `assets/engine/`, `externalizePluginLibrary`) that the player fetches at startup (`loadPluginFiles`), keeping them out of `mwgp.json` (Karryn: 26 MB -> 11 MB), and the server gzips manifests and text assets; the runtime's `introspect()` also lists every call it skipped loudly (`warned`), which the browser harness prints per game; switches/variables/map/player stay on `GameState` via the shim built-ins. Engine behaviour that needs the unloaded UI/scene layer fails loudly). One runtime,
 `src/player/rgss-script.js` (served at `/rgss-script.js`, dynamically imported by
 `startMwgPlayer` so `prepareEventCommands` stays importable from Node), runs both dialects.
 
@@ -345,8 +458,7 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
 - **Async lift (`tools/rgss-async.mjs`, run by `convert-rgss.js` after the library is built)** — Ruby loops that wait
   on frames (`loop { Graphics.update; Input.update; ... }`, whole `pbMain` scenes) cannot finish in synchronous JS.
   With acorn the converter finds, by callee *name* across every library unit and Call Script snippet, the functions
-  that (transitively) reach `Graphics.update`/`Graphics.wait` (plus the runtime's dialogue-backed `pbMessage`,
-  `pbConfirmMessage`, `pbConfirmMessageSerious`), marks them `async` and wraps their calls in `(await ...)`;
+  that (transitively) reach `Graphics.update`/`Graphics.wait`, marks them `async` and wraps their calls in `(await ...)`;
   snippets that await are flagged `async: true` and run as async function bodies. The runtime's `Graphics.update`
   returns the next animation frame (a loop that spins on it without yielding trips a counter and errors loudly), and
   `Input.update` latches key edges for `trigger?`. Not lifted (reported as "left sync"): constructors, getters/setters
@@ -379,11 +491,11 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   renamed `this._$x`; `x&.name` (a property read) becomes a call for names the game `def`s, like `x.name`; `list.map(&:to_i)`
   (emitted as `map("to_i")`) becomes an arrow.
 - **Interleaving** — lifted scripts wait on frames while others run, and `current`/`queue` are shared: each wait
-  (`nextFrame`, `pbMessage`) captures the caller's context and restores it on resume (`resumeAfter`); conditions and
+  (`nextFrame`) captures the caller's context and restores it on resume (`resumeAfter`); conditions and
   operands restore theirs when they finish.
-- **The game's own pause menu** — when the library ships Essentials' `PokemonPauseMenu` + `PokemonPauseMenu_Scene`,
-  with `?gamemenu=1` Escape runs them as a lifted script (`openGamePauseMenu`), flushing the opening key first; if that
-  script fails (it does today) the player's simple menu opens instead. It is off by default: the failure is loud. It fails because Essentials' save state is never built:
+- **A game's own menu scenes** — the player has no entry point into them: an opt-in `?gamemenu=1` that ran Essentials'
+  pause menu by class name was removed as framework-specific (`docs/removed-shims.md`); a generic entry needs the
+  engine's own menu call. What that experiment found, and the generic fixes it produced: it failed because the save state was never built:
   `$player.money`, the bag, the party and the rest are created by the engine's own start-up (`Game.start_new`), which
   this runtime does not run, so `$player` is an empty shim object. Building that state (running the game's
   initialization, or seeding `Player`/`PokemonBag`/`PokemonGlobalMetadata` from the shipped `Data/*.dat`) is the next
@@ -415,7 +527,7 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   a receiver-less call to an inherited instance method inside a class is `this.name()` (`methodOnlyNames`);
   constructors: `this` assignments ahead of `super(...)` move after it, and a derived constructor that never calls
   `super` gets `super()`; `repairCallAssignments` runs before the syntax check so a unit no longer falls back to the
-  no-call-heuristic transpile. With `?gamemenu=1` the game's own pause menu runs further (it builds its windows, sets
+  no-call-heuristic transpile. The pause-menu experiment then ran further (it builds its windows, sets
   a cursor rect, plays its open sound) and now stops on a memoized windowskin path (`SpriteWindow_Base`'s
   `MessageConfig.pbGetSystemFrame()`) coming back nil at a specific point in the real menu flow, though it returns the
   correct string when called standalone — not yet root-caused (see next item's correction). Beyond that its command

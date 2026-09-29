@@ -46,7 +46,12 @@ const projects = readdirSync(mwgpRoot, { withFileTypes: true })
   .filter(entry => entry.isDirectory() && existsSync(join(mwgpRoot, entry.name, 'mwgp.json')))
   .map(entry => entry.name)
   .filter(name => !only || name === only);
-if (!projects.length) {
+// MV/MZ web builds (tools/build-web.js): the game's own engine, checked through stock engine APIs.
+const webBuilds = readdirSync(mwgpRoot, { withFileTypes: true })
+  .filter(entry => entry.isDirectory() && !existsSync(join(mwgpRoot, entry.name, 'mwgp.json')) && existsSync(join(mwgpRoot, entry.name, 'mwgp-web.json')))
+  .map(entry => entry.name)
+  .filter(name => !only || name === only);
+if (!projects.length && !webBuilds.length) {
   console.error(`SKIPPED (loud): no converted project under MWGP_versions/${only ? ` matching "${only}"` : ''} to drive.`);
   process.exit(1);
 }
@@ -339,6 +344,8 @@ async function check(name) {
             }).catch(() => null);
             if (stage && process.env.MWGP_SMOKE_BATTLESHOT) await page.screenshot({ path: process.env.MWGP_SMOKE_BATTLESHOT }).catch(() => {});
           }
+          // MWGP_SMOKE_BATTLESHOT also saves a few later frames (<name>-N.png) so hit popups and motions are caught.
+          if (process.env.MWGP_SMOKE_BATTLESHOT && [9, 12, 15, 18, 22].includes(index)) await page.screenshot({ path: process.env.MWGP_SMOKE_BATTLESHOT.replace(/\.png$/, `-${index}.png`) }).catch(() => {});
           await page.keyboard.press('Enter');
           await page.waitForTimeout(120);
           outcome = await page.evaluate(() => globalThis.__battleOutcome).catch(() => undefined);
@@ -400,18 +407,30 @@ async function check(name) {
 }
 
 // Title screen: once, on the first project - it is the entry every game shares.
+// Splash/press-start/load titles take several confirms (one per phase), so
+// keep confirming while the title is up. Once it is gone the game is booting:
+// stop pressing (input would leak into the game) and just wait for it.
 async function checkTitleScreen(name) {
   const id = Buffer.from(name, 'utf8').toString('base64url');
   const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
   const page = await context.newPage();
   try {
     await page.goto(`${base}/player.html?id=${encodeURIComponent(id)}`, { waitUntil: 'domcontentloaded' });
-    const hasTitle = await page.waitForSelector('.mwgp-title button', { timeout: 30000 }).then(() => true).catch(() => false);
-    if (!hasTitle) { await context.close(); return { name, ok: false, reason: 'title screen buttons never appeared' }; }
-    await page.keyboard.press('Enter');
-    const entered = await page.waitForSelector('#loading', { state: 'detached', timeout: BOOT_TIMEOUT_MS }).then(() => true).catch(() => false);
+    const start = Date.now();
+    let entered = false;
+    while (Date.now() - start < BOOT_TIMEOUT_MS) {
+      entered = await page.evaluate(() => !document.querySelector('#loading')).catch(() => false);
+      if (entered) break;
+      const titled = await page.$('.mwgp-title').then(found => !!found).catch(() => false);
+      if (titled) {
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(800);
+      } else {
+        await page.waitForTimeout(1500);
+      }
+    }
     await context.close().catch(() => {});
-    return { name, ok: entered, reason: entered ? null : 'choosing New Game left the player loading forever' };
+    return { name, ok: entered, reason: entered ? null : 'confirming through the title screen left the player loading forever' };
   } catch (error) {
     await context.close().catch(() => {});
     return { name, ok: false, reason: `exception: ${error?.message || error}` };
@@ -534,7 +553,7 @@ async function soak(name, seconds) {
   return { name, seconds, maps: maps.size, dialogues, navigations, errors, gameErrors };
 }
 
-console.log(`Browser smoke: ${projects.length} project(s) against ${base}`);
+console.log(`Browser smoke: ${projects.length} MWGP project(s) and ${webBuilds.length} web build(s) against ${base}`);
 for (const project of projects) {
   const result = await check(project);
   results.push(result);
@@ -570,13 +589,114 @@ if (soakIndex >= 0) {
   }
 }
 
-const titleResult = await checkTitleScreen(projects[0]);
-console.log(`  ${titleResult.ok ? 'PASS' : 'FAIL'}  title screen (${projects[0]})${titleResult.reason ? ` - ${titleResult.reason}` : ''}`);
+// A web build plays the game's own engine: boot to its first scene, a save that survives a reload, a new game that
+// reaches a map. Uncaught page errors fail; errors the game logs itself (and recovers from) are notes.
+async function checkWebBuild(name) {
+  const url = `${base}/web/${Buffer.from(name, 'utf8').toString('base64url')}/`;
+  const info = await fetch(`${url}mwgp-web.json`).then(response => response.json());
+  if (info.source?.engine === 'rpg-maker-rgss') {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const page = await context.newPage();
+    const steps = [], pageErrors = [];
+    page.on('pageerror', error => { pageErrors.push(String(error?.message || error).slice(0, 200)); if (process.env.MWGP_SMOKE_DEBUG) console.log(`[rgss pageerror] ${String(error?.stack || error).slice(0, 500)}`); });
+    if (process.env.MWGP_SMOKE_DEBUG) {
+      page.on('console', message => console.log(`[rgss ${message.type()}] ${message.text().slice(0, 500)}`));
+      page.on('requestfailed', request => console.log(`[rgss request failed] ${request.url()} ${request.failure()?.errorText}`));
+    }
+    try {
+      const response = await page.goto(url);
+      if (!response?.headers()['cross-origin-opener-policy'] || !response?.headers()['cross-origin-embedder-policy']) throw new Error('cross-origin isolation headers missing');
+      await page.waitForFunction(() => ['ready', 'error'].includes(globalThis.__MWGP_RGSS__?.phase), null, { timeout: BOOT_TIMEOUT_MS });
+      let state = await page.evaluate(() => globalThis.__MWGP_RGSS__);
+      if (state.phase === 'ready') {
+        await page.click('#start');
+        await page.waitForFunction(() => ['running', 'error'].includes(globalThis.__MWGP_RGSS__?.phase), null, { timeout: BOOT_TIMEOUT_MS });
+        state = await page.evaluate(() => globalThis.__MWGP_RGSS__);
+      }
+      steps.push(state.phase === 'running' ? 'mkxp-z core started; manual gameplay check required' : `core failed: ${state.error}`);
+      return { name, ok: state.phase === 'running' && !pageErrors.length, steps, pageErrors, gameErrors: [] };
+    } catch (error) {
+      steps.push(`state: ${JSON.stringify(await page.evaluate(() => ({ state: globalThis.__MWGP_RGSS__, message: document.querySelector('#message')?.textContent })).catch(() => null))}`);
+      steps.push(`stopped: ${String(error?.message || error).split('\n')[0].slice(0, 200)}`);
+      return { name, ok: false, steps, pageErrors, gameErrors: [] };
+    } finally { await context.close(); }
+  }
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  const page = await context.newPage();
+  const pageErrors = [], gameErrors = [], steps = [];
+  page.on('pageerror', error => { pageErrors.push(String(error?.message || error).slice(0, 200)); if (process.env.MWGP_SMOKE_DEBUG) console.log(`[web pageerror] ${String(error?.stack || error).slice(0, 1200)}`); });
+  page.on('console', message => { if (message.type() === 'error') { gameErrors.push(message.text().split('\n')[0].slice(0, 160)); if (process.env.MWGP_SMOKE_DEBUG) console.log(`[web console.error] ${message.text().slice(0, 1200)}`); } });
+  if (process.env.MWGP_SMOKE_DEBUG) page.on('response', response => { if (response.status() >= 400) console.log(`[web HTTP ${response.status()}] ${response.url()}`); });
+  const started = () => page.waitForFunction(() => typeof SceneManager !== 'undefined' && SceneManager._scene && typeof Scene_Boot !== 'undefined'
+    && !(SceneManager._scene instanceof Scene_Boot) && (SceneManager._sceneStarted || SceneManager._scene.isStarted?.()), null, { timeout: BOOT_TIMEOUT_MS });
+  let ok = false;
+  try {
+    await page.goto(url);
+    const indexedDirectories = await fetch(`${url}directories.json`).then(response => response.ok ? response.json() : []);
+    if (indexedDirectories.includes('logs')) {
+      await page.waitForFunction(() => window.__mwgpWebHost?.ready(), null, { timeout: BOOT_TIMEOUT_MS });
+      const logEntries = await page.evaluate(() => require('fs').readdirSync('/web/logs'));
+      if (!Array.isArray(logEntries)) throw new Error('virtual /web/logs directory did not return an entry list');
+      steps.push(`/web/logs readdir works (${logEntries.length} entries)`);
+    }
+    await started();
+    const first = await page.evaluate(() => {
+      let logs = null;
+      try { const fs = require('fs'); if (fs.existsSync('/web/logs')) logs = fs.readdirSync('/web/logs').length; } catch (error) { logs = `ERROR ${error.message}`; }
+      return { scene: SceneManager._scene.constructor.name, drawn: SceneManager._scene.children.length, host: window.__mwgpWebHost?.files() || 0, logs, warned: window.__mwgpWebHost?.warnedModules() || [] };
+    });
+    steps.push(`booted to ${first.scene} (${first.drawn} display object(s), ${first.host} files indexed${first.logs !== null ? `, logs folder readable (${first.logs})` : ''}${first.warned.length ? `, no-op host modules: ${first.warned.join(', ')}` : ''})`);
+    if (typeof first.logs === 'string' && first.logs.startsWith('ERROR')) return await fail(`indexed logs folder is not readable: ${first.logs}`);
+    await page.evaluate(() => { DataManager.setupNewGame(); SceneManager.goto(Scene_Map); });
+    // MV marks a started scene on SceneManager, MZ on the scene itself.
+    await page.waitForFunction(() => SceneManager._scene instanceof Scene_Map && (SceneManager._sceneStarted || SceneManager._scene.isStarted?.()), null, { timeout: BOOT_TIMEOUT_MS });
+    await page.waitForTimeout(3000);
+    const map = await page.evaluate(() => ({ mapId: $gameMap.mapId(), x: $gamePlayer.x, y: $gamePlayer.y, scene: SceneManager._scene.constructor.name }));
+    steps.push(`new game reached map ${map.mapId} (${map.x},${map.y})${map.scene !== 'Scene_Map' ? ` then ${map.scene}` : ''}`);
+    // Saved on the map like a player would; MV's saveGame returns a boolean, MZ's a promise.
+    const saved = await page.evaluate(async () => {
+      $gameVariables.setValue(1, 4242);
+      $gameSystem.onBeforeSave?.();
+      let result;
+      try { result = await DataManager.saveGame(1); } catch (error) { return `threw: ${error?.message || error}`; }
+      await new Promise(resolve => setTimeout(resolve, 500));
+      // MV returns true/false; MZ resolves (to 0) on success and rejects on failure.
+      return result !== false;
+    });
+    await page.reload();
+    await started();
+    const restored = await page.evaluate(async () => {
+      const exists = typeof DataManager.savefileExists === 'function' ? DataManager.savefileExists(1) : StorageManager.exists(1);
+      let loaded = false;
+      try { loaded = exists && (await DataManager.loadGame(1)) !== false; } catch (error) { loaded = `threw: ${error?.message || error}`; }
+      return { exists, loaded, value: $gameVariables.value(1) };
+    });
+    const saveOk = saved === true && restored.exists === true && restored.loaded === true && restored.value === 4242;
+    steps.push(saveOk ? 'a save made on the map survives a reload and loads' : `save round trip failed (${JSON.stringify({ saved, ...restored })})`);
+    if (process.env.MWGP_SMOKE_SHOT) await page.screenshot({ path: process.env.MWGP_SMOKE_SHOT.replace(/(\.png)?$/i, `-${name.replace(/[^\w.-]+/g, '_')}.png`) });
+    ok = saveOk && map.mapId > 0 && !pageErrors.length;
+  } catch (error) {
+    steps.push(`stopped: ${String(error?.message || error).split('\n')[0].slice(0, 200)}`);
+  } finally { await context.close(); }
+  return { name, ok, steps, pageErrors, gameErrors: [...new Set(gameErrors)] };
+}
+const webResults = [];
+for (const name of webBuilds) {
+  const result = await checkWebBuild(name);
+  webResults.push(result);
+  console.log(`  ${result.ok ? 'PASS' : 'FAIL'}  web build ${name}`);
+  for (const step of result.steps) console.log(`          ~ ${step}`);
+  for (const error of result.pageErrors.slice(0, 5)) console.log(`          ! uncaught: ${error}`);
+  for (const error of result.gameErrors.slice(0, 3)) console.log(`          ~ game-logged error: ${error}`);
+}
+
+const titleResult = projects.length ? await checkTitleScreen(projects[0]) : { ok: true, reason: 'no MWGP project' };
+if (projects.length) console.log(`  ${titleResult.ok ? 'PASS' : 'FAIL'}  title screen (${projects[0]})${titleResult.reason ? ` - ${titleResult.reason}` : ''}`);
 
 await browser.close();
 if (startedServer) server.kill();
 
-const failed = results.filter(result => !result.ok).concat(titleResult.ok ? [] : [titleResult]).concat(mapSweeps.filter(sweep => sweep.problems.length)).concat(soaks.filter(result => result.errors.length));
+const failed = results.filter(result => !result.ok).concat(titleResult.ok ? [] : [titleResult]).concat(mapSweeps.filter(sweep => sweep.problems.length)).concat(soaks.filter(result => result.errors.length)).concat(webResults.filter(result => !result.ok));
 const withErrors = results.filter(result => result.ok && result.errors.length);
-console.log(`\nBrowser smoke: ${results.length - results.filter(result => !result.ok).length}/${results.length} booted, ${withErrors.length} with console errors, ${failed.length ? `${failed.length} failed` : 'no failures'}`);
+console.log(`\nBrowser smoke: ${results.length - results.filter(result => !result.ok).length}/${results.length} booted, ${withErrors.length} with console errors, ${webResults.filter(result => result.ok).length}/${webResults.length} web build(s) played, ${failed.length ? `${failed.length} failed` : 'no failures'}`);
 if (failed.length || withErrors.length) process.exit(1);

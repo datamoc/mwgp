@@ -1,5 +1,6 @@
+import { readManifestConverterVersion, isStaleConverterVersion } from '../tools/converter-version.mjs';
 import { createServer } from 'node:http';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { gzip } from 'node:zlib';
@@ -10,6 +11,17 @@ import { buildMapIndex, findMapEntry, indexCacheKey, mapCacheKey } from './map-i
 // Text responses (manifests, plugin/engine sources) are large and compress ~8x: gzip them for clients that
 // accept it, keeping the compressed copy per file version so the cost is paid once.
 const gzipped = new Map();
+
+// A generated cache (e.g. FastCutIns) writes many files in one burst, each its own POST to /api/web-cache:
+// concurrent requests must not read-modify-write the same build's files.json in parallel, or the read-modify-write
+// race silently drops entries (the last writer's read predates the others' appends), which then makes the game
+// think those files were never generated on the next launch. Serialize per build (outputRoot).
+const fileListLocks = new Map();
+function withFileListLock(outputRoot, task) {
+  const chained = (fileListLocks.get(outputRoot) || Promise.resolve()).then(task, task);
+  fileListLocks.set(outputRoot, chained.catch(() => {}));
+  return chained;
+}
 async function sendFile(req, res, file, type) {
   const fs = await import('node:fs/promises');
   const stat = await fs.stat(file);
@@ -62,12 +74,44 @@ function listGames() {
     .filter(Boolean);
 }
 
+// Converted projects: MWGP manifests (played by the MWGP player) and MV/MZ web builds (the game's own engine,
+// tools/build-web.js), both under MWGP_versions/.
 function listMwgp() {
   if (!existsSync(mwgpRoot)) return [];
   return readdirSync(mwgpRoot, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => {
     const folder = join(mwgpRoot, entry.name);
-    return existsSync(join(folder, 'mwgp.json')) ? { id: Buffer.from(entry.name, 'utf8').toString('base64url'), name: entry.name, kind: 'mwgp' } : null;
+    const id = Buffer.from(entry.name, 'utf8').toString('base64url');
+    if (existsSync(join(folder, 'mwgp.json'))) {
+      // A manifest made by an older converter (or one that predates the stamp) is flagged so the launcher can offer a reconversion.
+      const converterVersion = readManifestConverterVersion(join(folder, 'mwgp.json'));
+      return { id, name: entry.name, kind: 'mwgp', converterVersion, stale: isStaleConverterVersion(converterVersion) };
+    }
+    if (existsSync(join(folder, 'mwgp-web.json'))) {
+      let info = {};
+      try { info = JSON.parse(readFileSync(join(folder, 'mwgp-web.json'), 'utf8')); } catch { /* listed by name only */ }
+      return { id, name: entry.name, kind: 'web', engine: info.source?.engine === 'rpg-maker-rgss' ? `RPG Maker ${info.rgss?.generation?.toUpperCase() || 'XP/VX/Ace'} (web build)` : info.source?.engine === 'rpg-maker-mz' ? 'RPG Maker MZ (web build)' : 'RPG Maker MV (web build)', title: info.title || entry.name };
+    }
+    return null;
   }).filter(Boolean);
+}
+
+// Web builds are static folders: any file, with a type the browser needs to use it.
+const webTypes = { ...assetTypes, '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.svg': 'image/svg+xml',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
+  '.webm': 'video/webm', '.mp4': 'video/mp4', '.wasm': 'application/wasm', '.map': 'application/json; charset=utf-8' };
+async function sendWebFile(req, res, id, path) {
+  if (!listMwgp().some(item => item.id === id && item.kind === 'web')) return json(res, 404, { error: 'Web build not found' });
+  const base = resolve(mwgpRoot, Buffer.from(id, 'base64url').toString('utf8'));
+  let file = resolve(base, `.${path || '/'}`);
+  if (file !== base && !file.startsWith(base + sep)) return json(res, 404, { error: 'Not found' });
+  if (statSafe(file)?.isDirectory()) file = join(file, 'index.html');
+  const stat = statSafe(file);
+  if (!stat?.isFile()) return json(res, 404, { error: 'Not found' });
+  const type = webTypes[extname(file).toLowerCase()] || 'application/octet-stream';
+  if (/json|javascript|text|svg/.test(type)) return sendFile(req, res, file, type);
+  res.writeHead(200, { 'content-type': type, 'content-length': stat.size, 'cache-control': 'no-cache' });
+  createReadStream(file).pipe(res);
+  return undefined;
 }
 
 function statSafe(path) {
@@ -120,6 +164,10 @@ function launchGame(id) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (url.pathname.startsWith('/web/')) {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  }
   if (url.pathname === '/api/games' && req.method === 'GET') return json(res, 200, { rpgm: listGames(), mwgp: listMwgp() });
   if (url.pathname.startsWith('/api/mwgp/') && req.method === 'GET') {
     const rest = decodeURIComponent(url.pathname.slice('/api/mwgp/'.length));
@@ -167,7 +215,68 @@ const server = createServer(async (req, res) => {
     try { return json(res, 200, launchGame(JSON.parse(body).id)); }
     catch { return json(res, 400, { error: 'Invalid request' }); }
   }
-  if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
+  const webCache = /^\/api\/web-cache\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+  if (webCache && req.method === 'POST') {
+    const [, id] = webCache;
+    const build = listMwgp().find(item => item.id === id && item.kind === 'web');
+    if (!build) return json(res, 404, { error: 'Web build not found' });
+    let relativePath;
+    relativePath = (url.searchParams.get('path') || '').replace(/\\/g, '/');
+    const segments = relativePath.split('/').filter(Boolean);
+    const cachePath = segments.at(-1) === '.fast-cut-ins' || segments.at(-1) === '.fast-cut-ins.lock' || segments.some(part => /_fast$/i.test(part));
+    if (!segments.length || segments.some(part => part === '.' || part === '..' || part.includes(':')) || !cachePath)
+      return json(res, 400, { error: 'Only generated FastCutIns cache paths can be written' });
+    const buffers = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > 128 * 1024 * 1024) return json(res, 413, { error: 'Cache file exceeds 128 MiB' });
+      buffers.push(chunk);
+    }
+    const data = Buffer.concat(buffers, size);
+    const projectRoot = resolve(gamesRoot, build.name);
+    const sourceRoot = existsSync(join(projectRoot, 'www', 'data', 'System.json')) ? join(projectRoot, 'www') : projectRoot;
+    const outputRoot = resolve(mwgpRoot, build.name);
+    const sourceFile = resolve(sourceRoot, relativePath), outputFile = resolve(outputRoot, relativePath);
+    if (!sourceFile.startsWith(sourceRoot + sep) || !outputFile.startsWith(outputRoot + sep)) return json(res, 400, { error: 'Invalid cache path' });
+    try {
+      // Save to the served build first; native game processes can briefly hold an existing source cache open.
+      mkdirSync(resolve(outputFile, '..'), { recursive: true });
+      writeFileSync(outputFile, data);
+      let sourceSaved = false, sourceError = null;
+      for (let attempt = 0; attempt < 4 && !sourceSaved; attempt++) {
+        try { mkdirSync(resolve(sourceFile, '..'), { recursive: true }); writeFileSync(sourceFile, data); sourceSaved = true; }
+        catch (error) {
+          sourceError = error;
+          if (!['EBUSY', 'EPERM', 'EACCES'].includes(error.code) || attempt === 3) break;
+          await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+        }
+      }
+      await withFileListLock(outputRoot, () => {
+        const fileListPath = join(outputRoot, 'files.json');
+        const fileList = JSON.parse(readFileSync(fileListPath, 'utf8'));
+        if (!fileList.some(name => name.toLowerCase() === relativePath.toLowerCase())) {
+          fileList.push(relativePath);
+          fileList.sort((a, b) => a.localeCompare(b));
+          writeFileSync(fileListPath, JSON.stringify(fileList));
+        }
+      });
+      if (!sourceSaved) console.warn('[web cache] saved to web build; source cache remains locked', build.name, relativePath, sourceError);
+      return json(res, 200, { ok: true, sourceSaved });
+    } catch (error) {
+      console.error('[web cache] write failed', build.name, relativePath, error);
+      return json(res, 500, { error: 'Could not save generated cache' });
+    }
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: 'Method not allowed' });
+  // /web/<id>/... : an MV/MZ web build, served as the static folder it is (relative URLs resolve inside it).
+  const web = /^\/web\/([A-Za-z0-9_-]+)(\/.*)?$/.exec(url.pathname);
+  if (web) {
+    if (!web[2]) { res.writeHead(301, { location: `/web/${web[1]}/` }); return res.end(); }
+    let path;
+    try { path = decodeURIComponent(web[2]); } catch { return json(res, 400, { error: 'Bad path' }); }
+    return sendWebFile(req, res, web[1], path);
+  }
   if (url.pathname === '/fallback-core.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
     return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'src', 'player', 'fallback-core.js'))));

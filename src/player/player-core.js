@@ -1,6 +1,118 @@
 import { AudioManager } from './audio-manager.js';
-import { runBattle, createPicker } from './battle.js';
+import { runBattle, createPicker, expForLevel } from './battle.js';
 import { runMenu } from './menu.js';
+import { stagePositions } from './formation.js';
+
+export 
+// ---- MV's window colours and gauges ------------------------------------------------------------------------------
+// Game text colours are pixels of Window.png: colour n sits at (96 + n % 8 * 12 + 6, 144 + floor(n / 8) * 12 + 6). The gauges use
+// 19 (back), 20/21 (HP), 22/23 (MP) and 28/29 (TP), the text 0 (normal), 17 (crisis) and 18 (knockout). The defaults are the
+// engine's stock Window.png values, used until (or unless) the game's own file is read.
+const STOCK_PALETTE = { text: 0xffffff, crisis: 0xffff40, knockout: 0xff2020, gaugeBack: 0x202040, hp: [0xe08040, 0xf0c040], mp: [0x40c0f0, 0x80e0ff], tp: [0x40c040, 0x80e080] };
+let windowPalette = STOCK_PALETTE;
+export const gaugePalette = () => windowPalette;
+
+function readWindowPalette(bitmap) {
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width; canvas.height = bitmap.height;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(bitmap, 0, 0);
+  const colour = index => {
+    const x = 96 + (index % 8) * 12 + 6, y = 144 + Math.floor(index / 8) * 12 + 6;
+    if (x >= bitmap.width || y >= bitmap.height) return null;
+    const [r, g, b, a] = context.getImageData(x, y, 1, 1).data;
+    return a ? (r << 16) | (g << 8) | b : null;
+  };
+  const pick = (index, fallback) => colour(index) ?? fallback;
+  windowPalette = {
+    text: pick(0, STOCK_PALETTE.text), crisis: pick(17, STOCK_PALETTE.crisis), knockout: pick(18, STOCK_PALETTE.knockout), gaugeBack: pick(19, STOCK_PALETTE.gaugeBack),
+    hp: [pick(20, STOCK_PALETTE.hp[0]), pick(21, STOCK_PALETTE.hp[1])], mp: [pick(22, STOCK_PALETTE.mp[0]), pick(23, STOCK_PALETTE.mp[1])], tp: [pick(28, STOCK_PALETTE.tp[0]), pick(29, STOCK_PALETTE.tp[1])]
+  };
+}
+
+// The actor sprite motions of Sprite_Actor (sv_actors.png: 9 columns x 6 rows, three patterns per motion; motion `index` sits at
+// column floor(index / 6) * 3 + pattern, row index % 6). Looping motions run 0,1,2,1; the others 0,1,2 and then return to the idle pose.
+export const SV_MOTIONS = {
+  walk: { index: 0, loop: true }, wait: { index: 1, loop: true }, chant: { index: 2, loop: true }, guard: { index: 3, loop: true },
+  damage: { index: 4, loop: false }, evade: { index: 5, loop: false }, thrust: { index: 6, loop: false }, swing: { index: 7, loop: false },
+  missile: { index: 8, loop: false }, skill: { index: 9, loop: false }, spell: { index: 10, loop: false }, item: { index: 11, loop: false },
+  escape: { index: 12, loop: true }, victory: { index: 13, loop: true }, dying: { index: 14, loop: true }, abnormal: { index: 15, loop: true },
+  sleep: { index: 16, loop: true }, dead: { index: 17, loop: true }
+};
+const SV_PATTERN_SECONDS = 12 / 60;   // Sprite_Actor.motionSpeed: 12 frames per pattern
+// Index into the sheet's row-major cell grid for a motion's pattern.
+export function svCell(motion, pattern) {
+  const def = SV_MOTIONS[motion] || SV_MOTIONS.wait;
+  return (def.index % 6) * 9 + Math.floor(def.index / 6) * 3 + pattern;
+}
+// The pattern shown `elapsed` seconds into a motion, and whether a non-looping motion has finished.
+export function svPattern(motion, elapsed) {
+  const def = SV_MOTIONS[motion] || SV_MOTIONS.wait;
+  const step = Math.floor(elapsed / SV_PATTERN_SECONDS);
+  if (def.loop) return { pattern: [0, 1, 2, 1][step % 4], done: false };
+  return { pattern: Math.min(2, step), done: step >= 3 };
+}
+// Sprite_Actor.refreshMotion for a battler that is not acting: state motion (dead/sleep), guard, abnormal state, dying, else wait.
+export function svIdleMotion(actor, database) {
+  const states = (actor.states || []).map(entry => database?.states?.[entry.id]).filter(Boolean).sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
+  const stateMotion = actor.dead ? 3 : Number(states[0]?.motion || 0);
+  if (stateMotion === 3) return 'dead';
+  if (stateMotion === 2) return 'sleep';
+  if (actor.isGuarding) return 'guard';
+  if (stateMotion === 1) return 'abnormal';
+  if (actor.isDying) return 'dying';
+  return 'wait';
+}
+// The motion of an action (Game_Actor.performAction): the weapon's attack motion for the attack skill, spell for magic skills,
+// skill for other skills, item for items.
+export function svActionMotion(actor, item, isItem, database) {
+  if (isItem) return 'item';
+  const system = database?.system || {};
+  if (item && item === database?.skills?.[Number(system.battleIds?.attackSkill ?? 1)]) {
+    const weapon = actor.equipItems?.()[0];
+    const motion = system.attackMotions?.[Number(weapon?.wtypeId || 0)];
+    return motion ? ['thrust', 'swing', 'missile'][Number(motion.type)] || 'swing' : 'swing';
+  }
+  return (system.magicSkills || []).includes(Number(item?.stypeId)) ? 'spell' : 'skill';
+}
+
+// The game's own font (manifest display.font, copied by the converter): loaded as GameFont and made the window theme's font at
+// the engine's size (MV 28, MZ advanced.fontSize) scaled to the canvas, line height size + 8 as the engine's `lineHeight` 36.
+async function applyGameFont(mwg, project, assetRoot, pixelHeight) {
+  const font = project.display?.font;
+  if (!font?.file || !assetRoot || !mwg.setTheme || typeof FontFace === 'undefined') return;
+  const face = new FontFace(font.family || 'GameFont', `url(${assetRoot}/fonts/${encodeURIComponent(font.file)})`);
+  await face.load();
+  document.fonts.add(face);
+  const scale = pixelHeight && project.display?.height ? pixelHeight / Number(project.display.height) : 1;   // the canvas is sized to the page, the design to display.height
+  const size = Number(font.size || 28) * scale;
+  // setTheme rebuilds from the library defaults, not from the current theme, so merge with what is set; lineHeight is a multiplier of the size.
+  const current = mwg.theme?.() || {};
+  mwg.setTheme({ ...current, font: { ...(current.font || {}), family: `${font.family || 'GameFont'}, ${font.fallback || 'sans-serif'}`, size, lineHeight: (Number(font.size || 28) + 8) / Number(font.size || 28) } });
+}
+
+// MV's Window.png: a 96x96 background at (0,0) and the 96x96 frame at (96,0) with 24px corners. Composed into one
+// nine-patch texture and installed as mw_games' window theme, so every dialogue, choice and menu window takes the
+// engine's frame instead of the library default. White text on the frame, as in the engine's default window.
+async function applyWindowSkin(mwg, url) {
+  if (!mwg.setTheme || !mwg.Texture2D || typeof document === 'undefined') return;
+  const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+  if (bitmap.width < 192 || bitmap.height < 96) return;   // not a stock Window.png layout
+  try { readWindowPalette(bitmap); } catch (error) { console.warn('MWGP window colours not read; using the stock palette', error); }
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 96;
+  const context = canvas.getContext('2d');
+  context.drawImage(bitmap, 0, 0, 96, 96, 0, 0, 96, 96);
+  // The engine draws only the frame's four corners and edges (24px); its middle holds the arrow and pause sprites.
+  const frame = document.createElement('canvas');
+  frame.width = frame.height = 96;
+  const frameContext = frame.getContext('2d');
+  frameContext.drawImage(bitmap, 96, 0, 96, 96, 0, 0, 96, 96);
+  frameContext.clearRect(24, 24, 48, 48);
+  context.drawImage(frame, 0, 0);
+  const current = mwg.theme?.() || {};
+  mwg.setTheme({ ...current, panel: mwg.Texture2D.from(canvas), panelBorder: 24, padding: 0, color: { ...(current.color || {}), text: 0xffffff, textHighlight: 0xffffff } });
+}
 
 export function normalizeDialogueMarkup(value) {
   return String(value ?? '')
@@ -25,24 +137,6 @@ function createDialogueBox(mwg, options) {
     : { ...page, text: normalizeDialogueMarkup(page.text) });
   const choices = (options.choices || []).map(choice => ({ ...choice, text: plainDialogueText(choice.text) }));
   const box = new mwg.MessageBox({ ...options, pages, choices });
-  // MPP_ChoiceEX stores this rectangle on the message, then applies it when
-  // the choice list is created. MWG creates that list lazily, so mirror the
-  // same timing while keeping -1 as "use the normal layout".
-  if (options.choiceRect) {
-    const showChoices = box.showChoices.bind(box);
-    box.showChoices = () => {
-      showChoices();
-      const rect = options.choiceRect;
-      if (!box.choiceList || !rect) return;
-      const width = Number(rect.width);
-      const height = Number(rect.height);
-      if (width > 0 || height > 0) {
-        box.choiceList.resize(width > 0 ? width : box.choiceList.viewWidth, height > 0 ? height : box.choiceList.viewHeight);
-      }
-      if (Number(rect.x) >= 0) box.choiceList.x = Number(rect.x);
-      if (Number(rect.y) >= 0) box.choiceList.y = Number(rect.y);
-    };
-  }
   if (!mwg.RichLabel || !box.body || !box.content) return box;
   const oldBody = box.body;
   const body = new mwg.RichLabel({
@@ -144,9 +238,11 @@ export async function startMwgPlayer(canvas, project) {
   const requestedY = params.has('y') ? Number(params.get('y')) : NaN;
   if (Number.isFinite(requestedX)) position.x = requestedX;
   if (Number.isFinite(requestedY)) position.y = requestedY;
-  const tilesetFlags = project.tilesets?.[map.tilesetId]?.flags || [];
+  // Change Tileset (282) reloads the map with `&tileset=<id>` (the tileset is fixed when the scene is built).
+  const tilesetId = params.has('tileset') && Number.isFinite(Number(params.get('tileset'))) && project.tilesets?.[Number(params.get('tileset'))] ? Number(params.get('tileset')) : map.tilesetId;
+  const tilesetFlags = project.tilesets?.[tilesetId]?.flags || [];
   const assetRoot = project.assets?.kind === 'decoded' ? project.assets.root : null;
-  const tileset = project.tilesets?.[map.tilesetId];
+  const tileset = project.tilesets?.[tilesetId];
   const names = tileset?.tilesetNames || [];
   const realSheets = [0, 1, 2, 3, 4, 5, 6, 7, 8].filter(index => names[index]).map(index => ({ slot: index, url: `${assetRoot}/img/tilesets/${encodeURIComponent(names[index])}.png` }));
   const sheetEntries = assetRoot && realSheets.length ? realSheets : [{ slot: 5, url: placeholderSheet() }];
@@ -204,16 +300,22 @@ export async function startMwgPlayer(canvas, project) {
   const foregroundUrlFor = settings => project.assets?.parallaxes && assetRoot && settings?.name ? `${assetRoot}/img/parallaxes/${encodeURIComponent(settings.name)}.png` : null;
   const initialForegroundUrl = foregroundUrlFor(mapSettings.foreground);
   const initialForegroundBUrl = foregroundUrlFor(mapSettings.foregroundB);
+  // MV/MZ map parallax (properties: image, loop, scroll speed); '!' in front of the name means it scrolls with the map.
+  const parallaxUrlFor = name => project.assets?.parallaxes && assetRoot && name ? `${assetRoot}/img/parallaxes/${encodeURIComponent(name)}.png` : null;
+  const windowSkinUrl = project.assets?.windowSkin && assetRoot ? `${assetRoot}/img/system/Window.png` : null;
+  const initialParallaxUrl = !isXp && map.parallaxShow !== false ? parallaxUrlFor(map.parallaxName) : null;
   const balloonUrl = project.assets?.system ? `${project.assets.root}/img/system/Balloon.png` : null;
   const animationSheetNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectAnimationSheetNames(page.commands, project.database?.animations))))];
   const animationUrls = project.assets?.animations ? animationSheetNames.map(name => `${project.assets.root}/img/animations/${encodeURIComponent(name)}.png`) : [];
   const meNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectMeNames(page.commands))))];
-  const optionalUrls = [...new Set([...(playerUrl ? [playerUrl] : []), ...eventUrls, ...portraitUrls, ...pictureUrls, ...(balloonUrl ? [balloonUrl] : []), ...animationUrls, ...(initialPanoramaUrl ? [initialPanoramaUrl] : []), ...(initialFogUrl ? [initialFogUrl] : []), ...(initialForegroundUrl ? [initialForegroundUrl] : []), ...(initialForegroundBUrl ? [initialForegroundBUrl] : [])])];
+  const optionalUrls = [...new Set([...(playerUrl ? [playerUrl] : []), ...eventUrls, ...portraitUrls, ...pictureUrls, ...(balloonUrl ? [balloonUrl] : []), ...animationUrls, ...(initialPanoramaUrl ? [initialPanoramaUrl] : []), ...(initialFogUrl ? [initialFogUrl] : []), ...(initialForegroundUrl ? [initialForegroundUrl] : []), ...(initialForegroundBUrl ? [initialForegroundBUrl] : []), ...(initialParallaxUrl ? [initialParallaxUrl] : []), ...(windowSkinUrl ? [windowSkinUrl] : [])])];
   // A project can reference an optional/plugin-generated image that is absent
   // from the distributed archive. Load each asset independently so one stale
   // reference does not discard the complete Pixi renderer.
   const loadResults = await Promise.allSettled(optionalUrls.map(loadResource));
   const loadedUrls = new Set(optionalUrls.filter((_, index) => loadResults[index].status === 'fulfilled'));
+  await applyGameFont(mwg, project, assetRoot, canvas?.clientHeight || 0).catch(error => console.warn('MWGP game font not applied', error));
+  if (windowSkinUrl && loadedUrls.has(windowSkinUrl)) await applyWindowSkin(mwg, windowSkinUrl).catch(error => console.warn('MWGP window skin not applied', error));
   // Character sheets are sliced by the converter-measured frame geometry
   // (manifest characterFrames), never by assuming 48px cells: the engine's
   // own rule divides the bitmap by a $-prefix 3x4 grid or a standard 12x8 one.
@@ -277,6 +379,10 @@ export async function startMwgPlayer(canvas, project) {
       this.tileMap = new mwg.TileMap({ width: map.width, height: map.height, sheet: sheets, tileWidth: tileSize, tileHeight: tileSize });
       this.panorama = initialPanoramaUrl && loadedUrls.has(initialPanoramaUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialPanoramaUrl), width: game.width, height: game.height }) : null;
       if (this.panorama) this.stage.addChild(this.panorama);
+      // MV/MZ parallax: the far background behind the tilemap; Change Parallax (284) replaces it.
+      this.parallax = null;
+      this.parallaxState = { name: '', loopX: false, loopY: false, sx: 0, sy: 0, driftX: 0, driftY: 0 };
+      if (initialParallaxUrl && loadedUrls.has(initialParallaxUrl) && mwg.TiledSprite) this.installParallax({ name: map.parallaxName, loopX: map.parallaxLoopX === true, loopY: map.parallaxLoopY === true, sx: map.parallaxSx, sy: map.parallaxSy }, initialParallaxUrl);
       // MWG's Camera applies the world transform on whole screen pixels. This
       // avoids fractional camera translations (and the resulting seams or
       // shimmer) when a tile map is displayed at a browser/device scale.
@@ -385,7 +491,7 @@ export async function startMwgPlayer(canvas, project) {
       // grid), feet-anchored like the engine: Sprite_Character centers x on
       // the tile and puts the sprite bottom at the tile bottom minus shiftY
       // (6px, or 0 for `!` object characters).
-      this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } if ((event.key === 'Escape' || event.key === 'x' || event.key === 'X') && !this.dialogue && !this.eventRunning && !this.menuOpen && !this.mover?.isMoving && !event.ctrlKey && !event.altKey && !event.metaKey) { event.preventDefault(); this.openMenu(); } if (event.key === 'm' && !event.ctrlKey && !event.altKey && !event.metaKey && !this.dialogue && this.audio) { this.flashTitle(this.audio.toggleMute() ? '🔇 Muted (M)' : '🔊 Sound on (M)'); } };
+      this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } if ((event.key === 'Escape' || event.key === 'x' || event.key === 'X') && !this.dialogue && !this.eventRunning && !this.menuOpen && this.rpgExtra?.system?.menuAccess !== false && !this.mover?.isMoving && !event.ctrlKey && !event.altKey && !event.metaKey) { event.preventDefault(); this.openMenu(); } if (event.key === 'm' && !event.ctrlKey && !event.altKey && !event.metaKey && !this.dialogue && this.audio) { this.flashTitle(this.audio.toggleMute() ? '🔇 Muted (M)' : '🔊 Sound on (M)'); } };
       window.addEventListener('keydown', this.saveKey);
       this.dialogue = null;
       // MessageBox is updated before the scene. When the final confirm closes
@@ -570,15 +676,20 @@ export async function startMwgPlayer(canvas, project) {
     }
     update(dt) {
       this.windows.update(dt);
+      this.tickTimer(dt);
       this.screenEffects?.update(dt);
       // AnimatedSprite deliberately does not advance itself: MWG expects the
       // owning scene (or a SpriteGroup) to provide the frame delta. Without
       // this call the player keeps the texture selected at construction time,
       // even though GridMover changes the walk/idle animation name correctly.
-      this.player?.update(dt);
+      // The fallback (no character sheet) is a static TintedSprite with nothing to animate.
+      this.player?.update?.(dt);
       this.updatePictures(dt);
       this.updateForeground(dt);
+      this.updateParallax(dt);
       this.updateOverlayAnims(dt);
+      this.updateBattleFx(dt);
+      this.updateBattlePoses(dt);
       this.updateCameraPan(dt);
       if (nativeAutotilesReady) {
         this.autotileElapsed += dt;
@@ -812,10 +923,9 @@ export async function startMwgPlayer(canvas, project) {
         if (typeof inlined === 'string') resolvedText = inlined;
         else (this.disabledTextFilters ||= new Set()).add(filter);
       }
-      if (resolvedText.includes('\\')) resolvedText = this.convertGameText(resolvedText);
       if (!resolvedText.includes('\\')) return resolvedText;
       const escaped = resolvedText.replace(/\\\\/g, '\0');
-      const actorName = id => project.database?.actors?.[Number(id)]?.name || '';
+      const actorName = id => this.rpgExtra.actors?.[String(id)]?.name ?? project.database?.actors?.[Number(id)]?.name ?? '';
       const resolved = escaped
         .replace(/\\V\[(\d+)\]/gi, (_, id) => String(this.gameState?.variable?.(String(Number(id))) ?? 0))
         .replace(/\\N\[(\d+)\]/gi, (_, id) => actorName(id))
@@ -834,33 +944,6 @@ export async function startMwgPlayer(canvas, project) {
         .replace(/\\./g, '');
       return resolved.replace(/\0/g, '\\');
     }
-    // A game whose plugins override the message-code layer (Karryn's
-    // `TextManager.convertExtraEscapeCharacters`, resolving dynamic \REM_xxx[n]
-    // codes from live party state) runs first, exactly like the engine: stock
-    // conversion, then the game's extra pass. The engine form uses ESC (\x1b)
-    // for escapes, mapped back to `\` for the generic MV pass above; a literal
-    // backslash comes back doubled, like the source. Games without that layer
-    // keep the generic pass: the probe is quiet (typeof cannot throw) and the
-    // hook disables itself after one loud warning on failure, never silently.
-    convertGameText(text) {
-      if (this.gameTextConverter === false || !this.rgss) return text;
-      const state = { game: this.gameState };
-      if (this.gameTextConverter === undefined) {
-        const probe = this.rgss.evaluateValue({ source: 'typeof TextManager.convertExtraEscapeCharacters', mv: true, js: "return (typeof TextManager !== 'undefined' && TextManager.convertExtraEscapeCharacters && TextManager.convertEscapeCharacters) ? 1 : 0;" }, state, this.currentEvent);
-        this.gameTextConverter = probe === 1;
-        if (!this.gameTextConverter) return text;
-      }
-      try {
-        const literal = JSON.stringify(text);
-        const out = this.rgss.evaluateValue({ source: `TextManager.convertExtraEscapeCharacters(TextManager.convertEscapeCharacters(${literal}))`, mv: true, js: `return TextManager.convertExtraEscapeCharacters(TextManager.convertEscapeCharacters(${literal}));` }, state, this.currentEvent);
-        if (typeof out !== 'string') throw new Error(`game text converter returned ${typeof out}`);
-        return out.replace(/\x1b\x1b/g, '\\\\').replace(/\x1b/g, '\\');
-      } catch (error) {
-        console.warn(`MWGP game text codes unavailable (${String(error?.message || error).slice(0, 120)}); using built-in escapes`);
-        this.gameTextConverter = false;
-        return text;
-      }
-    }
     messageAnchor() {
       return ['top', 'center', 'bottom'][Number(this.messageOptions?.position)] || 'bottom';
     }
@@ -871,15 +954,12 @@ export async function startMwgPlayer(canvas, project) {
       };
     }
     messageBoxHeight(kind = 'normal') {
-      const rows = Math.max(1, Math.min(15, Number(this.rpgExtra?.plugin?.messageRows) || 3));
-      const rowHeight = 42;
+      // MV's message window shows four lines (4 x 36 + 2 x 18 padding); the skinned frame needs that room.
+      const skinned = Boolean(windowSkinUrl && loadedUrls.has(windowSkinUrl));
+      const rows = skinned ? 4 : 3;
+      const rowHeight = skinned ? 45 : 42;
       const base = kind === 'portrait' ? 150 : kind === 'scroll' ? 180 : 0;
       return Math.min(Math.max(84, base, rows * rowHeight), Math.max(96, game.height - 24));
-    }
-    choiceRect() {
-      const rect = this.rpgExtra?.plugin?.choiceRect;
-      if (!rect) return undefined;
-      return { x: Number(rect.x), y: Number(rect.y), width: Number(rect.width), height: Number(rect.height) };
     }
     async setMapSettings(settings) {
       if (!settings?.kind || !isXp || !assetRoot || !mwg.TiledSprite) return;
@@ -916,7 +996,7 @@ export async function startMwgPlayer(canvas, project) {
     presentDialogue(request) {
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(), pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), choiceRect: this.choiceRect(), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
+        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(), pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -945,7 +1025,7 @@ export async function startMwgPlayer(canvas, project) {
       const sheet = command.portrait ? portraitSheets.get(command.portrait.name) : null;
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(sheet ? 'portrait' : 'normal'), pages: [{ text: this.resolveEscapeCodes(command.ask || ''), portrait: sheet ? sheet.get(command.portrait.index) : undefined }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), choiceRect: this.choiceRect(), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
+        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(sheet ? 'portrait' : 'normal'), pages: [{ text: this.resolveEscapeCodes(command.ask || ''), portrait: sheet ? sheet.get(command.portrait.index) : undefined }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
         this.windows.push(box);
       }).then(chosen => this.runBranch((command.branches || [])[Number(chosen)]));
     }
@@ -1093,8 +1173,10 @@ export async function startMwgPlayer(canvas, project) {
       const data = mapEntry?.data || {};
       const scaleX = game.width / Number(project.display?.width || 816), scaleY = game.height / Number(project.display?.height || 624);
       const stage = new mwg.Container2D();
+      // Change Battle Back (283) overrides the map's own battlebacks until the next such command.
+      const backName = key => this.rpgExtra.system?.battleback?.[key === 'battleback1Name' ? 'first' : 'second'] || data[key];
       const wanted = [
-        ...['battleback1Name', 'battleback2Name'].map(key => data[key] && { url: `${root}/img/battlebacks${key === 'battleback1Name' ? 1 : 2}/${encodeURIComponent(data[key])}.png`, back: true }),
+        ...['battleback1Name', 'battleback2Name'].map(key => backName(key) && { url: `${root}/img/battlebacks${key === 'battleback1Name' ? 1 : 2}/${encodeURIComponent(backName(key))}.png`, back: true }),
         ...enemies.map(enemy => enemy.source?.battlerName && { url: `${root}/img/enemies/${encodeURIComponent(enemy.source.battlerName)}.png`, enemy })
       ].filter(Boolean);
       const loaded = await Promise.all(wanted.map(entry => loadResource(entry.url).then(() => true, () => false)));
@@ -1115,12 +1197,15 @@ export async function startMwgPlayer(canvas, project) {
           sprite.anchor?.set(0.5, 1);
           sprite.scale.set(scaleX, scaleY);
           sprite.x = Number(entry.enemy.member?.x || 0) * scaleX; sprite.y = Number(entry.enemy.member?.y || 0) * scaleY;
+          sprite.fxBase = { x: sprite.x, y: sprite.y };
           this.battleSprites.push({ sprite, enemy: entry.enemy });
         }
         stage.addChild(sprite);
       });
       // The party: each actor's side-view battler (idle pose of the `wait` row of the 9x6 sv_actors sheet), on the right
       // in MV's default formation. Actors without art are simply not drawn.
+      // The party stands in the chosen formation (formation.js); MV's own staggered layout is the 'default'.
+      const spots = stagePositions(this.rpgExtra.formation || 'default', actors.length);
       for (const [index, actor] of actors.entries()) {
         const name = actor.source?.battlerName;
         if (!name) continue;
@@ -1134,10 +1219,15 @@ export async function startMwgPlayer(canvas, project) {
         const sprite = new mwg.TintedSprite({ texture: frame });
         sprite.anchor?.set(0.5, 1);
         sprite.scale.set(scaleX, scaleY);
-        sprite.x = (600 + index * 32) * scaleX; sprite.y = (280 + index * 48) * scaleY;
+        sprite.x = spots[index].x * scaleX; sprite.y = spots[index].y * scaleY;
+        sprite.fxBase = { x: sprite.x, y: sprite.y };
         stage.addChild(sprite);
-        (this.battleActorSprites ||= []).push({ sprite, actor });
+        (this.battleActorSprites ||= []).push({ sprite, actor, sheet: mwg.SpriteSheet.grid(url, cellW, cellH), motion: { name: 'wait', elapsed: 0, oneShot: false } });
       }
+      this.battleShadeTexture = mwg.Resources.texture(baseUrl);
+      this.buildBattleStatus(stage, actors);
+      this.battleFx = { stack: new mwg.FloatingTextStack(), motions: [] };
+      stage.addChild(this.battleFx.stack);
       this.battleStage = stage;
       this.stage.addChild(stage);
       this.refreshBattleStage();
@@ -1147,36 +1237,54 @@ export async function startMwgPlayer(canvas, project) {
         sprite.visible = enemy.appeared !== false;
         sprite.alpha = enemy.hp > 0 ? 1 : 0.15;
       }
-      for (const { sprite, actor } of this.battleActorSprites || []) sprite.alpha = actor.hp > 0 ? 1 : 0.35;
+      for (const { sprite, actor, sheet } of this.battleActorSprites || []) sprite.alpha = actor.hp > 0 || sheet ? 1 : 0.35;   // a posed actor lies down instead of fading
+      this.refreshBattleStatus();
     }
     destroyBattleStage() {
       this.battleStage?.destroy({ children: true });
+      this.battleFx = null;
+      this.battleStatus = null;
       this.battleStage = null; this.battleSprites = null; this.battleActorSprites = null;
     }
     async startTroopBattle(spec, database) {
       const troopId = spec.troopVariable ? Number(this.gameState.variable(String(spec.troopVariable)) || 0) : Number(spec.troopId || 0);
       if (!database.troops?.[troopId]) { this.unsupportedCommand('battle', spec); return 'lose'; }
       if (!this.rpgExtra.party?.length) { const fallbackActor = findPlayerActor(project); if (fallbackActor) this.rpgExtra.party = [fallbackActor]; }
-      const party = [...(this.rpgExtra.party || [])];
+      const party = [...(this.rpgExtra.party || [])].slice(0, this.maxBattleMembers());   // Game_Party.battleMembers
       const records = Object.fromEntries(party.map(id => [id, this.actorRecord(id)]));
       this.battleTurn = 0;
       this.battleTriggeredPages = new Set();
+      // BattleManager.playBattleBgm: the battle BGM (System.json, or Change Battle BGM) replaces the map music, which
+      // resumes afterwards. Victory and defeat jingles follow Change Victory/Defeat ME.
+      const audioSystem = project.audio?.system || {};
+      const battleBgm = this.rpgExtra.system?.battleBgm !== undefined ? this.rpgExtra.system.battleBgm : audioSystem.battleBgm;
+      if (this.audio) { this.saveBgm(true); if (battleBgm) this.playBgm(battleBgm); }
       const stores = { 1: 'items', 2: 'weapons', 3: 'armors' };
       let result;
       try {
         result = await runBattle({
-          database, troopId, party, records, items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true,
+          database, troopId, party, records, formation: this.rpgExtra.formation || 'default', items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true,
           present: request => { this.refreshBattleStage(); return this.presentDialogue(request); },
           variable: key => (String(key).startsWith('switch:') ? this.gameState.switch(String(key).slice(7)) : this.gameState.variable(String(key))),
           hooks: {
             onSetup: ({ actors, enemies }) => { this.battleEnemies = enemies; this.battleHero = actors[0]; return this.buildBattleStage(enemies, actors).catch(error => console.warn('MWGP battle stage unavailable', error)); },
+            onControls: controls => { this.battleControls = controls; },
+            onUse: use => this.battleUse(use),
+            onVictory: () => { for (const entry of this.battleActorSprites || []) if (entry.actor.alive) { entry.hold = 'victory'; this.svMotion(entry.actor, 'victory'); entry.motion.oneShot = false; } },
+            onEffect: effect => { this.battleEffect(effect); this.refreshBattleStage(); },
             onStart: () => this.runBattleTroopEvents(troopId, 'start'),
             onTurn: () => { this.battleTurn++; return this.runBattleTroopEvents(troopId, 'turn'); },
             gainGold: amount => { this.rpgExtra.gold = Math.max(0, (this.rpgExtra.gold || 0) + amount); },
             gainItem: (kind, id, count) => { const store = this.rpgExtra[stores[kind]] ||= {}; store[String(id)] = (store[String(id)] || 0) + count; }
           }
         });
-      } finally { this.battleEnemies = null; this.battleHero = null; this.destroyBattleStage(); }
+      } finally { this.battleEnemies = null; this.battleHero = null; this.battleControls = null; this.destroyBattleStage(); }
+      if (this.audio) {
+        const me = result.outcome === 'win' ? (this.rpgExtra.system?.victoryMe !== undefined ? this.rpgExtra.system.victoryMe : audioSystem.victoryMe)
+          : result.outcome === 'lose' ? (this.rpgExtra.system?.defeatMe !== undefined ? this.rpgExtra.system.defeatMe : audioSystem.defeatMe) : null;
+        if (me) this.playMe(me);
+        this.resumeBgm(true);
+      }
       // MV: losing without "can lose" ends the game; with it, the event's defeat branch runs.
       if (result.outcome === 'lose' && spec.canLose !== true) await this.gameOver();
       return result.outcome;
@@ -1381,7 +1489,7 @@ export async function startMwgPlayer(canvas, project) {
       if (!sheet) return Promise.resolve();
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight('portrait'), pages: [{ text: this.resolveEscapeCodes(command.say || command.ask || ''), portrait: sheet.get(command.portrait.index), }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), choiceRect: this.choiceRect(), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
+        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight('portrait'), pages: [{ text: this.resolveEscapeCodes(command.say || command.ask || ''), portrait: sheet.get(command.portrait.index), }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -1460,6 +1568,7 @@ export async function startMwgPlayer(canvas, project) {
       });
     }
     updatePictures(dt) {
+      for (const sprite of this.pictureSprites.values()) if (sprite.pictureRotateSpeed) sprite.rotation += sprite.pictureRotateSpeed * dt;
       for (const [id, tween] of this.pictureTweens) {
         tween.elapsed += dt;
         const t = tween.duration > 0 ? Math.min(1, tween.elapsed / tween.duration) : 1;
@@ -1476,6 +1585,33 @@ export async function startMwgPlayer(canvas, project) {
         }
         if (t >= 1) { this.pictureTweens.delete(id); tween.resolve?.(); }
       }
+    }
+    installParallax(spec, url) {
+      if (this.parallax) { this.stage.removeChild(this.parallax); this.parallax.destroy?.(); this.parallax = null; }
+      this.parallaxState = { name: String(spec.name || ''), loopX: spec.loopX === true, loopY: spec.loopY === true, sx: Number(spec.sx || 0), sy: Number(spec.sy || 0), driftX: 0, driftY: 0 };
+      if (!url) return;
+      this.parallax = new mwg.TiledSprite({ texture: mwg.Resources.texture(url), width: game.width, height: game.height });
+      if (this.stage.addChildAt) this.stage.addChildAt(this.parallax, 0); else this.stage.addChild(this.parallax);
+    }
+    // 284 Change Parallax. The image loads on demand; an empty name removes the layer.
+    async changeParallax(spec) {
+      if (isXp || !mwg.TiledSprite) return;
+      const url = parallaxUrlFor(spec.name);
+      if (spec.name && !url) { console.warn(`MWGP parallax '${spec.name}' needs decoded parallax art (convert with --copy-assets)`); return; }
+      if (url) { try { await loadResource(url); } catch { console.warn(`MWGP parallax image is missing: ${spec.name}`); return; } }
+      this.installParallax(spec, url);
+    }
+    // Game_Map.parallaxOx: the image drifts at half the map's scroll when it loops (all of it when the name starts
+    // with '!'), plus the configured speed; without a loop flag it stays fixed to the screen.
+    updateParallax(dt) {
+      const state = this.parallaxState;
+      if (!this.parallax || !state) return;
+      if (state.loopX) state.driftX += state.sx * 0.625 * dt;
+      if (state.loopY) state.driftY += state.sy * 0.625 * dt;
+      const scrollTX = (this.camera ? -(this.world?.x || 0) : -(this.tileMap?.x || 0)) / tileSize;
+      const scrollTY = (this.camera ? -(this.world?.y || 0) : -(this.tileMap?.y || 0)) / tileSize;
+      const zero = state.name.startsWith('!');
+      this.parallax.tilePosition = { x: foregroundOrigin(state.loopX, zero, scrollTX, state.driftX, tileSize), y: foregroundOrigin(state.loopY, zero, scrollTY, state.driftY, tileSize) };
     }
     // Foreground.js per-frame update; the pick and the origin math live in the
     // pure selectForegroundLayer/foregroundOrigin below so tests can pin them.
@@ -1525,24 +1661,7 @@ export async function startMwgPlayer(canvas, project) {
     }
     // The full menu (Item / Skill / Equip / Status / Save / Options / Game End, src/player/menu.js) when the project
     // has the MV/MZ database; the small Save/Close box below otherwise (XP conversions carry no database).
-    // The game's own pause menu, when its library ships Essentials' standard one (`PokemonPauseMenu`): a script-driven scene,
-    // run like any lifted Ruby screen. The key that opened it is flushed so the scene does not read it as "back".
-    async openGamePauseMenu() {
-      if (this.menuOpen) return undefined;
-      this.menuOpen = true;
-      let worked = false;
-      try {
-        this.rgss.flushInput?.();
-        worked = await this.rgss.run({ source: 'PokemonPauseMenu', js: 'await new PokemonPauseMenu(new PokemonPauseMenu_Scene()).pbStartPokemonMenu()', async: true }, { game: this.gameState }, null);
-      } finally { this.menuOpen = false; }
-      // The game's menu needs Essentials' full save state (`$player.money`, the bag, ...) that this runtime does not
-      // build yet: when it fails, the player's own simple menu still opens.
-      if (!worked) return this.openSimpleMenu();
-      return undefined;
-    }
     async openMenu() {
-      // Experimental (`?gamemenu=1`): it needs Essentials' save state, which is not built yet, so it fails loudly by default.
-      if (new URLSearchParams(globalThis.location?.search || '').get('gamemenu') === '1' && project.rubyLibrary?.units?.PokemonPauseMenu && project.rubyLibrary?.units?.PokemonPauseMenu_Scene && this.rgss?.run) return this.openGamePauseMenu();
       const database = project.database || {};
       if (!(database.actors && database.classes && database.items && database.skills)) return this.openSimpleMenu();
       if (this.menuOpen) return undefined;
@@ -1557,12 +1676,15 @@ export async function startMwgPlayer(canvas, project) {
           database, records, party, items: this.rpgExtra.items, weapons: this.rpgExtra.weapons ||= {}, armors: this.rpgExtra.armors ||= {}, gold: menuState.gold, present,
           variable: key => this.gameState.variable(String(key)),
           hooks: {
-            save: async () => { const slot = await this.pickSlot(present, { forSave: true }); if (slot) this.saveGame(slot); return Boolean(slot); },
+            maxBattleMembers: this.maxBattleMembers(),
+            formation: this.rpgExtra.system?.formationAccess === false ? null : { get: () => this.rpgExtra.formation || 'default', set: name => { this.rpgExtra.formation = name; } },
+            save: this.rpgExtra.system?.saveAccess === false ? null : async () => { const slot = await this.pickSlot(present, { forSave: true }); if (slot) this.saveGame(slot); return Boolean(slot); },
             load: this.savedSlots().size ? async () => { const slot = await this.pickSlot(present, { forSave: false }); if (slot) this.loadGame(slot); } : null,
             options: () => this.optionsMenu(present),
             toTitle: () => { try { this.saves.delete('runtime-transition'); } catch { /* headless */ } const url = new URL(globalThis.location.href); url.search = ''; url.searchParams.set('id', new URLSearchParams(globalThis.location.search).get('id') || ''); globalThis.location.href = url.toString(); }
           }
         });
+        this.rpgExtra.party = party;   // the Formation screen reorders it in place
       } finally { this.menuOpen = false; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; }
       return 'close';
     }
@@ -1601,14 +1723,6 @@ export async function startMwgPlayer(canvas, project) {
       });
     }
     scrollMap(command) {
-      if (this.rpgExtra?.plugin?.mapScrollDisabled) {
-        // MapScrollDisable is a presentation plugin command: keep the event
-        // flow synchronous while suppressing the camera movement itself.
-        this.cameraPan = { x: 0, y: 0 };
-        this.panTween = null;
-        this.updateCamera();
-        return Promise.resolve();
-      }
       const distance = Math.max(0, Number(command.distance || 0));
       // Screen offset is the negative of the viewed tile delta: revealing
       // tiles below means the tile layer moves up.
@@ -1753,6 +1867,268 @@ export async function startMwgPlayer(canvas, project) {
       }
       if (command.changeProfile) this.actorRecord(command.changeProfile.actor).profile = command.changeProfile.profile;
     }
+    // ---- system settings (commands 132-140, 216, 281, 323 and the access flags 134-137) ------------------
+    // Game_System keeps these; saves round-trip them through rpgExtra.system. Only menuAccess, saveAccess and
+    // the battle/victory/defeat audio have a consumer here; see the compatibility notes in convert-mv.js.
+    setSystemFlag({ key, value }) { (this.rpgExtra.system ||= {})[key] = value; }
+    // 312 MP, 315 EXP, 317 parameter, 326 TP. TP has no battle model, so it is only recorded on the actor.
+    applyActorStat(state, spec) {
+      for (const id of this.actorTargets(state, spec)) {
+        const record = this.actorRecord(id);
+        const amount = this.resolveAmount(state, spec.amount) * (Number(spec.sign) < 0 ? -1 : 1);
+        if (spec.stat === 'mp') record.mp = Math.max(0, Math.min(record.maxMp, Number(record.mp ?? record.maxMp) + amount));
+        else if (spec.stat === 'tp') record.tp = Math.max(0, Math.min(100, Number(record.tp || 0) + amount));
+        else if (spec.stat === 'param') { const bonus = (record.paramPlus ||= {}); bonus[spec.param] = Number(bonus[spec.param] || 0) + amount; }
+        else if (spec.stat === 'exp') {
+          // Game_Actor.changeExp(currentExp + value): the level follows the experience table.
+          const klass = project.database?.classes?.[Number(record.classId || 0)];
+          const before = Number(record.level || 1);
+          record.exp = Math.max(0, Number(record.exp ?? expForLevel(klass, before)) + amount);
+          const max = Number(project.database?.actors?.[Number(id)]?.maxLevel || 99);
+          while (record.level < max && record.exp >= expForLevel(klass, record.level + 1)) record.level++;
+          while (record.level > 1 && record.exp < expForLevel(klass, record.level)) record.level--;
+          if (record.level !== before) this.refreshActorStats(id, record);
+        }
+      }
+    }
+    changeActorText({ actor, field, text }) { this.actorRecord(actor)[field] = text; }
+    changeActorImages(spec) { Object.assign(this.actorRecord(spec.actor), { characterName: spec.characterName, characterIndex: spec.characterIndex, faceName: spec.faceName, faceIndex: spec.faceIndex, battlerName: spec.battlerName }); }
+    // 124 Control Timer: counts down in seconds while the map runs; condition 111/timer reads it. There is no
+    // on-screen counter (the engine draws one); the value is what events can observe.
+    setTimer(spec) {
+      if (spec.stop) { if (this.rpgExtra.timer) this.rpgExtra.timer.working = false; return; }
+      this.rpgExtra.timer = { seconds: Math.max(0, Number(spec.start || 0)), working: true };
+    }
+    tickTimer(dt) {
+      const timer = this.rpgExtra.timer;
+      if (!timer?.working) return;
+      timer.seconds = Math.max(0, timer.seconds - dt);
+      if (timer.seconds <= 0) timer.working = false;   // the engine's onExpire aborts a battle; on the map nothing else happens
+    }
+    // 206 Get on/off Vehicle, the same action as pressing the vehicle key facing one.
+    boardVehicle() { this.tryVehicleAction(); }
+    // 261 Play Movie: a full-screen <video> over the canvas, awaited to its end. A missing file or a blocked
+    // playback resolves at once with a warning, so an event never hangs on it. A click skips it.
+    playMovie({ name }) {
+      const url = project.assets ? `${project.assets.root}/movies/${encodeURIComponent(name)}.webm` : null;
+      if (!url || typeof document === 'undefined') { console.warn(`MWGP movie '${name}' cannot be played here`); return Promise.resolve(); }
+      return new Promise(resolve => {
+        const video = document.createElement('video');
+        Object.assign(video.style, { position: 'fixed', inset: '0', width: '100%', height: '100%', background: '#000', zIndex: 9999, objectFit: 'contain' });
+        video.src = url; video.autoplay = true; video.playsInline = true;
+        let finished = false;
+        const done = () => { if (finished) return; finished = true; video.remove(); resolve(); };
+        video.addEventListener('ended', done);
+        video.addEventListener('click', done);
+        video.addEventListener('error', () => { console.warn(`MWGP movie '${name}' failed to load`); done(); });
+        document.body.appendChild(video);
+        video.play?.().catch(() => { console.warn(`MWGP movie '${name}' was blocked from playing`); done(); });
+      });
+    }
+    // 339 Force Action (only inside a troop event; elsewhere the engine has no battler to act).
+    async forceAction(spec) {
+      if (!this.battleControls?.forceAction) { this.unsupportedCommand('forceAction', spec); return; }
+      await this.battleControls.forceAction(spec);
+      this.refreshBattleStage();
+    }
+    // ---- battle status panel: name, HP / MP / TP gauges (the engine's gauge colours) -------------------------------
+    // Top right of the stage, clear of the message box at the bottom. One row per battle member.
+    buildBattleStatus(stage, actors) {
+      const palette = gaugePalette();
+      const scale = game.height / Number(project.display?.height || 624);
+      const rowHeight = 30 * scale, gaugeHeight = (project.source?.engine === 'rpg-maker-mz' ? 12 : 6) * scale;
+      const showTp = project.database?.system?.optDisplayTp !== false;
+      const width = (showTp ? 560 : 430) * scale;
+      const panel = new mwg.Container2D();
+      const back = new mwg.TintedSprite({ texture: this.battleShadeTexture });
+      back.width = width; back.height = actors.length * rowHeight + 12 * scale; back.alpha = 0.6;
+      panel.addChild(back);
+      const gradient = (from, to) => {
+        const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 1;
+        const context = canvas.getContext('2d');
+        const fill = context.createLinearGradient(0, 0, 64, 0);
+        const css = value => `#${value.toString(16).padStart(6, '0')}`;
+        fill.addColorStop(0, css(from)); fill.addColorStop(1, css(to));
+        context.fillStyle = fill; context.fillRect(0, 0, 64, 1);
+        return mwg.Texture2D.from(canvas);
+      };
+      const rows = actors.map((actor, index) => {
+        const y = 6 * scale + index * rowHeight;
+        const name = new mwg.Label({ text: actor.name, size: 18 * scale, color: palette.text });
+        name.x = 8 * scale; name.y = y; panel.addChild(name);
+        const gauge = (label, x, w, colors) => {
+          const caption = new mwg.Label({ text: label, size: 14 * scale, color: palette.crisis });
+          caption.x = x; caption.y = y; panel.addChild(caption);
+          const bar = new mwg.Bar({ width: w, height: gaugeHeight, value: 1, max: 1, fillTexture: gradient(colors[0], colors[1]), background: palette.gaugeBack });
+          bar.x = x; bar.y = y + 20 * scale; panel.addChild(bar);
+          const value = new mwg.Label({ text: '', size: 14 * scale, color: palette.text, align: 'right' });
+          value.anchor?.set(1, 0); value.x = x + w; value.y = y; panel.addChild(value);   // right-aligned to the gauge's end
+          return { bar, value, w };
+        };
+        return { actor, hp: gauge('HP', 150 * scale, 120 * scale, palette.hp), mp: gauge('MP', 290 * scale, 120 * scale, palette.mp), tp: showTp ? gauge('TP', 430 * scale, 110 * scale, palette.tp) : null, name };
+      });
+      panel.x = game.width - width - 8 * scale; panel.y = 8 * scale;
+      stage.addChild(panel);
+      this.battleStatus = { panel, rows };
+      this.refreshBattleStatus();
+    }
+    refreshBattleStatus() {
+      const palette = gaugePalette();
+      for (const row of this.battleStatus?.rows || []) {
+        const { actor } = row;
+        const set = (part, value, max) => {
+          if (!part) return;
+          part.bar.setValue(max > 0 ? Math.max(0, Math.min(1, value / max)) : 0, 1);
+          part.value.setText(max > 0 ? `${Math.max(0, Math.round(value))}/${Math.round(max)}` : `${Math.round(value)}`);
+        };
+        set(row.hp, actor.hp, actor.mhp); set(row.mp, actor.mp, actor.mmp);
+        if (row.tp) { row.tp.bar.setValue(Math.max(0, Math.min(1, actor.tp / 100)), 1); row.tp.value.setText(String(Math.round(actor.tp))); }
+        // Window_Base.hpColor: knockout when dead, crisis under a quarter, else normal.
+        row.name.setColor(actor.dead ? palette.knockout : actor.isDying ? palette.crisis : palette.text);
+      }
+    }
+    // ---- actor poses (Sprite_Actor motions) -----------------------------------------------------------------------
+    svEntry(actor) { return this.battleActorSprites?.find(entry => entry.actor === actor && entry.sheet) || null; }
+    svMotion(actor, name) {
+      const entry = this.svEntry(actor);
+      if (entry) entry.motion = { name, elapsed: 0, oneShot: !SV_MOTIONS[name]?.loop };
+    }
+    updateBattlePoses(dt) {
+      const database = project.database;
+      for (const entry of this.battleActorSprites || []) {
+        if (!entry.sheet) continue;
+        entry.motion ||= { name: 'wait', elapsed: 0, oneShot: false };
+        const current = entry.motion;
+        if (!current.oneShot && !entry.hold) {
+          // An idle pose follows the battler: dead, asleep, guarding, dying...
+          const idle = svIdleMotion(entry.actor, database);
+          if (current.name !== idle) { current.name = idle; current.elapsed = 0; }
+        }
+        current.elapsed += dt;
+        const { pattern, done } = svPattern(current.name, current.elapsed);
+        if (done) { entry.motion = { name: entry.hold || svIdleMotion(entry.actor, database), elapsed: 0, oneShot: false }; continue; }
+        const texture = entry.sheet.get(svCell(current.name, pattern));
+        if (texture && entry.sprite.texture !== texture) entry.sprite.texture = texture;
+      }
+    }
+    // ---- battle effects: damage popups, hit shakes, attack steps, skill animations ---------------------------------
+    // Popups use mw_games' FloatingTextStack (stacked, rising, fading numbers). Motions are small offsets applied to
+    // a sprite's stored home position and always return to it. None of this changes the battle's outcome: the runner
+    // reports what happened through hooks.onUse / hooks.onEffect and this only draws it.
+    battleSpriteFor(battler) {
+      return (battler.isActor ? this.battleActorSprites : this.battleSprites)?.find(entry => (entry.actor || entry.enemy) === battler)?.sprite || null;
+    }
+    battlePointFor(battler) {
+      const sprite = this.battleSpriteFor(battler);
+      if (sprite) return { x: sprite.fxBase?.x ?? sprite.x, y: (sprite.fxBase?.y ?? sprite.y) - (sprite.height || 0) / 2, feetY: sprite.fxBase?.y ?? sprite.y, height: sprite.height || 0, sprite };
+      const index = Number(battler.index || 0);
+      return battler.isActor ? { x: game.width * 0.78, y: game.height * (0.45 + index * 0.06), feetY: game.height * (0.5 + index * 0.06), height: 0 } : { x: game.width * (0.25 + index * 0.1), y: game.height * 0.4, feetY: game.height * 0.45, height: 0 };
+    }
+    battleMotion(sprite, motion) {
+      if (!sprite) return;
+      sprite.fxBase ||= { x: sprite.x, y: sprite.y };
+      this.battleFx.motions = this.battleFx.motions.filter(entry => entry.sprite !== sprite);   // a new motion replaces a running one
+      this.battleFx.motions.push({ sprite, t: 0, ...motion });
+    }
+    battleUse({ subject, item, isItem }) {
+      if (subject.isActor) this.svMotion(subject, svActionMotion(subject, item, isItem, project.database));
+      // The attacker steps toward the enemy (actors move left, enemies right) and back.
+      const sprite = this.battleSpriteFor(subject);
+      if (sprite) this.battleMotion(sprite, { kind: 'step', dx: (subject.isActor ? -1 : 1) * 24 * (sprite.scale?.x || 1), dur: 0.35 });
+    }
+    battleEffect(effect) {
+      if (!this.battleFx) return;
+      const { target, kind } = effect;
+      const point = this.battlePointFor(target);
+      const push = (text, color, size = 22) => this.battleFx.stack.push({ text, color, size, x: point.x, y: point.y, key: target.isActor ? `a${target.index}` : `e${target.index}` });
+      if (target.isActor) { if (kind === 'miss') this.svMotion(target, 'evade'); else if (effect.hp < 0) this.svMotion(target, 'damage'); }
+      if (kind === 'miss') { push('Miss', 0xb0b0b0, 18); return; }
+      if (effect.hp) {
+        const amount = Math.abs(effect.hp);
+        if (effect.hp < 0) { push(String(amount), target.isActor ? 0xff7070 : 0xffffff, effect.critical ? 30 : 22); this.battleMotion(point.sprite, { kind: 'shake', amp: 6 * (point.sprite?.scale?.x || 1), dur: 0.3 }); }
+        else push(String(amount), 0x90ee90);
+      }
+      if (effect.mp) push(String(Math.abs(effect.mp)), effect.mp < 0 ? 0xc090ff : 0x80c8ff, 18);
+      if (effect.animationId > 0) this.playBattleAnimation(effect.animationId, point).catch(error => console.warn('MWGP battle animation failed', error));
+    }
+    // The animation's sheets load on first use (only the current map's event animations are preloaded).
+    async playBattleAnimation(id, point) {
+      const animation = project.database?.animations?.[id];
+      if (!animation || !this.battleStage || !project.assets?.animations) return;
+      for (const name of [animation.animation1Name, animation.animation2Name].filter(Boolean)) {
+        if (animationSheets.has(name)) continue;
+        const url = `${project.assets.root}/img/animations/${encodeURIComponent(name)}.png`;
+        if (await loadResource(url).then(() => true, () => false)) animationSheets.set(name, mwg.SpriteSheet.grid(url, 192));
+      }
+      if (!this.battleStage) return;   // the battle ended while the sheets loaded
+      const y = animation.position === 3 ? game.height / 2 : animation.position === 2 ? point.feetY : animation.position === 0 ? point.feetY - point.height : point.y;
+      await this.playAnimationAt({ animation: id, x: animation.position === 3 ? game.width / 2 : point.x, y, wait: false, parent: this.battleStage });
+    }
+    updateBattleFx(dt) {
+      const fx = this.battleFx;
+      if (!fx) return;
+      fx.stack.update(dt);
+      fx.motions = fx.motions.filter(motion => {
+        motion.t += dt;
+        const base = motion.sprite.fxBase || { x: motion.sprite.x, y: motion.sprite.y };
+        const done = motion.t >= motion.dur;
+        const k = Math.min(1, motion.t / motion.dur);
+        if (done) { motion.sprite.x = base.x; motion.sprite.y = base.y; return false; }
+        if (motion.kind === 'shake') motion.sprite.x = base.x + Math.sin(motion.t * 70) * motion.amp * (1 - k);
+        else motion.sprite.x = base.x + motion.dx * Math.sin(Math.PI * k);
+        return true;
+      });
+    }
+    // 233 Rotate Picture: Game_Picture.rotate(speed) turns the picture speed / 2 degrees every frame (60 per second),
+    // about its origin; a new Show Picture resets it (the sprite is recreated).
+    rotatePicture({ id, speed }) {
+      const sprite = this.pictureSprites.get(id);
+      if (sprite) sprite.pictureRotateSpeed = Number(speed) / 2 * 60 * Math.PI / 180;
+    }
+    // 285 Get Location Info, evaluated with Game_Map's own rules: terrainTag is the first non-zero flags>>12 from
+    // the top layer down, tileId(x, y, z) reads one layer, regionId is layer 5, eventIdXy is the first event there.
+    locationInfo(state, spec) {
+      const read = key => Number(state.game.variable(String(key)) ?? 0);
+      const x = spec.x !== undefined ? spec.x : read(spec.xVar), y = spec.y !== undefined ? spec.y : read(spec.yVar);
+      const inside = x >= 0 && y >= 0 && x < map.width && y < map.height;
+      const size = map.width * map.height;
+      const tile = layer => (inside ? map.data?.[layer * size + y * map.width + x] || 0 : 0);
+      let value = 0;
+      if (spec.info === 0) { for (const layer of [3, 2, 1, 0]) { const tag = Number(tilesetFlags[tile(layer)] ?? 0) >> 12; if (tag > 0) { value = tag; break; } } }
+      else if (spec.info === 1) value = Number((mapEntry.mwgEvents || []).find(event => Number(event.x) === x && Number(event.y) === y && !this.erasedEvents.has(event.id))?.id ?? 0) || 0;
+      else if (spec.info >= 2 && spec.info <= 5) value = tile(spec.info - 2);
+      else value = tile(5);
+      state.game.setVariable(String(spec.variable), value);
+    }
+    // 104 Select Item: picks from the inventory items of one item type (1 regular, 2 key, 3 hidden A, 4 hidden B)
+    // and stores the item id in the variable, 0 when cancelled.
+    async selectItem(state, spec) {
+      const items = project.database?.items || {};
+      const owned = Object.entries(this.rpgExtra.items || {}).filter(([id, count]) => count > 0 && Number(items[id]?.itypeId ?? 1) === Number(spec.itemType));
+      if (!owned.length) { state.game.setVariable(String(spec.variable), 0); return; }
+      const pick = createPicker(request => this.presentDialogue(request), project.database?.system?.terms);
+      const chosen = await pick('', owned.map(([id, count]) => ({ label: `${items[id]?.name || `#${id}`} ×${count}`, id: Number(id) })));
+      state.game.setVariable(String(spec.variable), chosen?.id ?? 0);
+    }
+    // 340 Abort Battle and 334 Enemy Recover All (troop events only).
+    abortBattle() {
+      if (!this.battleControls?.abort) { this.unsupportedCommand('abortBattle', {}); return; }
+      this.battleControls.abort();
+    }
+    enemyRecoverAll(spec) {
+      for (const enemy of this.battleEnemyTargets(spec, 'enemyRecoverAll')) {
+        for (const state of [...(enemy.states || [])]) enemy.removeState?.(state.id);
+        enemy.hp = enemy.mhp; enemy.mp = enemy.mmp;
+      }
+    }
+    // Game_Party.maxBattleMembers: 4 in the engine; a project or plugin setting (`system.maxBattleMembers`) may raise it.
+    maxBattleMembers() { return Math.max(1, Number(this.rpgExtra.system?.maxBattleMembers ?? project.database?.system?.maxBattleMembers ?? 4)); }
+    // 354 Return to Title Screen.
+    returnToTitle() {
+      try { this.saves.delete('runtime-transition'); } catch { /* headless */ }
+      const url = new URL(globalThis.location.href); url.search = ''; url.searchParams.set('id', new URLSearchParams(globalThis.location.search).get('id') || '');
+      globalThis.location.href = url.toString();
+    }
     setTransparent(transparent) {
       // MV draws a transparent player at reduced opacity rather than hiding it.
       // Route opacity steps (code 42) carry an exact alpha instead of the flag.
@@ -1798,25 +2174,8 @@ export async function startMwgPlayer(canvas, project) {
     runScript(script, state) { return this.rgss.run(script, state, this.currentEvent); }
     evalScriptCondition(script, state) { return this.rgss.evaluate(script, state, this.currentEvent); }
     pluginCommand(command, state) {
-      const name = String(command?.name || '').toLowerCase();
-      const args = (command?.args || []).map(value => String(value).trim()).filter(Boolean);
-      if (name === 'te_call_map_event') {
-        const target = args[0] || String(this.currentEvent?.id || '');
-        const pageIndex = Math.max(1, Number(args[1]) || 1);
-        const events = mapEntry?.mwgEvents || [];
-        const rawEvents = (mapEntry?.data?.events || []).filter(Boolean);
-        const event = events.find(candidate => String(candidate.id) === target || String(candidate.name || '') === target)
-          || events.find(candidate => rawEvents.find(raw => String(raw.id) === String(candidate.id) && String(raw.name || '') === target));
-        if (!event) {
-          this.unsupportedCommand('pluginCommand', command?.raw || command);
-          return;
-        }
-        return this.runNestedPage(event.pages?.[pageIndex - 1] || event.pages?.[0], event);
-      }
-      if (applyBuiltinPluginCommand(this.rpgExtra, command)) return;
-      if (applyQuestPluginCommand(this.rpgExtra.quests, command)) return;
-      // Anything else goes to the game's own plugins (MV): their `Game_Interpreter#pluginCommand` chain.
-      if (this.rgss.pluginCommand?.(command?.name, command?.args, state, this.currentEvent)) return;
+      // The game's own plugins: MV's `Game_Interpreter#pluginCommand` chain, or the MZ command the named plugin registered.
+      if (this.rgss.pluginCommand?.(command?.name, command?.args, state, this.currentEvent, { plugin: command?.plugin, params: command?.params })) return;
       this.unsupportedCommand('pluginCommand', command?.raw || command);
     }
     unsupportedCommand(kind, detail) {
@@ -1883,13 +2242,14 @@ export async function startMwgPlayer(canvas, project) {
       const container = new mwg.Container2D();
       container.x = Number(command.x || 0);
       container.y = Number(command.y || 0);
-      this.overlayLayer.addChild(container);
+      const parent = command.parent || this.overlayLayer;
+      parent.addChild(container);
       // MV advances animation frames at ~12fps; timings (per-frame SE/flash)
       // have no player equivalent and are skipped.
       const duration = Math.max(0.1, frames.length / 12);
       return new Promise(resolve => {
         this.overlayAnims.push({
-          kind: 'animation', container, animation, frames, frameCount: frames.length,
+          kind: 'animation', container, parent, animation, frames, frameCount: frames.length,
           fps: 12, elapsed: 0, duration,
           lastFrame: -1, resolve: command.wait ? resolve : null
         });
@@ -1916,9 +2276,11 @@ export async function startMwgPlayer(canvas, project) {
       const scale = tileSize / 48;
       for (const cell of anim.frames[frame] || []) {
         const [pattern, cx, cy, cscale, rotation, mirror, opacity] = cell;
-        const sheet = animationSheets.get(anim.animation.animation1Name) || animationSheets.get(anim.animation.animation2Name);
+        // Patterns 0-99 read animation1's sheet, 100 and up animation2's (pattern - 100).
+        const second = Number(pattern) >= 100;
+        const sheet = animationSheets.get(second ? anim.animation.animation2Name : anim.animation.animation1Name);
         if (!sheet) continue;
-        const sprite = new mwg.TintedSprite({ texture: sheet.get(Math.max(0, pattern || 0)) });
+        const sprite = new mwg.TintedSprite({ texture: sheet.get(Math.max(0, (pattern || 0) - (second ? 100 : 0))) });
         sprite.anchor?.set(0.5);
         sprite.width = 4 * tileSize * (Number(cscale ?? 100) / 100);
         sprite.height = 4 * tileSize * (Number(cscale ?? 100) / 100);
@@ -1938,7 +2300,7 @@ export async function startMwgPlayer(canvas, project) {
         if (frame !== anim.lastFrame) { anim.lastFrame = frame; this.drawOverlayFrame(anim, frame); }
         if (anim.kind === 'balloon') anim.container.y -= (anim.rise * dt) / anim.duration;
         if (anim.elapsed >= anim.duration) {
-          this.overlayLayer.removeChild(anim.container);
+          (anim.parent || this.overlayLayer).removeChild(anim.container);
           anim.container.destroy({ children: true });
           this.overlayAnims.splice(index, 1);
           anim.resolve?.();
@@ -1980,7 +2342,27 @@ export async function startMwgPlayer(canvas, project) {
       this.transferring = true;
       const params = new URLSearchParams(location.search);
       params.set('map', String(mapId)); params.set('x', String(x)); params.set('y', String(y));
+      params.delete('tileset');
+      const changed = this.rpgExtra.mapTilesets?.[String(mapId)];
+      if (changed !== undefined) params.set('tileset', String(changed));
       location.href = `${location.pathname}?${params}`;
+    }
+    // 282 Change Tileset: the map is rebuilt with the new tileset at the player's position, carrying all state through the
+    // same save-and-reload a transfer uses. The event that asked restarts from its first command once after the reload (the
+    // scene cannot be rebuilt in place), so it is best placed first in the event; asking again for the tileset already in
+    // use does nothing, which is what ends that restart.
+    changeTileset({ id }) {
+      const target = Number(id);
+      if (!project.tilesets?.[target]) { this.unsupportedCommand('changeTileset', { id }); return; }
+      if (target === tilesetId) return;
+      this.rpgExtra.mapTilesets = { ...(this.rpgExtra.mapTilesets || {}), [String(mapEntry.id)]: target };
+      try {
+        this.saves.save('runtime-transition', this.runtimeState({ mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, facing: this.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }), { mapId: mapEntry.id, x: this.mover.x, y: this.mover.y });
+      } catch (error) { console.warn('MWGP tileset change could not carry state; continuing without it', error); }
+      this.transferring = true;
+      const query = new URLSearchParams(location.search);
+      query.set('map', String(mapEntry.id)); query.set('x', String(this.mover.x)); query.set('y', String(this.mover.y)); query.set('tileset', String(target));
+      location.href = `${location.pathname}?${query}`;
     }
     // Save/load feedback is a title flash plus a console line: loud enough to
     // tell a working key from a swallowed one, with no new UI primitives.
@@ -2268,124 +2650,8 @@ function collectMeNames(commands) {
 // changeParty commands populate it.
 function freshExtraState() {
   return {
-    gold: 0, items: {}, weapons: {}, armors: {}, party: [], actors: {}, quests: {},
-    namedItems: {}, namedParty: [], playerName: '',
-    plugin: { autosave: true, mapScrollDisabled: false, miniLabel: true, messageRows: 3, tachie: {} }
+    gold: 0, items: {}, weapons: {}, armors: {}, party: [], actors: {}, playerName: '', system: {}, timer: null
   };
-}
-
-// State-only adapters for common presentation/quality-of-life plugin families.
-// Unknown families still warn loudly; these adapters preserve command state
-// across saves/transfers without pretending to reproduce plugin rendering.
-export function applyBuiltinPluginCommand(extra, command) {
-  const name = String(command?.name || '').toLowerCase();
-  const args = (command?.args || []).map(value => String(value).trim()).filter(Boolean);
-  const plugin = extra.plugin ||= { autosave: true, mapScrollDisabled: false, miniLabel: true, messageRows: 3, tachie: {} };
-  if (name === 'disableautosave' || name === 'enableautosave' || name === 'autosave') {
-    plugin.autosave = name !== 'disableautosave';
-    return true;
-  }
-  if (name === 'mapscrolldisable') {
-    plugin.mapScrollDisabled = args[0] !== '0';
-    return true;
-  }
-  if (name === 'hideminilabel' || name === 'showminilabel') {
-    plugin.miniLabel = name === 'showminilabel';
-    return true;
-  }
-  if (name === 'sfc_rem_enable' || name === 'sfc_rem_disable') {
-    plugin.remEnabled = name === 'sfc_rem_enable';
-    return true;
-  }
-  if (name === 'mwl_reset_lines') {
-    plugin.messageRows = 3;
-    return true;
-  }
-  if (name === 'mwl_change_lines' || name === 'messagerows') {
-    const rows = Number(args[0]);
-    if (Number.isFinite(rows) && rows > 0) plugin.messageRows = Math.max(1, Math.min(15, Math.trunc(rows)));
-    return true;
-  }
-  if (name === 'choicerect') {
-    plugin.choiceRect = [0, 1, 2, 3].map(index => Number(args[index] ?? -1));
-    return true;
-  }
-  if (name === 'animelight') {
-    plugin[name] = args;
-    return true;
-  }
-  // FD_START_SITE-style plugins open an external page in the native game. The
-  // portable player must not navigate away from the running game, so retain
-  // the request as data and treat it as a safe, visible no-op. RefreshMiniLabel
-  // likewise only asks the native plugin to repaint UI that this renderer does
-  // not own; restoring the enabled state is the faithful portable behavior.
-  if (name === 'fd_start_site') {
-    plugin.lastExternalSite = args.join(' ');
-    return true;
-  }
-  if (name === 'refreshminilabel') {
-    plugin.miniLabel = true;
-    return true;
-  }
-  // FTKR Skill Tree System's event command normally opens a separate scene.
-  // Preserve the request and its arguments so later conversion layers can
-  // provide a real scene, while keeping the event flow non-blocking today.
-  if (name === 'sts') {
-    plugin.skillTree ||= { requests: [] };
-    plugin.skillTree.requests.push(args);
-    plugin.skillTree.lastAction = args[0] || '';
-    return true;
-  }
-  if (name === 'tachie') {
-    const action = (args.shift() || '').toLowerCase();
-    const tachie = plugin.tachie;
-    if (action === 'hideleft' || action === 'hideright' || action === 'hidename') {
-      tachie[action.slice(4)] = { visible: false };
-      return true;
-    }
-    if (action === 'showleft' || action === 'showright' || action === 'showname') {
-      tachie[action.slice(4)] = { visible: true, args };
-      return true;
-    }
-    if (['body', 'face', 'hat', 'hoppe', 'sweat'].includes(action) && args.length >= 2) {
-      const actor = args.shift();
-      tachie[`${actor}:${action}`] = args;
-      return true;
-    }
-  }
-  return false;
-}
-
-// Small, data-only compatibility adapter for the Quest plugin command family
-// found in the MV corpus. Unknown plugin commands remain explicit warnings.
-export function applyQuestPluginCommand(quests, command) {
-  if (String(command?.name || '').toLowerCase() !== 'quest') return false;
-  const args = (command?.args || []).map(value => String(value).trim()).filter(Boolean);
-  const first = args[0]?.toLowerCase();
-  const action = first === 'add' || first === 'set' ? first : args[1]?.toLowerCase();
-  const id = first === 'add' ? args[1] : first === 'set' ? args[2] : args[0];
-  if (!id) return false;
-  const quest = quests[id] ||= { active: false, completed: false, objectives: {} };
-  if (action === 'add') {
-    quest.active = true;
-    return true;
-  }
-  if (action === 'set' && args[1]?.toLowerCase() === 'completed') {
-    quest.active = true;
-    quest.completed = true;
-    return true;
-  }
-  if (action === 'show' || action === 'complete') {
-    const objectiveWord = first === action ? args[1] : args[2];
-    const objectiveId = first === action ? args[2] : args[3];
-    if (objectiveWord?.toLowerCase() !== 'objective' || !objectiveId) return false;
-    quest.active = true;
-    const objective = quest.objectives[objectiveId] ||= { visible: false, completed: false };
-    objective.visible = true;
-    if (action === 'complete') objective.completed = true;
-    return true;
-  }
-  return false;
 }
 
 function findPlayerActor(project) {
@@ -2579,8 +2845,8 @@ export class JumpSignal extends Error {
 }
 
 // Game-data variable operands resolved from player-held state (no engine
-// needed): inventory counts, the player's live position, party membership
-// (or the Essentials Pokémon roster), and the map/gold/party-size counters.
+// needed): inventory counts, the player's live position, party membership,
+// and the map/gold/party-size counters.
 // Pure so tests can pin it; the scene
 // method passes live mover/map context. Unknown kinds read as 0 with a loud
 // warning instead of aborting the event.
@@ -2593,7 +2859,6 @@ export function resolveGameDataOperand(extra, context, spec) {
     case 'partyMember': return Number(extra?.party?.[Number(spec.index)] ?? 0);
     case 'mapId': return Number(context?.mapId ?? 0);
     case 'partySize': return (extra?.party || []).length;
-    case 'pokemonCount': return (extra?.namedParty || []).length;
     case 'gold': return Number(extra?.gold || 0);
     default: console.warn('MWGP game-data operand is not playable without RPG Maker and read as 0', spec); return 0;
   }
@@ -2666,7 +2931,7 @@ export function prepareEventCommands(commands, scene) {
     // matching the engine's `if (actor)` guard for unknown ids.
     if (command.if?.actorName) return { call: async state => {
       const actor = scene.project?.database?.actors?.[Number(command.if.actorName.actor)];
-      const matches = !!actor && String(actor.name || '') === String(command.if.actorName.name || '');
+      const matches = !!actor && String(scene.rpgExtra?.actors?.[String(command.if.actorName.actor)]?.name ?? actor.name ?? '') === String(command.if.actorName.name || '');
       await scene.runBranch(prepareEventCommands(matches ? command.then : command.else, scene));
     } };
     if (command.if?.actorClass) return { call: async state => {
@@ -2710,6 +2975,12 @@ export function prepareEventCommands(commands, scene) {
       const enemy = scene.battleEnemies?.[Number(command.if.enemyState.index)];
       await scene.runBranch(prepareEventCommands(enemy?.hasState?.(Number(command.if.enemyState.state)) ? command.then : command.else, scene));
     } };
+    if (command.if?.timer) return { call: async () => {
+      const timer = scene.rpgExtra?.timer;
+      const seconds = timer ? Math.ceil(timer.seconds) : 0;
+      const matches = command.if.timer.atLeast ? seconds >= command.if.timer.seconds : seconds <= command.if.timer.seconds;
+      await scene.runBranch(prepareEventCommands(matches ? command.then : command.else, scene));
+    } };
     if (command.if?.actorState) return { call: async state => {
       const record = scene.rpgExtra?.actors?.[String(command.if.actorState.actor)];
       const matches = (record?.states || []).includes(Number(command.if.actorState.state));
@@ -2749,6 +3020,22 @@ export function prepareEventCommands(commands, scene) {
     } };
     if (Array.isArray(command.branches)) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: state => scene.transfer(command.transfer, state) };
+    if (command.systemFlag) return { call: () => scene.setSystemFlag(command.systemFlag) };
+    if (command.changeActorStat) return { call: state => scene.applyActorStat(state, command.changeActorStat) };
+    if (command.changeActorText) return { call: () => scene.changeActorText(command.changeActorText) };
+    if (command.changeActorImages) return { call: () => scene.changeActorImages(command.changeActorImages) };
+    if (command.timer) return { call: () => scene.setTimer(command.timer) };
+    if (command.vehicleBoard) return { call: () => scene.boardVehicle() };
+    if (command.playMovie) return { call: () => scene.playMovie(command.playMovie) };
+    if (command.forceAction) return { call: () => scene.forceAction(command.forceAction) };
+    if (command.changeTileset) return { call: () => scene.changeTileset(command.changeTileset) };
+    if (command.changeParallax) return { call: () => scene.changeParallax(command.changeParallax) };
+    if (command.rotatePicture) return { call: () => scene.rotatePicture(command.rotatePicture) };
+    if (command.locationInfo) return { call: state => scene.locationInfo(state, command.locationInfo) };
+    if (command.selectItem) return { call: state => scene.selectItem(state, command.selectItem) };
+    if (command.abortBattle) return { call: () => scene.abortBattle() };
+    if (command.enemyRecoverAll) return { call: () => scene.enemyRecoverAll(command.enemyRecoverAll) };
+    if (command.returnToTitle) return { call: () => scene.returnToTitle() };
     if (command.vehicleLocation) return { call: state => scene.setVehicleLocation(command.vehicleLocation, state) };
     if (command.routeThrough) return { call: () => scene.setRouteThrough(command.routeThrough) };
     if (command.routeOption) return { call: () => scene.setRouteOption(command.routeOption) };

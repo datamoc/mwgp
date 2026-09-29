@@ -5,6 +5,7 @@
 /notes/
 /RPGM_versions/
 /MWGP_versions/
+/.cache/
 /transpilers/opal-master/
 # ruby2js-master's own nested .gitignore excludes demo/selfhost/{ruby2js.js,filters/} as
 # regeneratable build output, and its own node_modules as an installable dependency - but our

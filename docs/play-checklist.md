@@ -24,14 +24,17 @@ the corresponding manual playthrough.
   `unsupported`/`partial` entry must match the manifest's
   `compatibility.commands` report for that game. (Reset to open after the
   2026-09-20 reconversion: new manifests, new banner check required.)
-- [~] Dialogue plugin layout: `MessageRows`/`MWL_*` now change the real message
-  window height, and `ChoiceRect` is applied to the real choice list when all
-  coordinates are provided; confirm one long-message and one choice scene per
-  MV game in the browser.
+- [~] MV/MZ web builds (since 2026-09-27, the `convert:auto` default): the game's
+  own engine runs, so titles, menus, battles, message windows and plugin
+  commands are the game's. The harness checks boot, a new game on a map and a
+  save across reload for each. Hand-check per game: a longer play session,
+  audio, and the game's own save/load screens. (The MWGP rows below still apply
+  to `--mwgp` conversions.)
 - [~] RGSS runtime compatibility: Ruby hash iteration, native array properties,
-  Ruby `gsub`/`File.extname`, and Essentials rival-token interpolation are
-  covered by the runtime bridge and regression smoke checks; verify additional
-  Essentials scenes manually.
+  Ruby `gsub`/`File.extname`, `yield` inside blocks, and the game's own
+  `self.inline` text filters (Void's rival tokens) are covered by regression
+  smoke checks; framework helpers are the game's own code, never stand-ins.
+  Verify additional scenes manually.
 
 ## Per-game rows
 
@@ -40,14 +43,16 @@ the corresponding manual playthrough.
 - [x] Opening map renders without the tile glitch.
 - [~] The manifest now has no `unsupported` command codes; command `351` is
   partial because only Save/Close are implemented in the compact menu.
-- [~] Compatibility report now classifies `MessageRows` (4), `MWL_CHANGE_LINES`
-  (91), `MWL_RESET_LINES` (112), and `ChoiceRect` (1) as partial; manual long
-  dialogue/choice positioning remains open.
-- [~] The 3 `指定位置にアニメーション表示` calls now convert to native
-  `animationAt` commands and are classified supported; visual timing/placement
-  still needs a manual scene check.
-- [~] `MapScrollDisable` is now enforced by the camera path (not just saved as
-  plugin state); verify one disabled-scroll event manually in Karryn.
+- [~] All 20 plugin-command words are handled by the game's own plugins
+  (`compatibility.plugins[*].handledBy`: `Tachie` → Saba_Tachie,
+  `TE_CALL_MAP_EVENT` → TemplateEvent, `MWL_*` → FTKR_MessageWindowLines,
+  `MapScrollDisable` → AKUNOU_MapScrollDisable, …). Open: check in the browser
+  that `TE_CALL_MAP_EVENT` (229 uses) still runs the called page (it was a
+  native adapter before 2026-09-27), and note which commands now fail loudly.
+- [x] Web build: the native title (the game's own MOG/Remtairy picture-command
+  menu at 1280×720 art, all six entries) renders identically; New Game shows the
+  opening disclaimer scene; harness: new game on map 32, save/reload/load OK.
+  Steam/Discord entries and the file logger are desktop-only (no-op / logged).
 - [~] MV command `351` now opens a compact Save/Close menu and is reported
   partial instead of unsupported; verify the menu during play.
 - [x] Common steps above.
@@ -56,9 +61,9 @@ the corresponding manual playthrough.
 
 - [x] Opening map renders.
 - [x] Music plays (BGM path resolves); sound effects also play.
-- [~] `MessageRows` and `MWL_*` handling is covered by the shared player adapter;
-  no matching `ChoiceRect` command was found in this manifest. Manual dialogue
-  sizing remains open.
+- [~] Web build: boots to its own title, harness new game on map 24,
+  save/reload/load OK; its `Quest` commands run in its own YEP_QuestJournal.
+  Check a quest-log update by hand.
 - [x] Common steps above.
 
 ### Pokemon Void 0.1.4 (XP)
@@ -71,6 +76,11 @@ the corresponding manual playthrough.
   passage rule is covered by `npm test` against the shipped `Game_Map#passable?`
   convention (set bit = blocked), but a complete manual walk remains open.
 - [x] Trainer NPC dialogue runs; self-switch pages flip after events.
+- [ ] After the 2026-09-27 shim removal: stock title (`Graphics/Titles/title`)
+  instead of the recreated splash/Load menu; the player is a placeholder tile
+  (the start actor's charset does not ship; the game sets its look in its own
+  code); script messages go through the game's own `pbMessage` windows; party
+  size reads 0 (no RPG Maker party). Re-walk the intro and note what changed.
 - [x] Common steps above.
 
 ### Pokemon Void 0.1.5 (encryptionfix) (XP)
@@ -81,8 +91,8 @@ the corresponding manual playthrough.
 - [~] No RGSS library unit fails conversion after the setter-assignment repair;
   five units remain explicitly partial through merged pieces and require
   targeted runtime scenes before being considered fully equivalent.
-- [x] Same as 0.1.4 for the remaining manual steps; note differences in the
-  result log.
+- [x] Same as 0.1.4 for the remaining manual steps (including the 2026-09-27
+  shim-removal row); note differences in the result log.
 
 ### Elementals (MZ)
 
@@ -158,3 +168,7 @@ the corresponding manual playthrough.
 | 2026-09-26 | T113 findings (gap list) | open, explicit | (1) Pokemon Void's trainer *battle* branch throws after its dialogue: `TypeError: GameData.TrainerType.exists is not a function` then an `is not iterable` follow-on — the battle half belongs to the battle-gate task; the dialogue half runs. (2) An `ask` with an empty prompt consumes one confirm before its choice list appears (`advance()` → `showChoices()`), a small flow difference from RPG Maker seen in all four choice probes. (3) No `cancelBranch` exists in any of the 5 manifests (MV cancelType never maps to one), so "cancel where allowed" is corpus-wide N/A as with Elementals; branch coverage here is sampled (one branch per game plus Elementals' both). (4) Instant `keyboard.press` is unreliable under swiftshader — probes must use the harness's 300 ms key-hold (already documented in `test-browser.mjs`); start-map cutscenes likewise block early input, so movement is verified on real maps. |
 | 2026-09-26 | Elementals tutorial hand-check — T157 | pass (human) | michel played the opening at human pace: every tutorial text advanced on a single Enter/Space, no stall across the +5G step, the "List other Controls" loop and the map 1 → map 2 transfer; a chest applied +40G to state. Gold is not shown on the map (engine-faithful — MV shows it only in Menu/Shop) and reads correctly in the menu (Esc) next to party HP. Verdict: the 2/5 scripted-run stalls were bot-pacing artifacts, not an input-lock bug. |
 | 2026-09-26 | Elementals pond walkable (map 2) — T172 | faithful, no change | Human report: the hero walks onto the south pond. Data check: the whole pond is flagged passable+bush (0xE40) in the project's own tileset, so the shipped engine's `checkPassage` walks it too — our `passageAllowsStep` agrees cell for cell (probed all maps: 2229 passable / 1510 blocked A1 cells). Ruled authoring, not a collision or render bug. |
+| 2026-09-27 | Game-specific shims removed (all 5) | pass (automated), manual re-walk open | Converters and player no longer name any game, framework or plugin (archive: `docs/removed-shims.md`). All 5 projects reconverted; `npm test` green (5/5 boot, 0 console errors; one Karryn run showed a Pixi `_getFinalPadding` text error that did not reproduce in two reruns); 90 s soaks PASS for all 5 with 0 runtime errors: Karryn 2 maps / 2 dialogues, WoC 2 / 4, Elementals 1 / 1, both Voids 1 map / 4 dialogues (down from 2 / 11-12 before: the intro now runs through the game's own message windows). Known regressions, accepted: Void stock title and placeholder player sprite, party size 0; Karryn stock 816×624 title and no `\REM_*` text codes. |
+| 2026-09-27 | Generic fixes found by the removal | pass (automated) | XP 126–129 now change items/weapons/armor/party (they were dropped as Essentials dummies for every XP game); Ruby `yield` inside a block reaches the method's block (Void `RTP.eachPathFor` crashed without the removed RTP stand-in); plugins that handle plugin commands ship (Karryn: all 20 words matched to the game's own plugins, WoC `Quest` → YEP_QuestJournal); MZ 357 runs `PluginManager.callCommand`; the MV sandbox has an inert current scene; RGSS game title from `Game.ini`, screen size from the game's own `Graphics.resize_screen`. |
+| 2026-09-27 | Parallel `convert:auto` | pass | `npm run convert:auto -- RPGM_versions MWGP_versions` converts the 5 projects in parallel (one process each, `--jobs` defaults to the core count) with a progress bar per game: 103 s instead of about 10 minutes sequentially, 5 converted, 0 failed. |
+| 2026-09-27 | MV/MZ web builds (Karryn, WoC, Elementals) | pass (browser harness) | `convert:auto` now builds MV/MZ games as web builds: the game's own engine and files plus the generic nw.js host layer (`src/web/nwjs-host.js`), served at `/web/<id>/` by `npm start` or any static host. Harness per game: boots to its own `Scene_Title`, a new game reaches a map (Karryn 32, WoC 24, Elementals 1), a save made there survives a page reload and loads (IndexedDB). Karryn's native title (MOG/Remtairy picture menu) renders identically to RPG Maker. Notes: Karryn's file logger logs a recoverable `ENOENT` for its `logs` folder; `assert` and the Steam binding are no-op host modules. |

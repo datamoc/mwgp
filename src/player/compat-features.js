@@ -6,17 +6,17 @@
 // share it. Any counted command code with no area lands in "other events" —
 // never silently dropped.
 export const FEATURE_AREAS = [
-  { key: 'battles', label: 'Battles', codes: [301, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 601, 602, 603, 604] },
-  { key: 'menus', label: 'Menus', codes: [302, 303, 351, 352, 353, 354] },
+  { key: 'battles', label: 'Battles', codes: [301, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 342, 283, 601, 602, 603, 604] },
+  { key: 'menus', label: 'Menus', codes: [302, 303, 351, 352, 353, 354, 134, 135, 136, 137, 138] },
   { key: 'messages', label: 'Messages & choices', codes: [101, 102, 103, 104, 105, 401, 402, 403, 404, 405] },
   { key: 'scripts', label: 'Event scripts', codes: [355] },
   { key: 'plugins', label: 'Plugins', codes: [356, 357] },
   { key: 'pictures', label: 'Pictures', codes: [231, 232, 233, 234, 235, 236] },
-  { key: 'audio', label: 'Audio', codes: [241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251] },
-  { key: 'movement', label: 'Movement & map', codes: [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 215, 216, 509] },
-  { key: 'screen', label: 'Screen effects', codes: [212, 213, 221, 222, 223, 224, 225, 226, 236] },
-  { key: 'party', label: 'Party, inventory & actors', codes: [125, 126, 127, 128, 129, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324] },
-  { key: 'state', label: 'Switches, variables & flow', codes: [0, 106, 108, 111, 112, 113, 115, 116, 117, 118, 119, 121, 122, 123, 124, 135, 211, 214, 230, 408, 411, 412, 413, 505, 605, 655] },
+  { key: 'audio', label: 'Audio', codes: [241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 132, 133, 139, 140] },
+  { key: 'movement', label: 'Movement & map', codes: [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 215, 216, 217, 281, 282, 284, 285, 509] },
+  { key: 'screen', label: 'Screen effects', codes: [212, 213, 221, 222, 223, 224, 225, 226, 236, 261] },
+  { key: 'party', label: 'Party, inventory & actors', codes: [125, 126, 127, 128, 129, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321, 322, 323, 324, 325, 326] },
+  { key: 'state', label: 'Switches, variables & flow', codes: [0, 106, 108, 111, 112, 113, 115, 116, 117, 118, 119, 121, 122, 123, 124, 211, 214, 230, 408, 411, 412, 413, 505, 605, 655] },
 ];
 
 const areaOf = new Map();

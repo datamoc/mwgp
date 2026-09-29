@@ -1,8 +1,10 @@
+import { CONVERTER_VERSION } from './converter-version.mjs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { buildPluginLibrary, externalizePluginLibrary } from './mv-plugins.mjs';
 import { buildAudioIndex, missingAudio } from './audio-index.mjs';
 import { basename, extname, join, resolve, sep } from 'node:path';
+import { createProgress } from './progress.mjs';
 
 const [, , sourceArg, outputArg] = process.argv;
 if (!sourceArg || !outputArg) {
@@ -10,6 +12,9 @@ if (!sourceArg || !outputArg) {
   process.exit(1);
 }
 
+// Progress points (tools/progress.mjs): asset decoding dominates a --copy-assets run.
+const progress = createProgress();
+let phase = progress.phase('reading the database', 2);
 const source = resolve(sourceArg);
 const gameRoot = resolveGameRoot(source);
 const engineKind = existsSync(join(gameRoot, 'js', 'rmmz_core.js')) ? 'rpg-maker-mz' : 'rpg-maker-mv';
@@ -88,6 +93,8 @@ const soundNames = new Set();
 const musicNames = new Set();
 const animationIds = new Set();
 const meNames = new Set();
+const movieNames = new Set();
+const battlebackNames = { 1: new Set(), 2: new Set() };
 const systemAudioReferences = [];
 let balloonUsed = false;
 // MV encrypts assets under a distinct extension (.rpgmvp/.rpgmvo/.rpgmvm); MZ instead
@@ -133,16 +140,23 @@ const commonEvents = await readJson('CommonEvents.json', true) || [];
 // source call at every call site, so counting here is the honest priority
 // list for what to convert next). Reported once at the end, below.
 const pluginFamilyCounts = new Map();
+// Roots for the plugin library: the MV 356 command words and the plugins MZ 357 commands name.
+const pluginCommandWords = new Set();
+const pluginCommandPlugins = new Set();
+// MZ 357 command name -> the plugin that registers it, for the compatibility report.
+const mzCommandPlugin = new Map();
 function tallyPluginCommand(command) {
-  // MZ tallies under the command name so 357 calls meet the same
-  // supported/partial families as their MV 356 equivalents.
+  // MZ tallies under the command name, like MV 356's first word.
   if (command?.code === 357 && Array.isArray(command.parameters)) {
     const name = String(command.parameters[1] || command.parameters[0] || '').trim() || '(empty)';
+    const plugin = String(command.parameters[0] || '').trim();
+    if (plugin) { pluginCommandPlugins.add(plugin); mzCommandPlugin.set(name, plugin); }
     pluginFamilyCounts.set(name, (pluginFamilyCounts.get(name) || 0) + 1);
     return;
   }
   if (command?.code !== 356 || !command.parameters?.[0]) return;
   const name = String(command.parameters[0]).trim().split(/\s+/)[0] || '(empty)';
+  pluginCommandWords.add(name);
   pluginFamilyCounts.set(name, (pluginFamilyCounts.get(name) || 0) + 1);
 }
 for (const commonEvent of commonEvents) for (const command of commonEvent?.list || []) {
@@ -190,12 +204,17 @@ function parseForegroundNote(note) {
 }
 
 const maps = [];
-for (const name of readdirSync(dataDir).filter(name => /^Map\d+\.json$/i.test(name)).sort()) {
+const mapFiles = readdirSync(dataDir).filter(name => /^Map\d+\.json$/i.test(name)).sort();
+phase.end();
+phase = progress.phase('maps', 20, mapFiles.length);
+for (const name of mapFiles) {
   const id = Number(name.match(/\d+/)[0]);
   const data = await readJson(name);
   if (engineKind === 'rpg-maker-mz') normalizeMZMapData(data);
   if (data.bgm?.name) musicNames.add(data.bgm.name);
   if (data.bgs?.name) musicNames.add(data.bgs.name);
+  // MV/MZ map parallax (map properties): the image is decoded from img/parallaxes like the foreground art.
+  if (data.parallaxName) foregroundNames.add(String(data.parallaxName));
   const foreground = parseForegroundNote(data.note);
   if (foreground) {
     data.settings = { ...(data.settings || {}), ...foreground };
@@ -206,7 +225,10 @@ for (const name of readdirSync(dataDir).filter(name => /^Map\d+\.json$/i.test(na
     tallyPluginCommand(command);
   }
   maps.push({ id, info: mapInfos[id] || null, data, mwgEvents: data.events.filter(Boolean).map(event => convertEvent(event, id)) });
+  phase.tick(`map ${id}`);
 }
+phase.end();
+phase = progress.phase('common events and database', 3);
 
 const configuredStartMap = maps.find(map => map.id === Number(system.startMapId));
 // The configured start map may be an intentionally blank bootstrap map whose
@@ -769,10 +791,75 @@ function convertCommand(command, context = {}) {
     const [actor, slot, item] = command.parameters || [];
     return [{ changeEquipment: { actor: Number(actor || 0), slot: Number(slot || 0), item: Number(item || 0) } }];
   }
+  // 322 is Change Actor Images (character, face, battler); the profile text is 325. (An earlier
+  // revision stored 322's character sheet name as the actor's profile.)
   if (command.code === 322) {
+    const [actor, characterName, characterIndex, faceName, faceIndex, battlerName] = command.parameters || [];
+    return [{ changeActorImages: { actor: Number(actor || 0), characterName: String(characterName || ''), characterIndex: Number(characterIndex || 0), faceName: String(faceName || ''), faceIndex: Number(faceIndex || 0), battlerName: String(battlerName || '') } }];
+  }
+  if (command.code === 325) {
     const [actor, profile] = command.parameters || [];
     return [{ changeProfile: { actor: Number(actor || 0), profile: String(profile || '') } }];
   }
+  if (command.code === 320 || command.code === 324) {
+    const [actor, text] = command.parameters || [];
+    return [{ changeActorText: { actor: Number(actor || 0), field: command.code === 320 ? 'name' : 'nickname', text: String(text ?? '') } }];
+  }
+  // 312 MP, 315 EXP, 317 parameter, 326 TP share 311's operand shape ([scope, actor, operation,
+  // operandType, operand]); 317 inserts the parameter id before the operation.
+  if (command.code === 312 || command.code === 315 || command.code === 326 || command.code === 317) {
+    const p = command.parameters || [];
+    const offset = command.code === 317 ? 1 : 0;
+    const [scope, actor] = p;
+    const operation = p[2 + offset], operandType = p[3 + offset], operand = p[4 + offset];
+    const amount = operandType === 0 ? Number(operand || 0) : { variable: String(operand ?? 0) };
+    const stat = { 312: 'mp', 315: 'exp', 317: 'param', 326: 'tp' }[command.code];
+    return [{ changeActorStat: { stat, scope: Number(scope || 0), actor: Number(actor || 0), amount, sign: Number(operation || 0) === 0 ? 1 : -1, ...(stat === 'param' ? { param: Number(p[2] || 0) } : {}), ...(stat === 'exp' ? { show: p[5] === true } : {}) } }];
+  }
+  // System toggles and settings that live on Game_System / Game_Map in the engine: 134 save, 135 menu,
+  // 136 encounter, 137 formation access (0 disables), 216 followers (0 shows), 281 map name display (0 on),
+  // 138 window tone, 132/133/139 battle BGM and victory/defeat ME, 140 vehicle BGM, 323 vehicle image.
+  // The player stores them in rpgExtra.system and honours the ones that have a consumer (menu, save,
+  // battle music); the rest are kept so a save round-trips them.
+  if (command.code === 134 || command.code === 135 || command.code === 136 || command.code === 137) {
+    const key = { 134: 'saveAccess', 135: 'menuAccess', 136: 'encounterAccess', 137: 'formationAccess' }[command.code];
+    return [{ systemFlag: { key, value: Number(command.parameters?.[0] || 0) !== 0 } }];
+  }
+  if (command.code === 216) return [{ systemFlag: { key: 'followers', value: Number(command.parameters?.[0] || 0) === 0 } }];
+  if (command.code === 281) return [{ systemFlag: { key: 'mapNameDisplay', value: Number(command.parameters?.[0] || 0) === 0 } }];
+  if (command.code === 138) return [{ systemFlag: { key: 'windowTone', value: (command.parameters?.[0] || [0, 0, 0]).map(Number) } }];
+  if (command.code === 132 || command.code === 133 || command.code === 139) {
+    const audio = command.parameters?.[0];
+    const key = { 132: 'battleBgm', 133: 'victoryMe', 139: 'defeatMe' }[command.code];
+    if (audio?.name) (command.code === 132 ? musicNames : meNames).add(audio.name);
+    return [{ systemFlag: { key, value: audio?.name ? audioParams(audio) : null } }];
+  }
+  if (command.code === 140) {
+    const audio = command.parameters?.[1];
+    if (audio?.name) musicNames.add(audio.name);
+    return [{ systemFlag: { key: `vehicleBgm:${Number(command.parameters?.[0] || 0)}`, value: audio?.name ? audioParams(audio) : null } }];
+  }
+  if (command.code === 323) return [{ systemFlag: { key: `vehicleImage:${Number(command.parameters?.[0] || 0)}`, value: { name: String(command.parameters?.[1] || ''), index: Number(command.parameters?.[2] || 0) } } }];
+  // 217 gathers followers around the player; this player draws none, so there is nothing to gather.
+  if (command.code === 217) return [];
+  // 124 timer: [0 start | 1 stop, seconds]. 206 boards or leaves the vehicle at the player's position.
+  if (command.code === 124) return [{ timer: Number(command.parameters?.[0] || 0) === 0 ? { start: Number(command.parameters?.[1] || 0) } : { stop: true } }];
+  if (command.code === 206) return [{ vehicleBoard: true }];
+  // 261 Play Movie: the file is copied next to the audio (movies/<name>.webm) and plays over the map.
+  if (command.code === 261) {
+    const name = String(command.parameters?.[0] || '');
+    if (!name) return [];
+    movieNames.add(name);
+    return [{ playMovie: { name } }];
+  }
+  // 339 Force Action: [subject type (0 enemy, 1 actor), enemy index / actor id, skill id, target
+  // (-2 = the subject's last target, -1 = random, 0.. = that index)]. Only meaningful in a troop event.
+  if (command.code === 339) {
+    const [kind, subject, skill, target] = command.parameters || [];
+    return [{ forceAction: { subjectKind: Number(kind || 0) === 0 ? 'enemy' : 'actor', subject: Number(subject || 0), skill: Number(skill || 0), target: Number(target ?? -2) } }];
+  }
+  // 354 Return to Title Screen.
+  if (command.code === 354) return [{ returnToTitle: true }];
   if (command.code === 243) return [{ saveBgm: true }];
   if (command.code === 244) return [{ resumeBgm: true }];
   if (command.code === 249) {
@@ -813,13 +900,44 @@ function convertCommand(command, context = {}) {
   if (command.code === 246) return [{ fadeoutBgs: { duration: Number(command.parameters?.[0] || 1) } }];
   if (command.code === 251) return [{ stopSound: true }];
   // Troop-event commands on the enemies of the running battle (index -1 = the whole troop).
-  if (command.code === 331 || command.code === 332 || command.code === 333) {
+  // Enemy commands act on the running battle's enemies (index -1 = the whole troop). Engine numbering:
+  // 331 HP, 332 MP, 333 State, 334 Recover All, 335 Appear, 336 Transform, 337 Show Animation, 340 Abort
+  // Battle, 342 TP. (An earlier revision read 333 as TP and 334 as a state change.)
+  if (command.code === 331 || command.code === 332 || command.code === 342) {
     const [index, operation, operandType, operand, allowDeath] = command.parameters || [];
     const amount = operandType === 0 ? Number(operand || 0) : { variable: String(operand ?? 0) };
-    const key = { 331: 'changeEnemyHp', 332: 'changeEnemyMp', 333: 'changeEnemyTp' }[command.code];
+    const key = { 331: 'changeEnemyHp', 332: 'changeEnemyMp', 342: 'changeEnemyTp' }[command.code];
     return [{ [key]: { index: Number(index ?? 0), amount, sign: Number(operation || 0) === 0 ? 1 : -1, ...(command.code === 331 ? { allowDeath: allowDeath === true } : {}) } }];
   }
-  if (command.code === 334) return [{ changeEnemyState: { index: Number(command.parameters?.[0] ?? 0), add: Number(command.parameters?.[1] || 0) === 0, state: Number(command.parameters?.[2] || 0) } }];
+  if (command.code === 333) return [{ changeEnemyState: { index: Number(command.parameters?.[0] ?? 0), add: Number(command.parameters?.[1] || 0) === 0, state: Number(command.parameters?.[2] || 0) } }];
+  if (command.code === 334) return [{ enemyRecoverAll: { index: Number(command.parameters?.[0] ?? 0) } }];
+  // 337 plays an animation on an enemy sprite; battles draw no animations, so it is a visual-only no-op (partial).
+  if (command.code === 337) return [];
+  if (command.code === 340) return [{ abortBattle: true }];
+  // 104 Select Item: [variable, item type (1 regular, 2 key, 3 hidden A, 4 hidden B)].
+  if (command.code === 104) return [{ selectItem: { variable: String(command.parameters?.[0] ?? 0), itemType: Number(command.parameters?.[1] || 1) } }];
+  // 233 Rotate Picture: [picture, speed]; the engine turns it speed/2 degrees per frame.
+  if (command.code === 233) return [{ rotatePicture: { id: Number(command.parameters?.[0] || 0), speed: Number(command.parameters?.[1] || 0) } }];
+  // 285 Get Location Info: [variable, info (0 terrain tag, 1 event id, 2-5 tile id of layer 1-4, 6 region), designation, x, y].
+  if (command.code === 285) {
+    const [variable, info, designation, a, b] = command.parameters || [];
+    return [{ locationInfo: { variable: String(variable ?? 0), info: Number(info || 0), ...(Number(designation || 0) === 0 ? { x: Number(a || 0), y: Number(b || 0) } : { xVar: String(a ?? 0), yVar: String(b ?? 0) }) } }];
+  }
+  // 282 Change Tileset: [tileset id]. The player rebuilds the current map with it (see scene.changeTileset).
+  if (command.code === 282) return [{ changeTileset: { id: Number(command.parameters?.[0] || 0) } }];
+  // 284 Change Parallax: [name, loop X, loop Y, scroll X, scroll Y]; an empty name hides it.
+  if (command.code === 284) {
+    const [name, loopX, loopY, sx, sy] = command.parameters || [];
+    if (name) foregroundNames.add(String(name));
+    return [{ changeParallax: { name: String(name || ''), loopX: loopX === true, loopY: loopY === true, sx: Number(sx || 0), sy: Number(sy || 0) } }];
+  }
+  // 283 Change Battle Back: the two battleback images used by the next battles on this run.
+  if (command.code === 283) {
+    const [first, second] = command.parameters || [];
+    if (first) battlebackNames[1].add(String(first));
+    if (second) battlebackNames[2].add(String(second));
+    return [{ systemFlag: { key: 'battleback', value: { first: String(first || ''), second: String(second || '') } } }];
+  }
   if (command.code === 336) return [{ enemyTransform: { index: Number(command.parameters?.[0] ?? 0), enemyId: Number(command.parameters?.[1] || 0) } }];
   if (command.code === 335) return [{ enemyAppear: { index: Number(command.parameters?.[0] || 0) } }];
   if (command.code === 356 && command.parameters?.[0]) {
@@ -832,10 +950,11 @@ function convertCommand(command, context = {}) {
     return [{ pluginCommand: { raw: resolveTextTables(raw), name: parts[0] || '', args: parts.slice(1) } }];
   }
   // MZ plugin commands (code 357, [pluginName, commandName, label, args]): the
-  // same pluginCommand vocabulary as MV's 356 above. The player matches on the
-  // command name, so an MZ call reaches the same state adapters; the args
-  // object flattens to positional string args like the MV split. Malformed
-  // params fall through to the loud marker below, never a skip.
+  // same pluginCommand vocabulary as MV's 356 above, plus the plugin name and
+  // the args object the engine hands to the plugin's registered command
+  // (`PluginManager.callCommand`). The args also flatten to positional string
+  // args like the MV split. Malformed params fall through to the loud marker
+  // below, never a skip.
   if (command.code === 357 && Array.isArray(command.parameters)) {
     const [plugin = '', sub = ''] = command.parameters;
     const argsObject = command.parameters.find(param => param && typeof param === 'object' && !Array.isArray(param));
@@ -844,7 +963,7 @@ function convertCommand(command, context = {}) {
     if (!name) return [unsupportedCommand(Number(command.code), 0, context)];
     const args = values.map(value => resolveTextTables(String(value ?? '')));
     const raw = [String(plugin || '').trim(), name, ...args].filter(Boolean).join(' ');
-    return [{ pluginCommand: { raw, name, args } }];
+    return [{ pluginCommand: { raw, name, args, ...(plugin ? { plugin: String(plugin).trim(), params: argsObject || {} } : {}) } }];
   }
   // Keep common-event calls as runtime references. Inlining made valid
   // diamond-shaped call graphs explode and forced a depth-8 truncation;
@@ -866,11 +985,11 @@ function convertCommand(command, context = {}) {
   if (command.code === 201 && command.parameters?.[0] === 1) return [{ transfer: { mapVar: String(command.parameters[1]), xVar: String(command.parameters[2]), yVar: String(command.parameters[3]) } }];
   // Engine-faithful no-ops stay silent: 0 (empty slot), 101 (Show Text header —
   // parseBlock already took the portrait, the 401 lines carry the text),
-  // 108/408 (comments), 135 (menu access — the player has no menu scene),
+  // 108/408 (comments),
   // 405 outside scrolling text (plugin data), 505 (a route step's
   // editor-only sibling, folded into 205). Anything else unmapped is a real
   // gap: loud marker, never a skip.
-  if ([0, 101, 108, 135, 405, 408, 505].includes(Number(command.code))) return [];
+  if ([0, 101, 108, 405, 408, 505].includes(Number(command.code))) return [];
   return [unsupportedCommand(Number(command.code), 0, context)];
 }
 
@@ -973,6 +1092,8 @@ function convertBranchCondition(parameters, context = {}) {
   // Actor checks (engine case 4) read the player-held actor records: sub 0 is
   // party membership, sub 3 a learned skill, sub 6 an affecting state. Like the
   // engine (`if (actor)` guard), an unknown actor id evaluates as false.
+  // Timer (engine case 3): params [3, seconds, 0 = at least | 1 = at most] against the Control Timer countdown.
+  if (parameters[0] === 3) return { timer: { seconds: Number(parameters[1] || 0), atLeast: Number(parameters[2] || 0) === 0 } };
   if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 0) return { partyMember: Number(parameters[1] || 0) };
   if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 1) return { actorName: { actor: Number(parameters[1] || 0), name: String(parameters[3] ?? '') } };
   if (parameters[0] === 4 && Number(parameters[2] ?? -1) === 2) return { actorClass: { actor: Number(parameters[1] || 0), classId: Number(parameters[3] || 0) } };
@@ -1044,11 +1165,16 @@ const pluginsText = existsSync(pluginsPath) ? await readFile(pluginsPath, 'utf8'
 for (const track of [systemAudio.titleBgm, systemAudio.battleBgm, ...Object.values(systemAudio.vehicles)]) if (track) { musicNames.add(track.name); systemAudioReferences.push({ kind: 'bgm', name: track.name }); }
 for (const track of [systemAudio.victoryMe, systemAudio.defeatMe, systemAudio.gameoverMe]) if (track) { meNames.add(track.name); systemAudioReferences.push({ kind: 'me', name: track.name }); }
 for (const track of Object.values(systemAudio.sounds)) { soundNames.add(track.name); systemAudioReferences.push({ kind: 'se', name: track.name }); }
-const pluginLibrary = await buildPluginLibrary(gameRoot, pluginsText, scriptSources, { log: message => console.log(`MWGP convert: ${message}`) });
+phase.end();
+phase = progress.phase('selecting plugins', 5);
+const pluginLibrary = await buildPluginLibrary(gameRoot, pluginsText, scriptSources, { commandWords: pluginCommandWords, commandPlugins: pluginCommandPlugins, log: message => console.log(`MWGP convert: ${message}`) });
 const pluginNames = [...pluginsText.matchAll(/"name"\s*:\s*"([^"]+)"/g)].map(match => match[1]);
 
 // Animation sprite sheets resolve only now that the database is loaded.
 const animationSpriteNames = new Set();
+// Battle animations: every animation a skill, item or weapon plays on its target (animationId > 0; -1 means the
+// attacker's weapon animation, which is already in the weapons list).
+for (const table of ['skills', 'items', 'weapons']) for (const entry of database[table] || []) if (Number(entry?.animationId) > 0) animationIds.add(Number(entry.animationId));
 for (const id of animationIds) {
   const animation = database.animations?.[id];
   if (animation?.animation1Name) animationSpriteNames.add(animation.animation1Name);
@@ -1102,19 +1228,40 @@ function pngDimensions(path, file) {
 await mkdir(join(output, 'data'), { recursive: true });
 // Foreground art follows files actually present, so the validator's
 // decoded-root check stays honest when the source folder is absent.
+// Window.png (192x192) is the skin of every window. It is decoded whenever the assets are (never turning an in-place
+// conversion into a decoded one), and the player applies it to the dialogue and menu windows.
+const windowSkinFile = ['Window.png', 'Window.rpgmvp', 'Window.png_'].map(name => join(gameRoot, 'img', 'system', name)).find(existsSync);
+const decodedAssets = copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed;
+const windowSkinAvailable = Boolean(windowSkinFile) && decodedAssets;
+// The game font. MZ names it in System.json (advanced.mainFontFilename, advanced.fontSize); MV declares
+// `@font-face { font-family: GameFont; src: url(file) }` in fonts/gamefont.css and draws at 28. Only the one file the
+// game itself uses is copied (fonts/ can hold many). It is applied when the assets are decoded, like the window skin.
+function findGameFont() {
+  const fontsDir = join(gameRoot, 'fonts');
+  let file = system.advanced?.mainFontFilename;
+  if (!file && existsSync(join(fontsDir, 'gamefont.css'))) {
+    const css = readFileSync(join(fontsDir, 'gamefont.css'), 'utf8');
+    const face = css.match(/@font-face\s*\{[^}]*font-family:\s*["']?GameFont["']?\s*;[^}]*\}/i)?.[0];
+    file = face?.match(/url\(\s*["']?([^"')]+)["']?\s*\)/i)?.[1];
+  }
+  if (!file || !existsSync(join(fontsDir, file))) return null;
+  return { file, size: Number(system.advanced?.fontSize || 28), fallback: String(system.advanced?.fallbackFonts || 'sans-serif') };
+}
+const gameFont = decodedAssets ? findGameFont() : null;
 const foregroundParallaxesAvailable = foregroundNames.size > 0 && (copyAssets || existsSync(join(gameRoot, 'img', 'parallaxes')));
 const manifest = {
   format: 'MWGP',
+  converter: { version: CONVERTER_VERSION },   // keep it this early in the file: readManifestConverterVersion reads only the first bytes
   version: 1,
   source: { engine: engineKind, projectName: basename(source), convertedAt: new Date().toISOString() },
-  display: { title: system.gameTitle || basename(source), width: system.advanced?.screenWidth || 816, height: system.advanced?.screenHeight || 624 },
+  display: { title: system.gameTitle || basename(source), width: system.advanced?.screenWidth || 816, height: system.advanced?.screenHeight || 624, ...(gameFont ? { font: { file: gameFont.file, family: 'GameFont', size: gameFont.size, fallback: gameFont.fallback } } : {}) },
   initialMapId: startMap?.id || null,
   player: startMap ? { mapId: startMap.id, x: startMap.id === system.startMapId ? system.startX : 1, y: startMap.id === system.startMapId ? system.startY : 1 } : null,
-  assets: { root: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size || foregroundParallaxesAvailable ? 'assets' : gameRoot, kind: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size || foregroundParallaxesAvailable ? 'decoded' : 'source', tilesets: copyTilesets, characters: copyCharacters, faces: copyFaces, pictures: copyPictures, audio: copyAudio, system: balloonUsed, animations: animationSpriteNames.size > 0, parallaxes: foregroundParallaxesAvailable, encryption: system.encryptionKey ? 'rpgm' : 'none' },
+  assets: { windowSkin: windowSkinAvailable, root: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size || foregroundParallaxesAvailable ? 'assets' : gameRoot, kind: copyTilesets || copyCharacters || copyFaces || copyPictures || copyAudio || balloonUsed || animationSpriteNames.size || foregroundParallaxesAvailable ? 'decoded' : 'source', tilesets: copyTilesets, characters: copyCharacters, faces: copyFaces, pictures: copyPictures, audio: copyAudio, system: balloonUsed, animations: animationSpriteNames.size > 0, parallaxes: foregroundParallaxesAvailable, encryption: system.encryptionKey ? 'rpgm' : 'none' },
   tilesets: database.tilesets,
   playerSprite,
   initialParty: Array.isArray(system.partyMembers) ? system.partyMembers.map(Number).filter(Number.isInteger) : [],
-  titleScreen: { title1: String(system.title1Name || ''), title2: String(system.title2Name || ''), titleBgm: system.titleBgm ? { name: String(system.titleBgm.name || ''), volume: Number(system.titleBgm.volume ?? 100), pitch: Number(system.titleBgm.pitch ?? 100), pan: Number(system.titleBgm.pan ?? 0) } : null, commands: { newGame: system.titleCommandWindow?.newGame !== false, continue: system.titleCommandWindow?.continue_ !== false, options: system.titleCommandWindow?.options !== false }, assets: titleAssetsAvailable ? { root: 'assets', kind: 'decoded' } : null },
+  titleScreen: { title1: String(system.title1Name || ''), title2: String(system.title2Name || ''), drawTitle: system.optDrawTitle !== false, commandOffset: { x: Number(system.titleCommandWindow?.offsetX || 0), y: Number(system.titleCommandWindow?.offsetY || 0) }, titleBgm: system.titleBgm ? { name: String(system.titleBgm.name || ''), volume: Number(system.titleBgm.volume ?? 100), pitch: Number(system.titleBgm.pitch ?? 100), pan: Number(system.titleBgm.pan ?? 0) } : null, commands: { newGame: system.titleCommandWindow?.newGame !== false, continue: system.titleCommandWindow?.continue_ !== false, options: system.titleCommandWindow?.options !== false }, assets: titleAssetsAvailable ? { root: 'assets', kind: 'decoded' } : null },
   vehicles: {
     boat: system.boat ? { characterName: system.boat.characterName || 'Vehicle', characterIndex: Number(system.boat.characterIndex || 0), mapId: Number(system.boat.startMapId || 0), x: Number(system.boat.startX || 0), y: Number(system.boat.startY || 0) } : null,
     ship: system.ship ? { characterName: system.ship.characterName || 'Vehicle', characterIndex: Number(system.ship.characterIndex || 1), mapId: Number(system.ship.startMapId || 0), x: Number(system.ship.startX || 0), y: Number(system.ship.startY || 0) } : null,
@@ -1123,11 +1270,13 @@ const manifest = {
   characterFrames,
   plugins: pluginNames,
   ...(pluginLibrary ? { pluginLibrary } : {}),
-  compatibility: { source: engineKind, commands: buildCompatibilityReport(commandCounts), plugins: buildPluginCompatibilityReport(pluginFamilyCounts) },
+  compatibility: { source: engineKind, commands: buildCompatibilityReport(commandCounts), plugins: buildPluginCompatibilityReport(pluginFamilyCounts, pluginLibrary) },
   commonEvents: convertedCommonEvents,
   maps,
   database
 };
+phase.end();
+phase = progress.phase('decoding assets', 62, copyAssets ? countFiles(join(gameRoot, 'img')) + countFiles(join(gameRoot, 'audio')) : copyTilesets ? countFiles(join(gameRoot, 'img', 'tilesets')) : 1);
 if (titleAssetsAvailable) {
   await decodeTree(join(gameRoot, 'img', 'titles1'), join(output, 'assets', 'img', 'titles1'), system.encryptionKey);
   await decodeTree(join(gameRoot, 'img', 'titles2'), join(output, 'assets', 'img', 'titles2'), system.encryptionKey);
@@ -1138,6 +1287,8 @@ if (copyAssets) {
 } else if (copyTilesets) {
   await decodeTree(join(gameRoot, 'img', 'tilesets'), join(output, 'assets', 'img', 'tilesets'), system.encryptionKey);
 }
+phase.end();
+phase = progress.phase('decoding referenced assets', 3);
 if (copyCharacters) await decodeTree(join(gameRoot, 'img', 'characters'), join(output, 'assets', 'img', 'characters'), system.encryptionKey);
 if (copyFaces) await decodeTree(join(gameRoot, 'img', 'faces'), join(output, 'assets', 'img', 'faces'), system.encryptionKey);
 // Balloon art lives in img/system (decoded only when a balloon command was
@@ -1149,6 +1300,14 @@ if (copyPictures && !copyAssets) await decodeNamedTree(join(gameRoot, 'img', 'pi
 // Foreground art lives in img/parallaxes; like balloon/system art it is small,
 // so decode what the map notes reference even without a copy flag.
 if (foregroundParallaxesAvailable && !copyAssets) await decodeNamedTree(join(gameRoot, 'img', 'parallaxes'), join(output, 'assets', 'img', 'parallaxes'), foregroundNames, system.encryptionKey);
+// Movies are plain files (no MV encryption) and play only when an event asks, so copy just those named.
+for (const level of [1, 2]) if (battlebackNames[level].size) await decodeNamedTree(join(gameRoot, 'img', `battlebacks${level}`), join(output, 'assets', 'img', `battlebacks${level}`), battlebackNames[level], system.encryptionKey);
+if (gameFont) {
+  await mkdir(join(output, 'assets', 'fonts'), { recursive: true });
+  await writeFile(join(output, 'assets', 'fonts', gameFont.file), await readFile(join(gameRoot, 'fonts', gameFont.file)));
+}
+if (windowSkinAvailable && !copyAssets) await decodeNamedTree(join(gameRoot, 'img', 'system'), join(output, 'assets', 'img', 'system'), new Set(['Window']), system.encryptionKey);
+if (movieNames.size) await decodeNamedTree(join(gameRoot, 'movies'), join(output, 'assets', 'movies'), movieNames, system.encryptionKey);
 if (copyAudio && !copyAssets) {
   await decodeNamedTree(join(gameRoot, 'audio', 'se'), join(output, 'assets', 'audio', 'se'), soundNames, system.encryptionKey);
   await decodeNamedTree(join(gameRoot, 'audio', 'bgm'), join(output, 'assets', 'audio', 'bgm'), musicNames, system.encryptionKey);
@@ -1169,7 +1328,10 @@ if (existsSync(audioRoot)) {
 }
 if (manifest.pluginLibrary) manifest.pluginLibrary = await externalizePluginLibrary(manifest.pluginLibrary, output);
 // Compact: pretty-printing pushes the largest projects past V8's maximum string length.
+phase.end();
+phase = progress.phase('writing the manifest', 5);
 await writeFile(join(output, 'mwgp.json'), JSON.stringify(manifest));
+phase.end();
 console.log(`Converted ${maps.length} maps and ${pluginNames.length} plugins to ${join(output, 'mwgp.json')}${copyAssets ? ' with assets' : ''}`);
 for (const [kind, info] of [...unsupportedBranchFallbacks].sort((a, b) => a[0] - b[0])) {
   if (info.count > 1) console.warn(`MWGP convert: branch type ${kind} fell back ${info.count} times (first at ${info.first}); every site is marked unsupported in the manifest`);
@@ -1183,7 +1345,7 @@ for (const [key, info] of [...unsupportedCommandFallbacks].sort((a, b) => a[0].l
 if (pluginFamilyCounts.size) {
   const top = [...pluginFamilyCounts].sort((a, b) => b[1] - a[1]);
   const shown = top.slice(0, 10).map(([name, count]) => `${name} (${count})`).join(', ');
-  console.log(`MWGP convert: plugin command families: ${shown}${top.length > 10 ? ` +${top.length - 10} more` : ''}; known native/state adapters run, unknown families warn at runtime`);
+  console.log(`MWGP convert: plugin command families: ${shown}${top.length > 10 ? ` +${top.length - 10} more` : ''}; each runs through the game's own plugin code when the plugin handling it ships`);
 }
 
 async function decodeTree(input, destination, encryptionKey) {
@@ -1194,8 +1356,13 @@ async function decodeTree(input, destination, encryptionKey) {
     const targetName = entry.isDirectory() ? entry.name : decodedName(entry.name);
     const to = join(destination, targetName);
     if (entry.isDirectory()) await decodeTree(from, to, encryptionKey);
-    else await writeFile(to, decodeRpgmAsset(await readFile(from), entry.name, encryptionKey));
+    else { await writeFile(to, decodeRpgmAsset(await readFile(from), entry.name, encryptionKey)); phase.tick(entry.name); }
   }
+}
+
+function countFiles(dir) {
+  if (!existsSync(dir)) return 0;
+  return readdirSync(dir, { withFileTypes: true }).reduce((sum, entry) => sum + (entry.isDirectory() ? countFiles(join(dir, entry.name)) : 1), 0);
 }
 
 async function decodeNamedTree(input, destination, names, encryptionKey) {
@@ -1232,6 +1399,8 @@ function buildCompatibilityReport(counts) {
     301, 331, 332, 333, 334, 336, 351, 0, 101, 102, 105, 108, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129, 135,
     201, 202, 203, 204, 211, 212, 335, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
     244, 245, 246, 249, 250, 251, 311, 313, 314, 316, 318, 319, 321, 322,
+    124, 132, 133, 134, 139, 206, 261, 312, 315, 317, 320, 324, 325, 326, 339, 354,
+    104, 233, 282, 283, 284, 285, 340, 342,
     103, 401, 402, 403, 404, 405, 408, 411, 412, 413, 236, 302, 303, 352, 353, 505, 601, 602, 603, 604, 605, 655
   ]);
   // 108 (Comment) and 505 (a Set Movement Route step's editor-only sibling entry, already
@@ -1242,9 +1411,7 @@ function buildCompatibilityReport(counts) {
   // the corpus and stays unsupported on its own.
   // 405 lines under a 105 convert into the scroll command (unit F); orphaned
   // 405s are plugin data lines and stay dropped.
-  // 135 (menu access) has nothing to act on — the player has no menu scene —
-  // so doing nothing is the correct conversion, classified supported like the
-  // other correct no-ops (108/408/505).
+  // 135 (menu access) and 134 (save access) are honoured: Esc/X and the menu's Save entry check them.
   // 111 is partial: switch, variable, self-switch, actor-in-party, player/own
   // facing, gold, and item conditions are preserved (verified against the
   // shipped command111), while timer, enemy, button, vehicle, and other
@@ -1252,14 +1419,17 @@ function buildCompatibilityReport(counts) {
   // the player warns on and evaluates as false instead of dropping the block.
   // 355 is preserved and executed through the bounded MV globals shim; it is
   // partial because arbitrary RPG Maker JavaScript/API calls may still fail.
-  // 356 remains partial for unknown plugin APIs; the player has state-only
-  // adapters for common plugin families and native adapters for known effects.
+  // 356 is partial: it runs the game's own plugin code, which may reach the
+  // scene/window layer the player does not load.
   // 357 is MZ's structured equivalent and converts to the same vocabulary.
   // 351 opens the player's menu (Item/Skill/Equip/Status/Save/Options), 301 runs the troop battle runner
   // (src/player/battle.js), 331-334/336 act on the battle's enemies: all supported, within the limits
   // documented in AGENTS.md (no battle graphics, no plugin damage engines).
   // 352 is supported through the player's slot-1 save path.
-  const partial = new Set([111, 122, 205, 355, 356, 357]);
+  // 337 draws no animation (battles have none). 136/137/138/140/216/217/281/323 are stored as system settings (rpgExtra.system) that nothing in this
+  // player consumes yet: there are no random encounters, formation screen, followers, map name window or
+  // vehicle art, and window colours are not applied.
+  const partial = new Set([111, 122, 205, 355, 356, 357, 136, 137, 138, 140, 216, 217, 281, 323, 337]);
   // Keep the report honest for each project. These command families are only
   // partial when this conversion actually had to emit a loud fallback for one
   // of their shapes; otherwise a game that uses only the supported subset
@@ -1273,16 +1443,18 @@ function buildCompatibilityReport(counts) {
   }]));
 }
 
-function buildPluginCompatibilityReport(counts) {
-  const supported = new Set(['quest', 'te_call_map_event', '指定位置にアニメーション表示']);
-  const partial = new Set([
-    'tachie', 'disableautosave', 'enableautosave', 'autosave', 'mapscrolldisable',
-    'hideminilabel', 'showminilabel', 'sfc_rem_enable', 'sfc_rem_disable',
-    'mwl_reset_lines', 'mwl_change_lines', 'messagerows', 'choicerect', 'animelight'
-    , 'fd_start_site', 'refreshminilabel', 'sts'
-  ]);
-  return Object.fromEntries([...counts].sort((a, b) => b[1] - a[1]).map(([name, count]) => [name, {
-    count,
-    status: supported.has(name.toLowerCase()) ? 'supported' : partial.has(name.toLowerCase()) ? 'partial' : 'unsupported'
-  }]));
+// A plugin command runs through the game's own plugin code (its `pluginCommand` override, or the MZ command it
+// registers), so it is partial when the plugin that handles it ships in the plugin library (the plugin may still
+// reach the scene/window layer this player does not load) and unsupported when nothing shipped handles it.
+function buildPluginCompatibilityReport(counts, library) {
+  const shipped = new Set(library?.order || []);
+  const handlersOf = name => {
+    const mzPlugin = mzCommandPlugin.get(name);
+    if (mzPlugin) return shipped.has(mzPlugin) ? [mzPlugin] : [];
+    return library?.commandHandlers?.[name.toLowerCase()] || [];
+  };
+  return Object.fromEntries([...counts].sort((a, b) => b[1] - a[1]).map(([name, count]) => {
+    const handledBy = handlersOf(name);
+    return [name, { count, status: handledBy.length ? 'partial' : 'unsupported', ...(handledBy.length ? { handledBy } : {}) }];
+  }));
 }

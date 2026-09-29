@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RPG Maker</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; background: #101014; color: #eee; font: 16px system-ui, sans-serif; }
+    main { position: fixed; inset: 0; display: grid; place-items: center; }
+    canvas { width: 100%; height: 100%; object-fit: contain; }
+    #status { position: fixed; top: 1rem; left: 1rem; right: 1rem; max-width: 28rem; padding: .8rem 1rem; background: #202028; border-radius: .5rem; z-index: 2; }
+    #status[hidden] { display: none; }
+    progress { width: 100%; }
+    #start { margin-top: .6rem; padding: .5rem 1rem; }
+    small { display: block; margin-top: .5rem; color: #aaa; }
+  </style>
+</head>
+<body>
+  <main><canvas id="game"></canvas></main>
+  <section id="status" role="status"><div id="message">Loading game…</div><progress id="progress"></progress><button id="start" hidden>Start game</button><small>Arrows move · Enter / Space / Z confirm · Esc / X cancel · Shift dash</small></section>
+  <script src="nostalgist.umd.js"></script>
+  <script src="rgss-player.js"></script>
+</body>
+</html>

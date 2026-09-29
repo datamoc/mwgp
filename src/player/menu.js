@@ -12,7 +12,11 @@
 //   * Equip  - per slot: what can be equipped (slot type + the class's weapon/armor type traits), swapping with
 //              the inventory, stats clamped afterwards; "Unequip" empties a slot;
 //   * Status - level, class, HP/MP, experience to next level, the eight parameters, equipment and states;
+//   * Formation - RPG Maker's party reorder (the first `hooks.maxBattleMembers` fight, the rest wait in reserve) plus this
+//              player's own choice of battlefield layout (line, triangle, square, ... see formation.js), through
+//              `hooks.formation = { get(), set(name) }`; shown only when supplied (Change Formation Access can hide it);
 //   * Save / Options / Game End go through `hooks` (save, options, toTitle), shown only when supplied.
+import { FORMATION_NAMES, FORMATION_LABELS, layoutFormation } from './formation.js';
 import { ActorBattler, createPicker, createRules, battleText, expForLevel, format } from './battle.js';
 
 const DEATH_STATE = 1;
@@ -155,11 +159,38 @@ export async function runMenu({ database, records, party, items, weapons, armors
     await say([[2, 3, 4, 5].map(id => `${names[id]} ${actor.param(id)}`).join('  '), [6, 7].map(id => `${names[id]} ${actor.param(id)}`).join('  '), `${command(6, 'Equip')}: ${equipment}`, `State: ${states}`]);
   };
 
+  // ---- formation: order and layout ----------------------------------------------------------------
+  const formationScreen = async () => {
+    const fighting = Math.max(1, Number(hooks.maxBattleMembers || 4));
+    const rowsText = name => layoutFormation(name, Math.min(party.length, fighting)).reduce((rows, slot) => { rows[slot.row] = (rows[slot.row] || 0) + 1; return rows; }, []).join('-');
+    for (;;) {
+      const layout = hooks.formation.get();
+      const chosen = await pick(command(8, 'Formation'), [
+        { label: `Change order`, kind: 'order' },
+        { label: `Layout: ${FORMATION_LABELS[layout] || layout} (${rowsText(layout)})`, kind: 'layout' }
+      ]);
+      if (!chosen) return;
+      if (chosen.kind === 'layout') {
+        const shape = await pick('Layout (front-to-back rows)', FORMATION_NAMES.map(name => ({ label: `${FORMATION_LABELS[name] || name}  ${rowsText(name)}${name === layout ? ' ◀' : ''}`, name })));
+        if (shape) hooks.formation.set(shape.name);
+        continue;
+      }
+      if (party.length < 2) { await say(['Only one member.']); continue; }
+      const members = () => party.map((id, index) => ({ label: `${index + 1}. ${battlerFor(id).name}${index >= fighting ? ' (reserve)' : ''}`, index }));
+      const first = await pick('Move whom?', members());
+      if (!first) continue;
+      const second = await pick('Swap with?', members().filter(entry => entry.index !== first.index));
+      if (!second) continue;
+      [party[first.index], party[second.index]] = [party[second.index], party[first.index]];
+    }
+  };
+
   // ---- the main menu -----------------------------------------------------------------------------
   for (;;) {
     const rows = [
       { label: command(4, 'Item'), run: itemScreen }, { label: command(5, 'Skill'), run: skillScreen },
       { label: command(6, 'Equip'), run: equipScreen }, { label: command(7, 'Status'), run: statusScreen },
+      ...(hooks.formation ? [{ label: command(8, 'Formation'), run: formationScreen }] : []),
       ...(hooks.save ? [{ label: command(9, 'Save'), run: async () => { await hooks.save(); await say([command(9, 'Save')]); } }] : []),
       ...(hooks.load ? [{ label: command(18, 'Load'), run: hooks.load }] : []),
       ...(hooks.options ? [{ label: command(11, 'Options'), run: hooks.options }] : []),

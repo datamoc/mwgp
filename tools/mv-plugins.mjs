@@ -7,7 +7,11 @@
 //      names it defines: column-0 `var/let/const/function/class` names, and
 //      `Class.prototype.member =` / `Class.member =` assignments;
 //   2. a plugin is selected when it defines a name that appears in an event
-//      script (`referenced` identifiers);
+//      script (`referenced` identifiers), when it handles a plugin-command word
+//      the events use (MV 356: it hooks the command dispatch and names the word
+//      as a whole token anywhere in its source, which covers words its code
+//      builds at run time since plugins document their commands in their
+//      `@help` header), or when it is the plugin an MZ 357 command names;
 //   3. selection closes over plugins defining a top-level name the selected
 //      plugins mention (bounded by `depth` and `maxBytes`).
 //
@@ -47,7 +51,13 @@ async function engineNames(gameRoot) {
   return { top, members };
 }
 
-export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, { depth = 3, maxBytes = 40 * 1024 * 1024, log = () => {} } = {}) {
+// A plugin that hooks the engine's plugin-command dispatch can handle command words (through any alias of
+// Game_Interpreter, e.g. `var _GI = Game_Interpreter; _GI.prototype.pluginCommand = ...`).
+const HOOKS_COMMANDS = /\.prototype\.pluginCommand\s*=(?!=)|\bPluginManager\.registerCommand\s*\(/;
+const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const mentionsWord = (source, word) => new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(word)}(?![A-Za-z0-9_$])`, 'i').test(source);
+
+export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, { commandWords = [], commandPlugins = [], depth = 3, maxBytes = 40 * 1024 * 1024, log = () => {} } = {}) {
   const entries = [];
   try {
     const list = JSON.parse(pluginsText.slice(pluginsText.indexOf('['), pluginsText.lastIndexOf(']') + 1));
@@ -55,7 +65,9 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
   } catch { return null; }
   const referenced = new Set();
   for (const source of scriptSources) for (const token of String(source).match(IDENT) || []) referenced.add(token);
-  if (!referenced.size) return null;
+  const words = new Set([...commandWords].map(String).filter(Boolean));
+  const namedPlugins = new Set([...commandPlugins].map(String).filter(Boolean));
+  if (!referenced.size && !words.size && !namedPlugins.size) return null;
 
   const engine = await engineNames(gameRoot);
   const plugins = [];
@@ -69,8 +81,13 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
     plugins.push({ name: item.name, parameters: item.parameters || {}, description: item.description || '', source, ...index });
   }
   const selected = new Set();
+  const handles = new Map();
   for (const plugin of plugins) {
     if ([...plugin.top].some(name => referenced.has(name)) || [...plugin.members].some(name => referenced.has(name))) selected.add(plugin.name);
+    if (namedPlugins.has(plugin.name)) selected.add(plugin.name);
+    if (!words.size || !HOOKS_COMMANDS.test(plugin.source)) continue;
+    const handled = [...words].filter(word => mentionsWord(plugin.source, word));
+    if (handled.length) { selected.add(plugin.name); handles.set(plugin.name, handled); }
   }
   const direct = selected.size;
   const definer = new Map();
@@ -99,6 +116,15 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
     descriptions[plugin.name] = plugin.description;
   }
   log(`plugin library: ${order.length}/${plugins.length} plugins (${direct} directly referenced, ${Math.round(bytes / 1024)} KiB)`);
+  // Which shipped plugin handles which plugin-command word (lowercased key), for the compatibility report.
+  const commandHandlers = {};
+  for (const [name, handled] of handles) {
+    if (!order.includes(name)) continue;
+    for (const word of handled) {
+      const list = commandHandlers[word.toLowerCase()] ||= [];
+      if (!list.includes(name)) list.push(name);
+    }
+  }
   // The engine's own logic files (no scenes/sprites/windows): the Game_* objects the
   // plugins extend, so plugin code runs against real classes instead of stubs.
   const engineSources = {};
@@ -109,7 +135,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
       if (existsSync(path)) { engineSources[`${prefix}_${base}`] = await readFile(path, 'utf8'); break; }
     }
   }
-  return { order, sources, parameters, descriptions, engine: [...engine.top].sort(), engineSources, stats: { total: plugins.length, direct, selected: order.length, bytes } };
+  return { order, sources, parameters, descriptions, engine: [...engine.top].sort(), engineSources, commandHandlers, stats: { total: plugins.length, direct, selected: order.length, bytes } };
 }
 
 // The sources are the bulk of the library (Karryn's Prison: ~14 MB of a 26 MB manifest). Written as

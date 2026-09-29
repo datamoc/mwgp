@@ -110,6 +110,29 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
 
 ## Recent (coord-tracked)
 
+- **0.2.0 — Engine command parity pass (done, 2026-09-28).** Compared `convertCommand` with every
+  `Game_Interpreter.commandNNN` of the real MV (`rpg_objects.js`) and MZ (`rmmz_objects.js`) engines: both define the same
+  112 codes plus 357. 25 of the 33 unconverted ones are now converted (134-140, 216, 217, 124 + the timer condition, 132/133/139,
+  206, 261, 281, 312/315/317/320/323/324/325/326, 339, 354); 104, 233, 282-285, 337, 340, 342 remain loud unsupported markers.
+  Usage across the installed games (maps + common events + troops) found two used codes: 339 Force Action (2x, Karryn's
+  Prison) and 135 Change Menu Access (8x, same game), which the converter had dropped as a no-op on a stale premise.
+  Also fixed a real bug: 322 is Change Actor Images, but was stored as the actor's profile. Battles now play the battle BGM and
+  victory/defeat ME. Covered by the routing table, an 18-check MZ probe and a Force Action battle test in `npm test`; the
+  MWGP player was booted, saved, menu-walked and fought in Chromium on a fresh Elementals conversion. Manifests made before
+  0.2.0 need reconversion to pick up the new codes.
+  Second pass, same release: 104 select item, 233 rotate picture, 285 location info, 283 battleback, 340 abort battle, 334 enemy
+  recover all and 342 enemy TP; fixed the enemy-command numbering (333 was read as TP, 334 as a state change: Karryn's Prison uses 333
+  12x). Only 282 and 284 stay unsupported (no MV parallax renderer, no run-time tileset swap; no installed game uses them). Karryn's
+  Prison, converted with assets, boots, saves, walks the menu and wins a battle in Chromium with no console errors.
+  Battle engine, same release: TP (initial roll, Preserve TP, damage charge, TRG, tpCost/tpGain), counter attacks, magic reflection
+  and the Substitute flag, in `BattleManager.invokeAction` order; 6 new checks in `npm test`. Still open: battle animations and
+  motion, a Formation scene, MV parallax and run-time tileset swap (282/284), the graphical menu windows.
+  Follow-up, same release: closed the Formation scene (order + nine layouts with row modifiers), damage popups / hit motion /
+  database battle animations, MV parallax and 284. Verified by 30 battle+menu checks and a real-browser screenshot (popup "10"
+  over the enemy, attacker stepping forward). Also closed (0.2.0): the game's own font, engine-coloured HP/MP/TP gauges in a battle status panel, animated actor poses (18 motions) and stale-manifest handling
+  (stamp, launcher badge, player banner, convert:auto --stale). Closed the same day: run-time tileset swap (282, live-checked: state and position carried, parallax showing through the new
+  tileset's empty tiles) and Window.png skinned windows (screenshot-checked). Every command code is converted or documented partial;
+  remaining differences are visual polish (fonts, gauges, battle side-view poses) rather than missing features.
 - **T126 — Browser smoke harness wired into npm test (done).** `tools/test-smoke.mjs` spawns
   `tools/test-browser.mjs` as its last section (30-minute cap, output streamed, summary pinned as a
   `browser harness ok (...)` note), so regressions are caught without a manual run. `MWGP_BROWSER=0`

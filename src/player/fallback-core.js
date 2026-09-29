@@ -81,8 +81,7 @@ export class MwgPlayer {
   }
   async runConvertedPage(page, event) {
     const commands = this.prepareFallbackCommands(page.commands || []);
-    this.warnFallbackGaps(page, event);
-    const runner = () => new this.rpg.EventRunner({ game: this.gameState, present: request => this.present(request) });
+    const runner = () => this.newRunner(event);
     try {
       if (page.story) {
         const passages = Object.fromEntries(Object.entries(page.story.passages || {}).map(([name, body]) => [name, this.prepareFallbackCommands(body)]));
@@ -94,7 +93,7 @@ export class MwgPlayer {
   }
   // Rewrite the converted commands the fallback can execute into runner-native
   // shapes ({call} closures); everything else passes through to EventRunner,
-  // which runs its native subset and ignores the rest (warned by warnFallbackGaps).
+  // which runs its native subset and reports the rest through `onUnknownCommand`.
   prepareFallbackCommands(commands) {
     return (commands || []).map(command => {
       if (command.transfer) {
@@ -112,7 +111,7 @@ export class MwgPlayer {
         const preparedCancel = this.prepareFallbackCommands(cancelBranch || []);
         return { call: async () => {
           const chosen = await this.present({ text: command.ask, speaker: command.speaker, portrait: command.portrait, choices: command.choices });
-          const runBranch = async body => { const nested = new this.rpg.EventRunner({ game: this.gameState, present: request => this.present(request) }); await nested.runList(body); };
+          const runBranch = body => this.newRunner(this.currentEvent).run(body);
           if (chosen === CANCEL) { if (preparedCancel.length) await runBranch(preparedCancel); return; }
           const index = (command.choices || []).findIndex(choice => valueOfChoice(choice) === chosen);
           if (index >= 0 && preparedBranches[index]) await runBranch(preparedBranches[index]);
@@ -123,30 +122,21 @@ export class MwgPlayer {
       return command;
     });
   }
-  // EventRunner silently ignores commands outside its native subset, so name
-  // them once per page instead: the fallback has no scene, sound, or battle
-  // layer for pictures, audio, menus, or engine scripts.
-  warnFallbackGaps(page, event) {
-    const key = `${this.mapEntry?.id}:${event?.id}`;
-    if (this.warnedPages.has(key)) return;
-    this.warnedPages.add(key);
-    const kinds = new Set();
-    const scan = commands => (commands || []).forEach(command => {
-      const kind = Object.keys(command)[0];
-      if (!NATIVE_COMMANDS.has(kind)) kinds.add(kind);
-      if (command.if) { scan(command.then); scan(command.else); }
-    });
-    scan(page.commands);
-    for (const body of Object.values(page.story?.passages || {})) scan(body);
-    for (const body of Object.values(page.branches || {})) scan(body);
-    if (page.cancelBranch) scan(page.cancelBranch);
-    if (kinds.size) console.warn(`MWGP fallback renderer skips unsupported commands on event ${event?.id} (map ${this.mapEntry?.id}): ${[...kinds].join(', ')}`);
+  // The fallback has no scene, sound, or battle layer for pictures, audio, menus, or engine
+  // scripts, nor a move driver: EventRunner reports each command it cannot run (mw_games >= 0.22
+  // `onUnknownCommand`) and the fallback names it once per event instead of dropping it silently.
+  newRunner(event) {
+    this.currentEvent = event;
+    const gap = kind => {
+      const key = `${this.mapEntry?.id}:${event?.id}:${kind}`;
+      if (this.warnedPages.has(key)) return;
+      this.warnedPages.add(key);
+      console.warn(`MWGP fallback renderer skips unsupported command "${kind}" on event ${event?.id} (map ${this.mapEntry?.id})`);
+    };
+    return new this.rpg.EventRunner({ game: this.gameState, present: request => this.present(request), move: () => gap('move'), onUnknownCommand: command => gap(Object.keys(command)[0]) });
   }
   render() { const width=this.canvas.width=this.project.display?.width||816,height=this.canvas.height=this.project.display?.height||624,ctx=this.ctx; ctx.fillStyle='#10131b';ctx.fillRect(0,0,width,height);if(!this.map)return;const renderX=this.player.moving?this.player.fromX+(this.player.toX-this.player.fromX)*this.player.moveProgress:this.player.x,renderY=this.player.moving?this.player.fromY+(this.player.toY-this.player.fromY)*this.player.moveProgress:this.player.y,cols=Math.ceil(width/this.tileSize)+1,rows=Math.ceil(height/this.tileSize)+1,ox=Math.max(0,Math.min(this.map.width-cols,renderX-Math.floor(cols/2)))*this.tileSize,oy=Math.max(0,Math.min(this.map.height-rows,renderY-Math.floor(rows/2)))*this.tileSize;for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){const mx=x+ox/this.tileSize,my=y+oy/this.tileSize;if(mx>=this.map.width||my>=this.map.height)continue;const tile=this.map.data?.[my*this.map.width+mx]||0;ctx.fillStyle=tileColor(tile);ctx.fillRect(x*this.tileSize-ox%this.tileSize,y*this.tileSize-oy%this.tileSize,this.tileSize+1,this.tileSize+1);}const px=renderX*this.tileSize-ox+this.tileSize/2,py=renderY*this.tileSize-oy+this.tileSize/2;ctx.fillStyle='#f3c969';ctx.beginPath();ctx.arc(px,py,10,0,Math.PI*2);ctx.fill();if(this.dialogue){ctx.fillStyle='rgba(12,15,24,.94)';ctx.fillRect(24,height-150,width-48,126);ctx.strokeStyle='#829bff';ctx.strokeRect(24,height-150,width-48,126);ctx.fillStyle='#fff';ctx.font='18px sans-serif';this.dialogue.text.split('\n').forEach((line,i)=>ctx.fillText(line,44,height-112+i*26));this.dialogue.choices.forEach((choice,i)=>ctx.fillText(`${i===this.dialogue.index?'▶ ':'  '}${choice?.text ?? choice}`,44,height-112+(this.dialogue.text.split('\n').length+i)*26));} }
 }
-// Commands EventRunner executes natively (move needs a scene move driver the
-// fallback has not got, so it is reported as skipped instead of passing through).
-const NATIVE_COMMANDS = new Set(['say','ask','wait','setSwitch','setVariable','addVariable','if','goto','call']);
 const CANCEL = Symbol('mwgp-fallback-cancel');
 const valueOfChoice = choice => choice?.value ?? choice?.text ?? choice;
 function directionBit(dx, dy){ if(dy>0)return 0x01; if(dx<0)return 0x02; if(dx>0)return 0x04; return 0x08; }

@@ -582,7 +582,7 @@ for (const __mwgp_part of __mwgp_parts) {
 }
 
 // snippets: array of Ruby sources. Returns the manifest's `rubyLibrary` section.
-export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = console.log, index = null } = {}) {
+export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = console.log, index = null, onUnit = null } = {}) {
   if (!index) { log(`library: indexing ${scripts.length} scripts`); index = indexScripts(scripts, log); }
   setKnownMethods(index.allDefNames);
   {
@@ -611,6 +611,9 @@ export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = 
   // built-in objects must expose exactly those names as functions (see rgss-script.js).
   const out = { interpreter: index.interpreter, interpreterMethods: [...index.interpreterMethods], methods: [...new Set([...index.allDefNames].map(name => String(name).replace(/[?!]$/, '')))], textFilters, units: {}, failed: {}, partial: {} };
   let done = 0;
+  // Units differ wildly in cost (a one-line registration vs a whole battle class): progress is weighed by source size.
+  const unitSize = name => (index.units.get(name)?.pieces || []).reduce((sum, piece) => sum + String(piece.text || '').length, 0) || 1;
+  const totalSize = onUnit ? [...depths.keys()].reduce((sum, name) => sum + unitSize(name), 0) : 0;
   for (const [name] of depths) {
     // Ruby2JS drops `?`/`!` from method names, so units are keyed by their JS name.
     const outputName = name.replace(/[?!]$/, '');
@@ -633,6 +636,11 @@ export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = 
       } else out.failed[name] = String(error?.message || error).split('\n')[0].slice(0, 160);
     }
     if (++done % 25 === 0) log(`library: ${done}/${depths.size} units (${Object.keys(out.failed).length} failed)`);
+    if (onUnit) {
+      onUnit({ name, size: unitSize(name), totalSize });
+      // Let progress output flush while the (synchronous) transpile runs.
+      if (done % 10 === 0) await new Promise(resolve => setImmediate(resolve));
+    }
   }
   out.boot = (index.bootNames || []).filter(name => out.units[name]);
   out.bootStatements = (index.bootStatementNames || []).filter(name => out.units[name]);

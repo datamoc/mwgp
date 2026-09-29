@@ -19,14 +19,23 @@ Open http://127.0.0.1:4173. The launcher scans `RPGM_versions/` and recognizes:
 The current sample folders are detected automatically. `npm run scan` prints the detected catalog as JSON.
 
 Convert every game in a source folder at once (MV/MZ convert with decoded
-assets; extracted or raw RGSS projects convert via `convert-rgss.js`,
-extracting `Game.rgssad` to a temp dir first; anything else is skipped with a
-reason). Add `--skip-existing` to leave projects that already have an
-`mwgp.json` alone:
+assets; extracted or raw RGSS projects build a browser player around their own files;
+anything else is skipped with a reason). Add `--mwgp` to use the MWGP converters
+for all engines, or `--skip-existing` to leave existing builds alone:
 
 ```powershell
 npm run convert:auto -- "RPGM_versions" "MWGP_versions"
 ```
+
+For an individual XP/VX/Ace project, `npm run build:web -- <project> <output>`
+packages its files in a stored `.mkxpz` archive and adds our mkxp-z player page.
+The first build downloads a SHA-256 pinned core into the gitignored cache.
+See [RGSS web builds](docs/rgss-web-build.md) for provenance, browser requirements,
+controls and verification limits.
+
+For MV/MZ web builds, loose files in a project-level `mods/` folder beside `www/`
+are copied into the build's `mods/` directory and indexed for the game's file API.
+Files already under `www/mods/` are copied as part of the web root.
 
 Convert a single MV project:
 

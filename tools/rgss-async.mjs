@@ -15,9 +15,6 @@ import { repairCallAssignments } from './rgss-repair.mjs';
 import { JS_NATIVE_ZERO_ARG_PROPERTIES } from './rgss-call-filter.mjs';
 
 export const BLOCKING = new Set(['Graphics.update', 'Graphics.wait']);
-// Helpers the runtime provides as async builtins (dialogue-backed), so anything calling them is lifted whether or not the
-// game's own definition looks blocking.
-export const ASYNC_BUILTINS = ['pbMessage', 'pbConfirmMessage', 'pbConfirmMessageSerious'];
 
 const parse = js => acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true });
 
@@ -137,7 +134,7 @@ function asyncNamesOf(parsed) {
   //  * keyed (`keyedStrong`): every definition ATTRIBUTED TO one class is async (`TrainerBattle.generate_foes` while a
   //    same-named `WildBattle.generate_foes` stays sync). A call through that class name awaits; anything else falls
   //    back to the global rule.
-  const all = new Set(ASYNC_BUILTINS), strong = new Set(ASYNC_BUILTINS);
+  const all = new Set(), strong = new Set();
   const keyedStrong = new Set();
   const bodies = [];
   const totals = new Map();
@@ -700,6 +697,15 @@ export function lowerRuby(js, known = null, zeroArg = null, callModules = null) 
     if (node.type === 'BinaryExpression' && node.operator === '%') {
       const at = js.slice(node.left.end, node.right.start).indexOf('%');
       if (at >= 0) edits.push({ pos: node.start, text: '__mod(' }, { pos: node.left.end + at, del: 1, text: ',' }, { pos: node.end, text: ')' });
+    }
+    // A Ruby block is emitted as an arrow that declares its own `_implicitBlockYield=null`, shadowing the method's: in
+    // Ruby, `yield` inside a block is the enclosing method's block, so the arrow must not declare one.
+    if (node.type === 'ArrowFunctionExpression') {
+      const at = node.params.findIndex(param => param.type === 'AssignmentPattern' && param.left.type === 'Identifier' && param.left.name === '_implicitBlockYield');
+      if (at >= 0) {
+        const from = at > 0 ? node.params[at - 1].end : node.params[at].start;
+        edits.push({ pos: from, del: node.params[at].end - from, text: '' });
+      }
     }
     // `defined?(name)` arrives as `typeof name() !== 'undefined'`, which calls the function with no arguments (and runs
     // it): it is a probe, so drop the call.

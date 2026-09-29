@@ -138,7 +138,7 @@ function installRubyCore() {
   define(Array.prototype, 'delete_if', function (block) { for (let index = this.length - 1; index >= 0; index--) if (block(this[index])) this.splice(index, 1); return this; });
   define(Object.prototype, 'dup', dup);
   define(Object.prototype, 'clone', dup);
-  // Essentials uses Object#defined? to probe optional methods and properties.
+  // Ruby code uses Object#defined? to probe optional methods and properties.
   // Ruby2JS lowers that probe to .defined(name); keep it side-effect-light
   // and compatible with the module/object proxies used by the browser shim.
   define(Object.prototype, 'defined', function (name) {
@@ -395,33 +395,6 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     item_number: id => scene.rpgExtra.items[id] || 0,
     get actors() { return reader('actors', () => scene.rpgExtra.party.map(id => ({ id }))); }
   };
-  const questId = id => String(id ?? '').replace(/^:/, '');
-  const questRecord = id => {
-    const key = questId(id);
-    if (!key) return null;
-    scene.rpgExtra.quests ||= {};
-    return scene.rpgExtra.quests[key] ||= { active: false, completed: false, objectives: {} };
-  };
-  const startQuest = id => { const quest = questRecord(id); if (!quest) return false; quest.active = true; return true; };
-  const completeQuest = id => { const quest = questRecord(id); if (!quest) return false; quest.active = true; quest.completed = true; return true; };
-  const questComplete = id => scene.rpgExtra.quests?.[questId(id)]?.completed === true;
-  const namedItemId = id => String(id ?? '').replace(/^:/, '');
-  const namedItemCount = id => scene.rpgExtra.namedItems?.[namedItemId(id)] || 0;
-  const giveNamedItem = (id, amount = 1) => {
-    const key = namedItemId(id);
-    if (!key) return false;
-    scene.rpgExtra.namedItems ||= {};
-    scene.rpgExtra.namedItems[key] = Math.max(0, namedItemCount(key) + Number(amount || 0));
-    if (!scene.rpgExtra.namedItems[key]) delete scene.rpgExtra.namedItems[key];
-    return true;
-  };
-  const addNamedPokemon = (species, level = 1) => {
-    const key = namedItemId(species);
-    if (!key) return false;
-    scene.rpgExtra.namedParty ||= [];
-    scene.rpgExtra.namedParty.push({ species: key, level: Number(level) || 1 });
-    return true;
-  };
 
   // RGSS `Audio` module (XP/VX/Ace; volume and pitch default to 100, fades are in milliseconds).
   const rgssAudio = {
@@ -620,14 +593,6 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     })
   });
   const builtins = {
-    // Essentials exposes the player as `$player`; keep the object
-    // stateful even when the export has no full Essentials database. A stable
-    // default character id gives gender/pronoun helpers a safe startup value.
-    $player: openObject("player", {
-      get character_ID() { return rgss().data["player.character_ID"] ?? 1; },
-      get name() { return rgss().data["player.name"] ?? "Player"; },
-      get trainer_type() { return rgss().data["player.trainer_type"] ?? "PLAYER"; }
-    }),
     $game_switches: keyed(key => current.state.game.switch(key), (key, value) => current.state.game.setSwitch(key, Boolean(value))),
     // Variables store raw values like MV/XP (a script can keep a string: Ruby's
     // `slice!` returns one). Readers coerce to Number where they do arithmetic.
@@ -676,24 +641,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       get height() { return reader('height', () => 480); }
     },
     Audio: rgssAudio,
-    // Essentials' message helpers, backed by the player's own dialogue box. The game's `pbMessage` drives inert window
-    // shims and can never return a choice; these await the real box, which needs the async lift (a script that reaches
-    // them is lifted like any that waits on frames). `cmdIfCancel`: >0 returns cmdIfCancel-1 on cancel, <0 returns it.
-    pbMessage: async (message, commands = null, cmdIfCancel = 0, skin = null, defaultCmd = 0) => {
-      const text = String(message ?? '');
-      const list = Array.isArray(commands) ? commands.map(String) : null;
-      const answer = await resumeAfter(scene.presentDialogue({ text, ...(list ? { choices: list.map((label, index) => ({ text: label, value: index })) } : {}) }));
-      if (!list) return 0;
-      if (answer === undefined || answer === null) return cmdIfCancel > 0 ? cmdIfCancel - 1 : cmdIfCancel < 0 ? cmdIfCancel : Number(defaultCmd) || 0;
-      return Number(answer);
-    },
-    pbConfirmMessage: async message => (await builtins.pbMessage(message, ['Yes', 'No'], 2)) === 0,
-    pbConfirmMessageSerious: async message => (await builtins.pbMessage(message, ['Yes', 'No'], 2, null, 1)) === 0,
     // Ruby's modulo takes the divisor's sign (the converter rewrites every `a % b` to `__mod(a, b)`).
     __mod: (left, right) => (typeof left === 'number' && typeof right === 'number' ? ((left % right) + right) % right : left % right),
-    // Essentials' `validate({value => [Classes]})` is a debug-time type check that raises on a mismatch; the JS value
-    // classes differ from Ruby's (Integer, Symbol, ...), so it would reject valid calls. It has no effect on game logic.
-    validate: () => {},
     // Ruby's extend/include: the module's methods fill in what the class does not define itself (the converter rewrites
     // `Object.defineProperties(X, Object.getOwnPropertyDescriptors(M))` to this).
     // `::Name` from inside a namespace: the sandbox's own global lookup (builtins, then the game's units).
@@ -749,28 +698,6 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     }),
     Dir: reopenedBuiltin('Dir', { glob: fsGlob, exist: path => fsDirs.has(fsPath(path).toLowerCase()), exists: path => fsDirs.has(fsPath(path).toLowerCase()), entries: dir => ['.', '..', ...fsChildren(dir)], children: fsChildren, each_child: (dir, block) => fsChildren(dir).forEach(block), pwd: () => '.' }),
     FileTest: reopenedBuiltin('FileTest', { exist: fsExists, exists: fsExists, file: path => fsFiles.has(fsPath(path).toLowerCase()), directory: path => fsDirs.has(fsPath(path).toLowerCase()), readable: fsExists }),
-    // Essentials' RTP resolver is filesystem-backed in RGSS.  The browser
-    // converter already serves assets through MWGP URLs, so expose the same
-    // callback shape without letting the transpiled `eachPath` block call
-    // escape into an unbound `_implicitBlockYield`.
-    RTP: {
-      // The game's own paths resolve against the project file index (`fileIndex`): the callback gets the path as given, and the
-      // game's own existence checks (`FileTest.exist`, `File.open`) answer from the index.
-      eachPathFor: (filename, callback) => {
-        if (!filename || typeof callback !== 'function') return;
-        // Only a path that exists (as given, or with an image/audio extension) is yielded: no file, no callback.
-        if (['', '.png', '.gif', '.jpg', '.jpeg', '.bmp', '.ogg', '.wav', '.mid', '.midi', '.mp3'].some(extension => fsExists(String(filename) + extension))) callback(String(filename));
-        else warnOnce(`RTP file ${filename}`, 'is not among the project files (a resource lookup will come back empty)');
-      },
-      eachPath: callback => {
-        if (typeof callback === 'function') callback('./');
-      },
-      // Nothing lives in a runtime package here (`RTP.exists?`): the game ships its own assets.
-      exists: () => false,
-      getPath: filename => filename,
-      getImagePath: filename => filename,
-      getAudioPath: filename => filename
-    },
     // Reflection used by "define only if missing" idioms at module/class top level: nothing is defined.
     method_defined: () => false, private_method_defined: () => false,
     rand: (max = 0) => max ? Math.floor(Math.random() * Number(max)) : Math.random(),
@@ -824,21 +751,6 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     $gameActors: openObject('actors', { actor: id => openObject(`actor.${id}`, { actorId: () => Number(id) }, 'Game_Actor', true) }),
     $dataItems: mvItems, $dataWeapons: mvItems, $dataArmors: mvItems,
     $gameSystem: openObject('system', {}, 'Game_System'), $gameTemp: openObject('temp', {}, 'Game_Temp'), $gameScreen: openObject('screen', {}, 'Game_Screen')
-  };
-  // Engine-framework helpers (Pokémon Essentials-style `pb*` names) used only
-  // when the game's own library does not define the name: consulted after the
-  // library and before the warning stub, so a game's real implementation wins.
-  const fallbacks = {
-    // Pokémon Essentials' quest helpers are small state operations in the
-    // event corpus; keep them deterministic even when the full UI plugin is
-    // unavailable. Unknown quest ids remain ordinary data, not false stubs.
-    pbStartQuest: startQuest,
-    pbCompleteQuest: completeQuest,
-    pbQuestComplete: questComplete,
-    pbItemBall: id => giveNamedItem(id, 1),
-    pbReceiveItem: (id, amount = 1) => giveNamedItem(id, amount),
-    pbCheckItem: id => namedItemCount(id) > 0,
-    pbAddPokemon: addNamedPokemon
   };
   const dialectBuiltins = () => dialect === 'mv' ? mvBuiltins : builtins;
 
@@ -1020,7 +932,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         const source = String(record.load_value);
         const target = /[$]([A-Za-z_0-9]+)\s*=/.exec(source)?.[1];
         // Values the runtime already stands in for with its own objects (switches, variables, map, ...) keep those.
-        if (target && `$${target}` !== '$player' && `$${target}` in builtins) continue;
+        if (target && `$${target}` in builtins) continue;
         if (saved[id] !== undefined) record.load_value(decodeState(saved[id]));
         else if (typeof record.new_game_value === 'function') record.load_value(record.new_game_value());
       } catch (error) { console.warn(`MWGP save-data value "${id}" could not be set up: ${String(error?.message || error).slice(0, 160)}`); }
@@ -1094,6 +1006,9 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       publish('$gameParty', party);
       if (typeof G.Game_Actors === 'function') publish('$gameActors', new G.Game_Actors());
       if (typeof G.Game_Troop === 'function') publish('$gameTroop', new G.Game_Troop());
+      // During map play the engine always has a current scene; plugins reach through it (`SceneManager._scene._windowLayer`).
+      // The scene layer is not loaded, so it is an inert map scene with an empty window layer.
+      if (G.SceneManager && !G.SceneManager._scene) G.SceneManager._scene = { _windowLayer: { children: [] }, _active: true, isActive: () => true };
       restoreEngine(publish);
     } catch (error) {
       console.warn(`MWGP engine object setup failed: ${String(error?.message || error).slice(0, 200)} ${describeThrow(error)}`);
@@ -1302,7 +1217,6 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       }
       const found = unit(key);
       if (found !== undefined) return found;
-      if (dialect !== 'mv' && Object.hasOwn(fallbacks, key)) return fallbacks[key];
       return stub(key);
     },
     set: (_, key, value) => { dialectBuiltins()[key] = value; return true; }
@@ -1342,7 +1256,7 @@ ${iterableLoops(js)}
 
   return {
     // What the shim implements, for tools/rgss-coverage.mjs: every built-in name with its own
-    // member names (getters are listed, not invoked), plus the framework fallbacks.
+    // member names (getters are listed, not invoked).
     introspect() {
       const own = value => {
         if (!value || (typeof value !== 'object' && typeof value !== 'function')) return [];
@@ -1351,7 +1265,6 @@ ${iterableLoops(js)}
       return {
         dialect,
         builtins: Object.fromEntries(Object.entries(dialectBuiltins()).map(([name, value]) => [name, { type: typeof value, members: own(value) }])),
-        fallbacks: Object.keys(fallbacks),
         // Every distinct call that hit the loud "not implemented" path so far (the remaining script gaps).
         warned: [...warned]
       };
@@ -1379,21 +1292,24 @@ ${iterableLoops(js)}
         return false;
       } finally { queue = null; snapshotEngine(); snapshotBoot(); }
     },
-    // Drop pending key edges (the key that opened a scene must not count as input inside it).
-    flushInput() { keyProbe?.update(); keyProbe?.update(); },
-    // Plugin Command (MV 356): the game's own `Game_Interpreter#pluginCommand` chain (each plugin aliases it), run on a
-    // real engine interpreter. Returns false when this runtime has no such interpreter (not MV, or no engine loaded).
-    pluginCommand(name, args, state, event) {
+    // Plugin Command: MV 356 runs the game's own `Game_Interpreter#pluginCommand` chain (each plugin aliases it); MZ 357
+    // (`plugin` given) runs the command that plugin registered (`PluginManager.callCommand`). Both on a real engine
+    // interpreter. Returns false when nothing can run it (not MV/MZ, no engine loaded, or no plugin registered the MZ command).
+    pluginCommand(name, args, state, event, { plugin, params } = {}) {
       if (dialect !== 'mv') return false;
       let Interpreter;
       try { Interpreter = unit('Game_Interpreter'); } catch { return false; }
-      if (typeof Interpreter !== 'function' || typeof Interpreter.prototype?.pluginCommand !== 'function') return false;
+      if (typeof Interpreter !== 'function') return false;
+      const manager = pluginGlobals.PluginManager;
+      const registered = plugin && typeof manager?.callCommand === 'function' && typeof manager._commands?.[`${plugin}:${name}`] === 'function';
+      if (!registered && typeof Interpreter.prototype?.pluginCommand !== 'function') return false;
       current = { state, event };
       queue = null;
       try {
         const interpreter = new Interpreter();
         interpreter._mapId = mapId; interpreter._eventId = event?.id ?? 0;
-        interpreter.pluginCommand(String(name), (args || []).map(String));
+        if (registered) manager.callCommand(interpreter, plugin, String(name), params || {});
+        else interpreter.pluginCommand(String(name), (args || []).map(String));
         snapshotEngine();
         return true;
       } catch (error) { console.error(`MWGP plugin command "${name}" failed`, error); return true; }

@@ -51,7 +51,9 @@ const allowed = new Set([
   'sound', 'turn',
   'screenFade', 'screenFlash', 'changeGold', 'changeItem', 'changeWeapon', 'changeArmor', 'changeParty',
   'setTransparent', 'routeThrough', 'routeImage', 'routeOption', 'eraseEvent', 'screenTint', 'screenShake', 'playBgm', 'fadeoutBgm', 'playBgs', 'fadeoutBgs',
-  'stopSound', 'script', 'pluginCommand', 'unsupported'
+  'stopSound', 'script', 'pluginCommand', 'unsupported',
+  'systemFlag', 'changeActorStat', 'changeActorText', 'changeActorImages', 'timer', 'vehicleBoard', 'playMovie', 'forceAction', 'returnToTitle',
+  'changeTileset', 'changeParallax', 'enemyRecoverAll', 'abortBattle', 'selectItem', 'rotatePicture', 'locationInfo'
 ]);
 // Frame geometry the converter measured from the original character sheets
 // ($-prefix grid rule + PNG dimensions). Optional for older manifests; when
@@ -128,7 +130,7 @@ function validateCommands(commands, eventId, mapId) {
         || command.if.gold !== undefined || command.if.item !== undefined || command.if.weapon !== undefined || command.if.armor !== undefined
         || command.if.actorName !== undefined || command.if.actorClass !== undefined || command.if.actorSkill !== undefined
         || command.if.actorWeapon !== undefined || command.if.actorArmor !== undefined || command.if.actorState !== undefined
-        || command.if.vehicle !== undefined || command.if.unsupported !== undefined,
+        || command.if.vehicle !== undefined || command.if.timer !== undefined || command.if.unsupported !== undefined,
         `if command in event ${eventId} on map ${mapId} has no supported condition`);
       if (command.if.operator) check(['eq', 'neq', 'gte', 'lte', 'gt', 'lt'].includes(command.if.operator),
         `if command in event ${eventId} on map ${mapId} has an invalid variable operator`);
@@ -179,7 +181,7 @@ function validateCommands(commands, eventId, mapId) {
       check(['set', 'add', 'subtract', 'multiply', 'divide', 'modulo'].includes(command.modifyVariable?.operation),
         `modifyVariable in event ${eventId} on map ${mapId} has an invalid operation`);
       const operand = command.modifyVariable?.operand;
-      if (operand?.gameData !== undefined) check(['itemCount', 'weaponCount', 'armorCount', 'playerX', 'playerY', 'partyMember', 'mapId', 'partySize', 'pokemonCount', 'gold'].includes(operand.gameData?.kind),
+      if (operand?.gameData !== undefined) check(['itemCount', 'weaponCount', 'armorCount', 'playerX', 'playerY', 'partyMember', 'mapId', 'partySize', 'gold'].includes(operand.gameData?.kind),
         `modifyVariable in event ${eventId} on map ${mapId} has an invalid game-data kind`);
       if (operand?.script !== undefined) check(typeof operand.script?.source === 'string',
         `modifyVariable in event ${eventId} on map ${mapId} has a script operand without a source string`);

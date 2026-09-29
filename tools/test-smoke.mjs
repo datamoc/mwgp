@@ -10,7 +10,7 @@
 //    real RPGM_versions/ + MWGP_versions/ trees.
 //
 // Usage: npm test
-import { readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -55,7 +55,29 @@ const convertedDirs = readdirSync(join(root, 'MWGP_versions'), { withFileTypes: 
 if (!convertedDirs.length) fail('MWGP_versions/ has no converted projects to smoke-test');
 for (const dir of convertedDirs) {
   const manifestPath = join(root, 'MWGP_versions', dir, 'mwgp.json');
-  if (!existsSync(manifestPath)) { notes.push(`${dir}: no mwgp.json, skipped`); continue; }
+  if (!existsSync(manifestPath)) {
+    // Web builds share metadata; MV/MZ use the nw.js host, RGSS packages a stored archive and mkxp-z player.
+    const webInfo = join(root, 'MWGP_versions', dir, 'mwgp-web.json');
+    if (existsSync(webInfo)) {
+      const info = JSON.parse(readFileSync(webInfo, 'utf8'));
+      if (info.source?.engine === 'rpg-maker-rgss') {
+        const archive = join(root, 'MWGP_versions', dir, 'game.mkxpz');
+        const ok = info.format === 'MWGP-web' && existsSync(archive) && existsSync(join(root, 'MWGP_versions', dir, 'rgss-player.js'))
+          && existsSync(join(root, 'MWGP_versions', dir, 'mkxp-z_libretro.wasm')) && info.archive?.bytes === statSync(archive).size;
+        if (!ok) fail(`${dir}: RGSS web build is malformed`);
+        else notes.push(`${dir}: RGSS web build ok (${info.source.files} files)`);
+        continue;
+      }
+      const html = readFileSync(join(root, 'MWGP_versions', dir, 'index.html'), 'utf8');
+      const hostAt = html.indexOf('nwjs-host.js'), firstDeferred = html.indexOf('data-mwgp-src');
+      const fileList = JSON.parse(readFileSync(join(root, 'MWGP_versions', dir, 'files.json'), 'utf8'));
+      if (info.format !== 'MWGP-web' || hostAt < 0 || (firstDeferred >= 0 && firstDeferred < hostAt) || /<script\b[^>]*(?<![-\w])src=/i.test(html.replace(/<script src="nwjs-host\.js"><\/script>/, ''))
+        || !existsSync(join(root, 'MWGP_versions', dir, 'nwjs-host.js')) || !Array.isArray(fileList) || fileList.length !== info.source?.files) {
+        fail(`${dir}: web build is malformed (host not first, a game script not deferred, or files.json out of sync)`);
+      } else notes.push(`${dir}: web build ok (${info.source.engine}, ${fileList.length} files)`);
+    } else notes.push(`${dir}: no mwgp.json, skipped`);
+    continue;
+  }
   try {
     execFileSync(process.execPath, [join(root, 'tools', 'validate-mwgp.js'), manifestPath], { stdio: 'pipe' });
   } catch (error) {
@@ -68,9 +90,8 @@ for (const dir of convertedDirs) {
     if (!pluginReport || Object.values(pluginReport).some(entry => !['supported', 'partial', 'unsupported'].includes(entry.status))) {
       fail(`${dir}: plugin family compatibility report is missing or malformed`);
     }
-    if (pluginReport?.Tachie && pluginReport.Tachie.status !== 'partial') {
-      fail(`${dir}: Tachie plugin family is not classified partial`);
-    }
+    const misrated = Object.entries(pluginReport || {}).filter(([, entry]) => (entry.status === 'partial') !== Boolean(entry.handledBy?.length));
+    if (misrated.length) fail(`${dir}: plugin families rated without a shipped handler (or the reverse): ${misrated.map(([name]) => name).slice(0, 5).join(', ')}`);
   }
   const used = new Set();
   const unknown = [];
@@ -95,8 +116,9 @@ for (const dir of convertedDirs) {
     const expectedBase = Number(format?.autotilePatternCount) * Number(format?.autotileImageCount);
     if (!format || !Number.isInteger(format.staticTileBase) || format.staticTileBase <= 0 || format.staticTileBase !== expectedBase) {
       fail(`${dir}: XP tileset format is missing or inconsistent`);
-    } else if (!project.assets?.autotiles || !project.playerSprite?.name || !Number.isFinite(project.player?.x) || !Number.isFinite(project.player?.y)) {
-      fail(`${dir}: XP manifest is missing decoded autotiles, player sprite, or start position`);
+    } else if (!project.assets?.autotiles || (project.playerSprite && !project.playerSprite.name) || !Number.isFinite(project.player?.x) || !Number.isFinite(project.player?.y)) {
+      // A null player sprite is allowed: the start actor's charset may not ship with the project.
+      fail(`${dir}: XP manifest is missing decoded autotiles or start position, or has a malformed player sprite`);
     } else {
       notes.push(`${dir}: XP format metadata, decoded autotiles, player sprite, and data-driven start position ok`);
     }
@@ -143,7 +165,7 @@ for (const dir of convertedDirs) {
   // Codes with a convertCommand/parseBlock translation (structural block codes
   // 102/111/112/117/355/204/402-404/411-413/505/655 included).
   const translated = ['0', '101', '102', '105', '108', '111', '112', '113', '115', '117', '118', '119', '121', '122', '123',
-    '125', '126', '127', '128', '129', '135', '201', '203', '204', '205', '211', '212', '213', '214', '221', '222',
+    '125', '126', '127', '128', '129', '132', '133', '134', '135', '136', '137', '138', '139', '140', '124', '206', '216', '217', '261', '281', '312', '315', '317', '320', '323', '324', '325', '326', '339', '354', '104', '233', '282', '283', '284', '285', '333', '334', '337', '340', '342', '201', '203', '204', '205', '211', '212', '213', '214', '221', '222',
     '223', '224', '225', '230', '231', '232', '234', '235', '241', '242', '243', '244', '245', '246', '249', '250', '251',
     '301', '313', '314', '318', '319', '322', '351', '352', '355', '356', '401', '402', '403', '404', '405', '408', '411',
     '412', '413', '505', '601', '602', '603', '604', '655'];
@@ -236,7 +258,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
 // prepareEventCommands is imported with a stub scene; each prepared `call`
 // is invoked and the receiving method is recorded.
 {
-  const { applyBuiltinPluginCommand, applyQuestPluginCommand, foregroundOrigin, normalizeDialogueMarkup, prepareEventCommands, resolveGameDataOperand, resolveTransferTarget, runBattleFallback, sanitizeMapPosition, selectForegroundLayer } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
+  const { foregroundOrigin, normalizeDialogueMarkup, prepareEventCommands, resolveGameDataOperand, resolveTransferTarget, runBattleFallback, sanitizeMapPosition, selectForegroundLayer } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
   const calls = [];
   const stub = new Proxy({}, { get: (_, method) => (...args) => { calls.push([method, args]); } });
   const state = { game: { variable: () => 3, setVariable: () => {} } };
@@ -265,6 +287,23 @@ else notes.push('RGSS label fallthrough order preserved ok');
     [{ changeSkill: { scope: 1, actor: 2, learn: true, skill: 7 } }, 'applyActor'],
     [{ changeEquipment: { actor: 2, slot: 1, item: 5 } }, 'applyActor'],
     [{ changeProfile: { actor: 2, profile: 'A hero' } }, 'applyActor'],
+    [{ systemFlag: { key: 'menuAccess', value: false } }, 'setSystemFlag'],
+    [{ changeActorStat: { stat: 'mp', scope: 1, actor: 1, amount: 5, sign: 1 } }, 'applyActorStat'],
+    [{ changeActorText: { actor: 1, field: 'name', text: 'Ann' } }, 'changeActorText'],
+    [{ changeActorImages: { actor: 1, characterName: 'Actor2', characterIndex: 1, faceName: '', faceIndex: 0, battlerName: '' } }, 'changeActorImages'],
+    [{ timer: { start: 30 } }, 'setTimer'],
+    [{ vehicleBoard: true }, 'boardVehicle'],
+    [{ playMovie: { name: 'intro' } }, 'playMovie'],
+    [{ forceAction: { subjectKind: 'enemy', subject: 0, skill: 1, target: -2 } }, 'forceAction'],
+    [{ returnToTitle: true }, 'returnToTitle'],
+    [{ rotatePicture: { id: 1, speed: 4 } }, 'rotatePicture'],
+    [{ changeTileset: { id: 2 } }, 'changeTileset'],
+    [{ changeParallax: { name: 'Sky', loopX: true, loopY: false, sx: 2, sy: 0 } }, 'changeParallax'],
+    [{ locationInfo: { variable: '1', info: 0, x: 2, y: 3 } }, 'locationInfo'],
+    [{ selectItem: { variable: '1', itemType: 1 } }, 'selectItem'],
+    [{ abortBattle: true }, 'abortBattle'],
+    [{ enemyRecoverAll: { index: -1 } }, 'enemyRecoverAll'],
+    [{ if: { timer: { seconds: 5, atLeast: true } }, then: [], else: [] }, 'runBranch'],
     [{ sound: { name: 'S', volume: 90, pitch: 100, pan: 0 } }, 'playSound'],
     [{ stopSound: true }, 'stopSound'],
     [{ playBgm: { name: 'B', volume: 90, pitch: 100, pan: 0 } }, 'playBgm'],
@@ -347,36 +386,10 @@ else notes.push('RGSS label fallthrough order preserved ok');
     else if (warnings.length) fail('a missing branch list warned like corrupt data');
     else notes.push('missing branch list prepares to nothing quietly ok');
   }
-  const quests = {};
-  const questChecks = [
-    [applyQuestPluginCommand(quests, { name: 'Quest', args: ['Add', '7'] }), quests['7']?.active === true],
-    [applyQuestPluginCommand(quests, { name: 'Quest', args: ['7', 'Show', 'Objective', '2'] }), quests['7']?.objectives['2']?.visible === true],
-    [applyQuestPluginCommand(quests, { name: 'Quest', args: ['7', 'Complete', 'Objective', '2'] }), quests['7']?.objectives['2']?.completed === true],
-    [applyQuestPluginCommand(quests, { name: 'Quest', args: ['Set', 'Completed', '7'] }), quests['7']?.completed === true],
-    [!applyQuestPluginCommand(quests, { name: 'OtherPlugin', args: ['7'] }), true]
-  ];
-  if (questChecks.every(([handled, state]) => handled && state)) notes.push('Quest plugin state adapter ok');
-  else fail('Quest plugin state adapter did not preserve active/objective/completed state');
-  const builtinPluginState = { plugin: { tachie: {} } };
-  const builtinChecks = [
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'DisableAutosave', args: [] }) && builtinPluginState.plugin.autosave === false,
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'MapScrollDisable', args: ['1'] }) && builtinPluginState.plugin.mapScrollDisabled === true,
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'MessageRows', args: ['6'] }) && builtinPluginState.plugin.messageRows === 6,
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'ChoiceRect', args: ['14', '20', '300', '120'] }) && builtinPluginState.plugin.choiceRect[2] === 300,
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'Tachie', args: ['showRight', '1', '0', '0', '80'] }) && builtinPluginState.plugin.tachie.right.visible === true,
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'FD_START_SITE', args: ['https://example.test'] }) && builtinPluginState.plugin.lastExternalSite === 'https://example.test',
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'RefreshMiniLabel', args: [] }) && builtinPluginState.plugin.miniLabel === true,
-    applyBuiltinPluginCommand(builtinPluginState, { name: 'STS', args: ['Open'] }) && builtinPluginState.plugin.skillTree.lastAction === 'Open',
-    !applyBuiltinPluginCommand(builtinPluginState, { name: 'UnknownPlugin', args: [] })
-  ];
-  if (builtinChecks.every(Boolean)) notes.push('built-in plugin state adapters ok');
-  else fail('built-in plugin state adapters did not preserve known command state');
   if (normalizeDialogueMarkup('a<br>b <i>c</i>') === 'a\nb *c*') notes.push('inline dialogue markup normalization ok');
   else fail('inline dialogue markup normalization changed styled text incorrectly');
   if (!playerCore.includes("like Karryn's `\\#`")) fail('player-core.js prints unknown text escapes instead of consuming them');
   else notes.push('unknown text escapes are consumed like the engine ok');
-  if (!playerCore.includes('convertExtraEscapeCharacters') || !playerCore.includes('gameTextConverter')) fail('player-core.js does not run the game text-code layer before the built-in escapes');
-  else notes.push('game text-code layer runs before built-in escapes ok');
   if (!playerCore.includes('_saveCount') || !playerCore.includes('promptSaveGame')) fail('player-core.js does not count engine saves or prompt for the save file');
   else notes.push('engine save count and save-file prompt ok');
   if (!playerCore.includes('refreshAutorunEvents')) fail('player-core.js never refreshes autorun events after a page finishes');
@@ -429,7 +442,6 @@ else notes.push('RGSS label fallthrough order preserved ok');
       const zeroArgModuleCall = rgss.evaluateValue({ source: 'Pronoun.title', js: 'return Pronoun.title();' }, { game }, events[0]);
       const rubyRegexReplace = rgss.evaluateValue({ source: '"a1 a2".gsub(/a\\d/, "x")', js: 'return "a1 a2".replaceAll(/a\\d/, "x");' }, { game }, events[0]);
       const fileExtname = rgss.evaluateValue({ source: 'File.extname("portrait.png")', js: 'return File.extname("portrait.png");' }, { game }, events[0]);
-      const rtpPath = rgss.evaluateValue({ source: 'RTP.eachPathFor("portrait.png") { |path| path }', js: 'let seen = null; RTP.eachPathFor("portrait.png", path => { seen = path; }); return seen;' }, { game }, events[0]);
       await run('PartialUnit.missing_method()');
       // Ruby2JS strips `?`/`!` from method names, so the manifest's method list
       // must carry the stripped form the player's shims look up at run time.
@@ -441,10 +453,9 @@ else notes.push('RGSS label fallthrough order preserved ok');
       let redefinedLoadsLastWins = (redefined.match(/function greet/g) || []).length === 1;
       try { redefinedLoadsLastWins &&= new Function('scope', `with (scope) {\n${redefined}\nreturn greet;\n}`)({})() === 2; }
       catch { redefinedLoadsLastWins = false; }
-      await run('pbStartQuest(:INTRO)');
-      const questStarted = scene.rpgExtra.quests?.INTRO?.active === true && test('pbQuestComplete?(:INTRO)') === false;
-      await run('pbCompleteQuest(:INTRO)');
-      await run('pbItemBall(:POTION)\npbReceiveItem(:ANTIDOTE, 2)\npbAddPokemon(:EEVEE, 5)');
+      // A framework helper the game's library does not define is a loud stub like any unknown name: no built-in
+      // stands in for it, and no player state appears.
+      await run('pbItemBall(:POTION)');
       // The newest lowerings, end to end: `slice!`, Hash key membership, a module sharing `@cache`
       // state across sibling calls (the `RPG::Cache` bitmap-cache shape), and a method kept callable next to a
       // same-name setter. Handler-registry statements (`XHandlers.add`, `GameData::X.register`) index as boot units.
@@ -464,6 +475,10 @@ else notes.push('RGSS label fallthrough order preserved ok');
       const clashJs = lowerRuby('class W { columns() { return 3 } set columns(v) { this._c = v } }');
       const clashHit = rgss.evaluateValue({ source: 'clash', js: `${clashJs}; const w = new W(); w.columns = 9; return w.columns() + w._c;` }, { game }, events[0]);
       const clampHit = rgss.evaluateValue({ source: 'clamp', js: 'return (5).clamp(0, 10) + (50).clamp(0, 10) + (-5).clamp(0, 10);' }, { game }, events[0]);
+      // `yield` inside a Ruby block is the enclosing method's block: the block's arrow must not declare its own.
+      const yieldJs = lowerRuby('function outer(_implicitBlockYield=null) { return inner((p, _implicitBlockYield=null) => { return _implicitBlockYield(p + 1) }) }\nfunction inner(fn) { return fn(1) }');
+      let yieldHit = false;
+      try { yieldHit = new Function(`${yieldJs}\nreturn outer(v => v * 10);`)() === 20; } catch { yieldHit = false; }
       // `attr_reader`/`attr_accessor` expand to plain defs (readers must be
       // methods, not getters: every paren-less use compiles to a call), with
       // an explicit setter each for accessors (the GameData record shape).
@@ -522,8 +537,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
         [switches.get('self:3:5:A') === true, "the game's own Interpreter#get_self + Game_Event#setTempSwitchOn run on the shim"],
         [scene.rpgExtra.items['1'] === 2 && scene.rpgExtra.gold === 85, "a game-defined top-level def and module method run (gold 100 - 20 + 5)"],
         [JSON.stringify(played) === JSON.stringify([['say', 'hi'], ['balloon', 7, 1]]), 'queued waits play in call order'],
-        [questStarted && test('pbQuestComplete?(:INTRO)') === true, 'quest start/completion helpers'],
-        [scene.rpgExtra.namedItems?.POTION === 1 && scene.rpgExtra.namedItems?.ANTIDOTE === 2 && scene.rpgExtra.namedParty?.[0]?.species === 'EEVEE' && test('pbCheckItem(:POTION)') === true, 'named item and Pokémon helpers'],
+        [warnings.some(w => String(w).includes('pbItemBall')) && scene.rpgExtra.namedItems === undefined && !('pbItemBall' in rgss.introspect().builtins), 'an undefined framework helper is a loud stub, not a built-in'],
         [warnings.some(w => String(w).includes('Unknown.thing')), 'an unknown call warns loudly'],
         [test('on_event?') === true && test('on_event?', events[1]) === false, "a game-defined Interpreter predicate in a condition"],
         [test('$game_variables[2] >= 3 && $game_switches[7]') === true, 'cond over switches/variables']
@@ -536,7 +550,6 @@ else notes.push('RGSS label fallthrough order preserved ok');
         , [zeroArgModuleCall === 'female', 'Ruby zero-argument module calls stay calls']
         , [rubyRegexReplace === 'x x', 'Ruby gsub accepts non-global regular expressions']
         , [fileExtname === '.png', 'RGSS File.extname is available to browser scripts']
-        , [rtpPath === null, 'RTP path lookup degrades to not-found without filesystem access']
         , [warnings.some(w => String(w).includes('PartialUnit.missing_method')), 'missing library methods degrade to a loud callable stub']
         , [strippedMethodNames, 'manifest method names are stripped of ?/! like the transpiled output']
         , [redefinedLoadsLastWins, 'a redefined helper keeps only its last definition and loads under with(scope)']
@@ -545,6 +558,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
         , [cacheHit === 84, 'a module IIFE shares its @cache across sibling calls through one self']
         , [clashHit === 12, 'a method next to a same-name setter stays callable and the setter still assigns']
         , [clampHit === 15, 'Ruby Numeric#clamp is available to RGSS libraries']
+        , [yieldHit, "yield inside a block reaches the enclosing method's block"]
         , [attrHit === 'function|function|2', 'attr_reader/attr_accessor expand to callable readers with a working setter']
         , [attrIndexed === true, 'the indexer collects attr_reader/attr_accessor names as known methods']
         , [mixinHit === 'function|function|true|5|1|1|7', 'an extended class answers every mixin def (each/exists/count/keys/get/register/schema)']
@@ -651,14 +665,19 @@ else notes.push('RGSS label fallthrough order preserved ok');
   // against a fake AudioContext (no browser needed).
   {
     const lib = await import('@datamoc/mw_games/audio');
-    const { AudioManager, chooseExtension, parseLoopTags } = await import(pathToFileURL(join(root, 'src', 'player', 'audio-manager.js')).href);
+    const { AudioManager, chooseExtension } = await import(pathToFileURL(join(root, 'src', 'player', 'audio-manager.js')).href);
     const { buildAudioIndex } = await import(pathToFileURL(join(root, 'tools', 'audio-index.mjs')).href);
     const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
     const checks = [];
     checks.push(chooseExtension(['.wma', '.mp3', '.ogg']) === '.ogg' && chooseExtension(['.mid', '.wav']) === '.wav' && chooseExtension(['.mid']) === '.mid');
-    const tags = new TextEncoder().encode('OggS....vorbis LOOPSTART=1000\0LOOPLENGTH=2000');
-    checks.push(JSON.stringify(parseLoopTags(tags)) === JSON.stringify({ loopStart: 1000, loopLength: 2000 }) && parseLoopTags(new Uint8Array(20)) === null);
+    // a real Ogg Vorbis comment header with loop points, read by the library's parser and turned into a loop region
+    const oggPage = packet => { const header = new Uint8Array(27); header.set([0x4f, 0x67, 0x67, 0x53]); header[26] = 1; return Uint8Array.from([...header, packet.length, ...packet]); };
+    const u32 = n => [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255];
+    const comments = ['LOOPSTART=1000', 'LOOPLENGTH=2000'].map(text => new TextEncoder().encode(text));
+    const commentPacket = [3, ...new TextEncoder().encode('vorbis'), ...u32(1), 0x78, ...u32(comments.length), ...comments.flatMap(c => [...u32(c.length), ...c])];
+    const loopOgg = Uint8Array.from([...oggPage([1, ...new TextEncoder().encode('vorbis')]), ...oggPage(commentPacket)]);
+    checks.push(JSON.stringify(lib.parseVorbisLoopTags(loopOgg)) === JSON.stringify({ loopStart: 1000, loopLength: 2000 }) && lib.parseVorbisLoopTags(new Uint8Array(20)) === null);
     // converter index: several formats for one name, nested names, a MIDI-only track
     const dir = mkdtempSync(join(tmpdir(), 'mwgp-audio-'));
     try {
@@ -836,7 +855,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
       && api.classes.Sprite?.methods.includes('x=') && !api.classes.Foo && api.kernel.load_data === true && api.rpg['RPG::Map']?.attributes.join() === 'width,bgm' && api.rpg['RPG::Map::Encounter']?.attributes.join() === 'troop_id';
     const packed = dumpApi(Buffer.from('MZ\0\0kernel32.dll\0GetProcAddress\0'), 'packed.dll');
     const project = { rubyLibrary: { methods: ['black'], units: { Interpreter: 'Input.trigger(Input.DOWN); Graphics.update(); Graphics.frame_count = 3; const b = new Bitmap(1, 2); b.blt(1); b.fill_rect(); load_data("x"); Color.black; Audio.se_play("a");' } }, maps: [], commonEvents: {} };
-    const shim = { dialect: 'rgss', builtins: { Graphics: { type: 'object', members: ['update', 'frame_count'] }, Audio: { type: 'object', members: ['se_play', 'bgm_play'] } }, fallbacks: [] };
+    const shim = { dialect: 'rgss', builtins: { Graphics: { type: 'object', members: ['update', 'frame_count'] }, Audio: { type: 'object', members: ['se_play', 'bgm_play'] } } };
     const report = analyze(project, api, shim);
     const missing = report.missing.map(entry => `${entry.className}.${entry.member}`);
     const okReport = missing.includes('Input.trigger') && missing.includes('Input.DOWN') && !missing.includes('Graphics.update') && !missing.includes('Graphics.frame_count') && !missing.includes('Audio.se_play')
@@ -938,6 +957,136 @@ else notes.push('RGSS label fallthrough order preserved ok');
     // 7. poison slip and MP cost through Fire (learned at level 2)
     const fire = await run(3, ['Fight', 'Skill', 'Fire', 'Escape'], { records: { 1: { level: 2, classId: 1, hp: 140, mp: 20 } }, rng: () => 0 });
     checks.push(fire.records[1].mp === 15 && fire.log.some(text => /poisoned/.test(text)) && fire.log.some(text => /took \d+ damage/.test(text)));
+    // 8. Force Action (command 339): a troop event makes a battler act at once. The engine skips canUse for a forced
+    //    action but still pays the cost: the hero (3 MP) is forced to cast Fire (5 MP) at the Boss and ends at 0 MP;
+    //    the Boss is forced to attack (the hero loses HP); a forced hero attack kills the lone Slime, and forcing the
+    //    dead Slime afterwards is skipped.
+    {
+      const drive = async (troopId, body, records) => {
+        let controls; const p = player(['Escape']); const out = {};
+        await runBattle({ database: database(), troopId, party: [1], records, items: {}, present: p.present, rng: () => 0, canEscape: true,
+          hooks: { onControls: value => { controls = value; }, onStart: async () => { await body(controls, out); } } });
+        return out;
+      };
+      const r1 = { 1: { level: 1, classId: 1, hp: 100, mp: 3 } };
+      const boss = await drive(3, async (c, out) => {
+        out.hero = await c.forceAction({ subjectKind: 'actor', subject: 1, skillId: 3, target: 0 });
+        out.boss = await c.forceAction({ subjectKind: 'enemy', subject: 0, skillId: 1, target: -1 });
+      }, r1);
+      checks.push(boss.hero === true && boss.boss === true && r1[1].mp === 0 && r1[1].hp < 100);
+      const slime = await drive(1, async (c, out) => {
+        out.kill = await c.forceAction({ subjectKind: 'actor', subject: 1, skillId: 1, target: 0 });
+        out.again = await c.forceAction({ subjectKind: 'enemy', subject: 0, skillId: 1, target: -2 });
+        out.unknown = await c.forceAction({ subjectKind: 'actor', subject: 99, skillId: 1, target: 0 });
+      }, { 1: { level: 1, classId: 1, hp: 100, mp: 20 } });
+      checks.push(slime.kill === true && slime.again === false && slime.unknown === false);
+    }
+    // 9. Abort Battle (command 340) ends the fight at once with the escape result and no rewards.
+    {
+      let controls; const p = player(['Fight', 'Attack']); const gained = { gold: 0 };
+      const aborted = await runBattle({ database: database(), troopId: 1, party: [1], records: { 1: { level: 1, classId: 1, hp: 100, mp: 20 } }, items: {}, present: p.present, rng: () => 0, canEscape: true,
+        hooks: { onControls: value => { controls = value; }, onStart: async () => { controls.abort(); }, gainGold: amount => { gained.gold += amount; } } });
+      checks.push(aborted.outcome === 'escape' && gained.gold === 0 && aborted.exp === 0);
+    }
+    // 10. Counter attack, magic reflection, substitute and TP (Game_Action / BattleManager.invokeAction rules).
+    {
+      const mech = () => {
+        const db = database();
+        db.skills[5] = { name: 'Charge', hitType: 1, scope: 1, successRate: 100, mpCost: 0, tpCost: 0, tpGain: 20, speed: 0, repeats: 1, stypeId: 1, damage: { type: 1, formula: 'a.atk * 4', variance: 0, critical: false, elementId: -1 }, effects: [] };
+        db.skills[6] = { name: 'Ultimate', hitType: 1, scope: 1, successRate: 100, mpCost: 0, tpCost: 50, tpGain: 0, speed: 0, repeats: 1, stypeId: 1, damage: { type: 1, formula: '1', variance: 0, critical: false, elementId: -1 }, effects: [] };
+        const base = { params: [1000, 0, 12, 5, 5, 5, 8, 8], exp: 0, gold: 0, dropItems: [], actions: [{ skillId: 1, rating: 5, conditionType: 0 }] };
+        const hit = { code: 22, dataId: 0, value: 0.95 };
+        db.enemies[4] = { ...base, name: 'Guardian', traits: [hit, { code: 62, dataId: 2, value: 1 }] };     // special flag: substitute
+        db.enemies[5] = { ...base, name: 'Thorn', traits: [hit, { code: 22, dataId: 6, value: 1 }] };         // CNT 100%
+        db.enemies[6] = { ...base, name: 'Mirror', traits: [hit, { code: 22, dataId: 5, value: 1 }] };        // MRF 100%
+        db.troops[5] = { members: [{ enemyId: 1 }, { enemyId: 4 }] }; db.troops[6] = { members: [{ enemyId: 5 }] }; db.troops[7] = { members: [{ enemyId: 6 }] };
+        return db;
+      };
+      const fight = async (troopId, body, { hp = 100, tpRandom = () => 0 } = {}) => {
+        const out = {}; let controls; const p = player(['Escape']);
+        const record = { level: 1, classId: 1, hp, mp: 20 };
+        await runBattle({ database: mech(), troopId, party: [1], records: { 1: record }, items: {}, present: p.present, rng: () => 0, tpRandom, canEscape: true,
+          hooks: { onControls: value => { controls = value; }, onSetup: ({ actors, enemies }) => { out.actors = actors; out.enemies = enemies; }, onStart: async () => { await body(controls, out); } } });
+        out.record = record; return out;
+      };
+      const force = (c, skillId, target = 0, kind = 'actor', subject = 1) => c.forceAction({ subjectKind: kind, subject, skillId, target });
+      // Counter: the hero's physical attack on Thorn is answered instead of landing.
+      const counter = await fight(6, async (c, out) => { out.hpBefore = out.actors[0].hp; await force(c, 1); out.after = { hero: out.actors[0].hp, thorn: out.enemies[0].hp }; });
+      checks.push(counter.after.thorn === 1000 && counter.after.hero < counter.hpBefore);
+      // Reflection: the hero's Fire (magical) at Mirror is turned back on the hero.
+      const reflect = await fight(7, async (c, out) => { await force(c, 3); out.after = { hero: out.actors[0].hp, mirror: out.enemies[0].hp }; });
+      checks.push(reflect.after.mirror === 1000 && reflect.after.hero < 100);
+      // Substitute: with the first Slime dying (hp 5 < 30 / 4), the Guardian takes the hit for it.
+      const substitute = await fight(5, async (c, out) => { out.enemies[0].hp = 5; await force(c, 1, 0); out.after = { slime: out.enemies[0].hp, guardian: out.enemies[1].hp }; });
+      checks.push(substitute.after.slime === 5 && substitute.after.guardian < 1000);
+      // TP: a skill's tpGain adds to the user; a hit taken charges 50 * damage / max HP; tpCost gates and is paid.
+      const tp = await fight(3, async (c, out) => {
+        out.start = out.actors[0].tp;
+        await force(c, 5); out.afterCharge = out.actors[0].tp;
+        const hpBefore = out.actors[0].hp; await force(c, 1, 0, 'enemy', 0);
+        out.damage = hpBefore - out.actors[0].hp; out.afterHit = out.actors[0].tp;
+        out.actors[0].tp = 60; await force(c, 6); out.afterCost = out.actors[0].tp;
+      });
+      checks.push(tp.start === 0 && tp.afterCharge === 20 && tp.afterHit === 20 + Math.floor(50 * tp.damage / 100) && tp.afterCost === 10);
+      checks.push(tp.record.tp === 0);                                                    // not preserved: cleared after the battle
+      // Preserve TP (special flag 3) keeps the value in the actor record.
+      const keep = mech(); keep.classes[1].traits.push({ code: 62, dataId: 3, value: 1 });
+      const keepRecord = { level: 1, classId: 1, hp: 100, mp: 20, tp: 40 };
+      await runBattle({ database: keep, troopId: 3, party: [1], records: { 1: keepRecord }, items: {}, present: player(['Escape']).present, rng: () => 0, canEscape: true });
+      checks.push(keepRecord.tp === 40);
+    }
+    // 11. Formations (src/player/formation.js): shapes, rows, modifiers, and their effect on who is hit and how hard.
+    {
+      const { layoutFormation, rowModifiers, stagePositions, FORMATION_NAMES } = await import(pathToFileURL(join(root, 'src', 'player', 'formation.js')).href);
+      const sizes = (name, n) => { const slots = layoutFormation(name, n); return Array.from({ length: slots[0]?.rows || 0 }, (_, row) => slots.filter(slot => slot.row === row).length); };
+      checks.push(JSON.stringify(sizes('triangle', 6)) === '[1,2,3]' && JSON.stringify(sizes('inverted', 6)) === '[3,2,1]');
+      checks.push(JSON.stringify(sizes('square', 4)) === '[2,2]' && JSON.stringify(sizes('line', 4)) === '[4]' && JSON.stringify(sizes('column', 3)) === '[1,1,1]');
+      checks.push(JSON.stringify(sizes('diamond', 4)) === '[1,2,1]' && layoutFormation('chevron', 5)[0].row === 0 && layoutFormation('circle', 5).length === 5);
+      checks.push(FORMATION_NAMES.every(name => [1, 2, 3, 4, 5, 6].every(n => layoutFormation(name, n).length === n)) && layoutFormation('nonsense', 3).length === 3);
+      const lead = layoutFormation('triangle', 3)[0];
+      checks.push(lead.row === 0 && lead.y === 0);                                                        // the leader is the apex
+      checks.push(rowModifiers(0, 3).tgr === 1.5 && rowModifiers(2, 3).pdr === 0.85 && rowModifiers(1, 3).tgr === 1 && rowModifiers(0, 1).tgr === 1);
+      const spots = stagePositions('square', 4);
+      checks.push(spots.length === 4 && new Set(spots.map(spot => `${spot.x},${spot.y}`)).size === 4);
+      // In battle: two actors in a triangle (front apex, back row). Enemies pick the front one more often, and
+      // the back row takes less physical damage. A line (one row) is neutral.
+      const duo = formation => {
+        const db = database(); db.actors[2] = { ...db.actors[1], name: 'Sidekick' };
+        return { db, formation };
+      };
+      const runDuo = async (formation, rngValue, target, body) => {
+        const { db } = duo(formation); const out = { effects: [] }; let controls; const p = player(['Escape']);
+        const records = { 1: { level: 1, classId: 1, hp: 100, mp: 20 }, 2: { level: 1, classId: 1, hp: 100, mp: 20 } };
+        await runBattle({ database: db, troopId: 3, party: [1, 2], records, items: {}, present: p.present, rng: () => rngValue, canEscape: true, formation,
+          hooks: { onControls: value => { controls = value; }, onSetup: ({ actors }) => { out.actors = actors; },
+            onEffect: effect => out.effects.push(effect), onStart: async () => { await controls.forceAction({ subjectKind: 'enemy', subject: 0, skillId: 1, target }); } } });
+        out.hp = [out.actors[0].hp, out.actors[1].hp]; return out;
+      };
+      const triangle = await runDuo('triangle', 0.6, -1), line = await runDuo('line', 0.6, -1);
+      checks.push(triangle.hp[0] < 100 && triangle.hp[1] === 100);                                       // TGR 1.5 vs 0.6: roll 1.26 lands on the front actor
+      checks.push(line.hp[0] === 100 && line.hp[1] < 100);                                               // equal rates: roll 1.2 lands on the second
+      const front = await runDuo('triangle', 0, 0), back = await runDuo('triangle', 0, 1);
+      checks.push((100 - front.hp[0]) > (100 - back.hp[1]) && (100 - back.hp[1]) > 0);                   // x1.10 physical vs x0.85
+      checks.push(front.effects.length === 1 && front.effects[0].kind === 'hit' && front.effects[0].hp < 0 && front.effects[0].target === front.actors[0]);
+    }
+    // 12. Actor poses (Sprite_Actor motions on the 9x6 sv_actors sheet) and the choice of pose.
+    {
+      const { svCell, svPattern, svIdleMotion, svActionMotion, SV_MOTIONS } = await import(pathToFileURL(join(root, 'src', 'player', 'player-core.js')).href);
+      // wait (index 1) is row 1, columns 0-2; thrust (6) is column 3 row 0; victory (13) column 6 row 1; dead (17) column 6 row 5.
+      checks.push(svCell('wait', 0) === 9 && svCell('wait', 2) === 11 && svCell('thrust', 1) === 4 && svCell('victory', 0) === 15 && svCell('dead', 2) === 53);
+      checks.push(Object.keys(SV_MOTIONS).length === 18 && new Set(Object.values(SV_MOTIONS).map(motion => motion.index)).size === 18);
+      const seq = (name, steps) => steps.map(step => svPattern(name, step * 0.2 + 0.01).pattern).join('');
+      checks.push(seq('wait', [0, 1, 2, 3, 4]) === '01210' && seq('swing', [0, 1, 2]) === '012' && svPattern('swing', 0.61).done === true && svPattern('swing', 0.59).done === false);
+      const db = database(); db.states[5] = { name: 'Sleep', motion: 2, priority: 50, restriction: 4, traits: [] }; db.states[6] = { name: 'Poison', motion: 1, priority: 30, traits: [] };
+      const battler = overrides => ({ states: [], dead: false, isGuarding: false, isDying: false, ...overrides });
+      checks.push(svIdleMotion(battler({}), db) === 'wait' && svIdleMotion(battler({ dead: true }), db) === 'dead' && svIdleMotion(battler({ isDying: true }), db) === 'dying');
+      checks.push(svIdleMotion(battler({ isGuarding: true, isDying: true }), db) === 'guard' && svIdleMotion(battler({ states: [{ id: 6 }], isDying: true }), db) === 'abnormal');
+      checks.push(svIdleMotion(battler({ states: [{ id: 5 }, { id: 6 }] }), db) === 'sleep');                       // higher priority state wins
+      db.system.attackMotions = [{ type: 0 }, { type: 1 }, { type: 2 }]; db.system.magicSkills = [1];
+      const armed = wtypeId => battler({ equipItems: () => [{ wtypeId }] });
+      checks.push(svActionMotion(armed(0), db.skills[1], false, db) === 'thrust' && svActionMotion(armed(1), db.skills[1], false, db) === 'swing' && svActionMotion(armed(2), db.skills[1], false, db) === 'missile');
+      checks.push(svActionMotion(armed(1), db.skills[3], false, db) === 'spell' && svActionMotion(armed(1), { stypeId: 2 }, false, db) === 'skill' && svActionMotion(armed(1), db.items[1], true, db) === 'item');
+    }
     // ---- menu screens (T114): items, skills, equipment, status, save, on the same database ----------------------
     {
       const { runMenu } = await import(pathToFileURL(join(root, 'src', 'player', 'menu.js')).href);
@@ -959,6 +1108,17 @@ else notes.push('RGSS label fallthrough order preserved ok');
         return { result, records, items, weapons, armors, log: p.log, saved };
       };
       const mchecks = [];
+      // Formation: pick a layout, then swap the two members' order; the party array is reordered in place.
+      {
+        const db = menuDb(); db.actors[2] = { ...db.actors[1], name: 'Sidekick' }; db.system.terms.commands[8] = 'Formation';
+        const party = [1, 2]; let layout = 'default';
+        const p = player(['Formation', 'Layout: Default (staggered) (1-1)', 'Triangle  1-1', 'Change order', '1. Hero', '2. Sidekick', 'Cancel', 'Cancel']);
+        await runMenu({ database: db, records: { 1: { level: 1, classId: 1 }, 2: { level: 1, classId: 1 } }, party, items: {}, weapons: {}, armors: {}, gold: 0, present: p.present, rng: () => 0,
+          hooks: { maxBattleMembers: 4, formation: { get: () => layout, set: name => { layout = name; } } } });
+        mchecks.push(layout === 'triangle' && party.join() === '2,1');
+        const hidden = await menuRun(['Cancel']);                                                       // no hook: no Formation entry
+        mchecks.push(!hidden.log.some(text => text.includes('Formation')));
+      }
       // Potion from the item screen: +50 HP, one used up, screen returns, menu closes
       const potionMenu = await menuRun(['Item', 'Potion ×2', 'Cancel', 'Cancel'], { items: { 1: 2 }, record: { hp: 10 } });
       mchecks.push(potionMenu.records[1].hp === 60 && potionMenu.items[1] === 1 && potionMenu.result.closed === true);
@@ -1171,9 +1331,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
       [resolveGameDataOperand(extra, context, { kind: 'partyMember', index: 5 }) === 0, 'empty party slot reads as 0'],
       [resolveGameDataOperand(extra, context, { kind: 'mapId' }) === 12, 'map id reads current map'],
       [resolveGameDataOperand(extra, context, { kind: 'partySize' }) === 2, 'party size reads roster'],
-      [resolveGameDataOperand(extra, context, { kind: 'gold' }) === 100, 'gold reads purse'],
-      [resolveGameDataOperand({ ...extra, namedParty: [{ species: 'EEVEE' }, { species: 'PIDGEY' }] }, context, { kind: 'pokemonCount' }) === 2, 'pokemon count reads named party'],
-      [resolveGameDataOperand(extra, context, { kind: 'pokemonCount' }) === 0, 'missing named party counts as 0']
+      [resolveGameDataOperand(extra, context, { kind: 'gold' }) === 100, 'gold reads purse']
     ];
     const originalWarn = console.warn; console.warn = () => {};
     let unknownKind;
@@ -1304,6 +1462,25 @@ else notes.push('RGSS label fallthrough order preserved ok');
             { code: 111, indent: 0, parameters: [0, 1, 0] },
             { code: 401, indent: 1, parameters: ['Then line'] },
             { code: 412, indent: 0, parameters: [] },
+            { code: 134, indent: 0, parameters: [0] }, { code: 135, indent: 0, parameters: [0] },
+            { code: 124, indent: 0, parameters: [0, 90] },
+            { code: 111, indent: 0, parameters: [3, 30, 1] }, { code: 412, indent: 0, parameters: [] },
+            { code: 206, indent: 0, parameters: [] },
+            { code: 261, indent: 0, parameters: ['intro'] },
+            { code: 339, indent: 0, parameters: [0, 0, 1, -2] },
+            { code: 312, indent: 0, parameters: [0, 0, 1, 0, 5] }, { code: 315, indent: 0, parameters: [1, 2, 0, 1, 7, true] },
+            { code: 317, indent: 0, parameters: [0, 0, 2, 0, 0, 3] }, { code: 326, indent: 0, parameters: [0, 0, 1, 0, 10] },
+            { code: 320, indent: 0, parameters: [1, 'Ann'] }, { code: 324, indent: 0, parameters: [1, 'Ace'] }, { code: 325, indent: 0, parameters: [1, 'Bio'] },
+            { code: 322, indent: 0, parameters: [1, 'Actor2', 3, 'Face', 1, 'Battler'] },
+            { code: 138, indent: 0, parameters: [[10, 20, 30]] }, { code: 132, indent: 0, parameters: [{ name: 'Battle9', volume: 90, pitch: 100, pan: 0 }] },
+            { code: 140, indent: 0, parameters: [1, { name: 'Sea', volume: 90, pitch: 100, pan: 0 }] }, { code: 323, indent: 0, parameters: [1, 'Vehicle', 2] },
+            { code: 216, indent: 0, parameters: [1] }, { code: 217, indent: 0, parameters: [] }, { code: 281, indent: 0, parameters: [1] },
+            { code: 354, indent: 0, parameters: [] },
+            { code: 104, indent: 0, parameters: [3, 2] }, { code: 233, indent: 0, parameters: [1, 6] },
+            { code: 285, indent: 0, parameters: [4, 0, 0, 1, 2] }, { code: 283, indent: 0, parameters: ['Grassland', 'Forest'] },
+            { code: 333, indent: 0, parameters: [0, 0, 4] }, { code: 334, indent: 0, parameters: [-1] }, { code: 337, indent: 0, parameters: [0, 5, false] },
+            { code: 282, indent: 0, parameters: [2] }, { code: 284, indent: 0, parameters: ['Sky', true, false, 2, 0] },
+            { code: 340, indent: 0, parameters: [] }, { code: 342, indent: 0, parameters: [0, 0, 0, 25] },
             { code: 0, indent: 0, parameters: [] }
           ],
           moveFrequency: 3, moveRoute: { list: [{ code: 0, parameters: [] }], repeat: false, skippable: false, wait: false },
@@ -1311,6 +1488,8 @@ else notes.push('RGSS label fallthrough order preserved ok');
         }]
       }]
     });
+    mkdirSync(join(mzDir, 'movies'), { recursive: true });
+    writeFileSync(join(mzDir, 'movies', 'intro.webm'), Buffer.from('webm'));
     writeJson('data/Tilesets.json', [null, { id: 1, mode: 0, name: 'Outside', tilesetNames: ['', '', '', '', '', '', '', '', ''], flags: [0] }]);
     writeJson('data/Animations.json', [null, { id: 1, name: 'Hit', effectName: 'Hit' }]);
     // Foreground art the map note references: a minimal 1x1 PNG each, so the
@@ -1330,16 +1509,35 @@ else notes.push('RGSS label fallthrough order preserved ok');
     if (mzManifest) {
       const mzEventText = JSON.stringify(mzManifest.maps?.[0]?.mwgEvents || []);
       const mzFg = mzManifest.maps?.[0]?.data?.settings || {};
+      const cv = await import(pathToFileURL(join(root, 'tools', 'converter-version.mjs')).href);
+      const oldManifest = join(mzDir, 'old-mwgp.json');
+      writeFileSync(oldManifest, JSON.stringify({ format: 'MWGP', version: 1, source: {} }));
       const mzChecks = [
         [mzManifest.source?.engine === 'rpg-maker-mz', 'probe detected as MZ'],
         [mzEventText.includes('"pluginCommand"'), 'MZ 357 converts to pluginCommand'],
         [!mzEventText.includes('"unsupported"'), 'MZ probe has no loud markers'],
         [mzEventText.includes('"else":[]'), 'branch without else keeps an empty else list'],
         [mzManifest.compatibility?.commands?.['357']?.status === 'partial', 'MZ 357 classified partial'],
-        [mzManifest.compatibility?.plugins?.['MessageRows']?.status === 'partial', 'MZ plugin census covers 357 names'],
+        [mzManifest.compatibility?.plugins?.['MessageRows']?.status === 'unsupported' && !mzManifest.compatibility.plugins.MessageRows.handledBy, 'MZ plugin census covers 357 names (no shipped plugin: unsupported)'],
+        [mzEventText.includes('"plugin":"DemoPlugin"') && mzEventText.includes('"params":{"rows":"6"}'), 'MZ 357 keeps its plugin name and args object'],
         [mzFg.foreground?.name === 'Mist_1' && mzFg.foreground?.loopX === true && mzFg.foreground?.sx === -1.4, 'map <fgName> note parses to settings.foreground'],
         [mzFg.foregroundB?.name === 'Mist_2' && mzFg.foregroundB?.switch === 11, 'map <fgName_b> note parses to settings.foregroundB with its switch'],
-        [mzManifest.assets?.parallaxes === true, 'referenced foreground art flags assets.parallaxes']
+        [mzManifest.assets?.parallaxes === true, 'referenced foreground art flags assets.parallaxes'],
+        [mzEventText.includes('"systemFlag":{"key":"menuAccess","value":false}') && mzEventText.includes('"key":"saveAccess"'), '134/135 convert to systemFlag (menu and save access)'],
+        [mzEventText.includes('"timer":{"start":90}') && mzEventText.includes('"timer":{"seconds":30,"atLeast":false}'), '124 and the timer condition convert'],
+        [mzEventText.includes('"vehicleBoard":true') && mzEventText.includes('"playMovie":{"name":"intro"}') && mzEventText.includes('"returnToTitle":true'), '206, 261 and 354 convert'],
+        [mzEventText.includes('"forceAction":{"subjectKind":"enemy","subject":0,"skill":1,"target":-2}'), '339 converts to forceAction'],
+        [['mp', 'exp', 'param', 'tp'].every(stat => mzEventText.includes(`"stat":"${stat}"`)), '312/315/317/326 convert to changeActorStat'],
+        [mzEventText.includes('"changeActorImages"') && mzEventText.includes('"changeProfile":{"actor":1,"profile":"Bio"}') && !mzEventText.includes('"profile":"Actor2"'), '322 is Change Actor Images and 325 is Change Profile'],
+        [!mzEventText.includes('"unsupported"'), 'none of the new codes fall back to the loud marker'],
+        [cv.readManifestConverterVersion(join(mzOut, 'mwgp.json')) === cv.CONVERTER_VERSION && !cv.isStaleConverterVersion(cv.CONVERTER_VERSION), 'the manifest carries the converter stamp near its start and is current'],
+        [cv.readManifestConverterVersion(oldManifest) === null && cv.isStaleConverterVersion(null) && cv.isStaleConverterVersion('0.1.0') && !cv.isStaleConverterVersion('0.10.0') && cv.compareVersions('0.2.0', '0.10.0') === -1, 'an unstamped or older manifest is stale (numeric version compare)'],
+        [existsSync(join(mzOut, 'assets', 'movies', 'intro.webm')), 'a movie named by 261 is copied to assets/movies'],
+        [mzEventText.includes('"selectItem":{"variable":"3","itemType":2}') && mzEventText.includes('"rotatePicture":{"id":1,"speed":6}') && mzEventText.includes('"locationInfo":{"variable":"4","info":0,"x":1,"y":2}'), '104, 233 and 285 convert'],
+        [mzEventText.includes('"changeEnemyState":{"index":0,"add":true,"state":4}') && mzEventText.includes('"enemyRecoverAll":{"index":-1}') && mzEventText.includes('"changeEnemyTp":{"index":0,"amount":25,"sign":1}') && mzEventText.includes('"abortBattle":true'), '333 is enemy state, 334 recover all, 342 enemy TP, 340 abort'],
+        [mzEventText.includes('"changeTileset":{"id":2}'), '282 converts to changeTileset'],
+        [mzEventText.includes('"changeParallax":{"name":"Sky","loopX":true,"loopY":false,"sx":2,"sy":0}'), '284 converts to changeParallax'],
+        [mzEventText.includes('"key":"battleback"') && existsSync(join(mzOut, 'assets')), '283 converts to the battleback system setting']
       ];
       for (const [ok, label] of mzChecks) if (!ok) fail(`MZ probe: ${label}`);
       if (mzChecks.every(([ok]) => ok)) notes.push(`MZ probe conversion ok (${mzChecks.length} checks)`);
@@ -1352,6 +1550,144 @@ else notes.push('RGSS label fallthrough order preserved ok');
       }
     }
     rmSync(mzDir, { recursive: true, force: true });
+  }
+  // Picture-command titles: MOG-style Command_0..N art in img/titles2 (stock
+  // title names empty) records background/logo/commands plus the plugin's
+  // button positions, so the title screen renders the game's own image menu.
+  {
+    const picDir = mkdtempSync(join(tmpdir(), 'mwgp-smoke-title-'));
+    const writeJson = (rel, value) => writeFileSync(join(picDir, rel), JSON.stringify(value));
+    writeFileSync(join(picDir, 'index.html'), '<!DOCTYPE html><html><body></body></html>');
+    mkdirSync(join(picDir, 'js'), { recursive: true });
+    mkdirSync(join(picDir, 'data'), { recursive: true });
+    writeJson('data/System.json', { gameTitle: 'Pic Test', title1Name: '', title2Name: '', optDrawTitle: false, titleCommandWindow: { offsetX: 5, offsetY: -3 }, partyMembers: [], startMapId: 1, startX: 1, startY: 1 });
+    writeJson('data/MapInfos.json', [null, { id: 1, expanded: false, name: 'Room', order: 1, parentId: 0 }]);
+    const probePage = list => ({
+      conditions: { actorId: 1, actorValid: false, itemId: 1, itemValid: false, selfSwitchCh: 'A', selfSwitchValid: false, switch1Id: 1, switch1Valid: false, switch2Id: 1, switch2Valid: false, variableId: 1, variableValid: false, variableValue: 0 },
+      directionFix: false, image: { tileId: 0, characterName: '', direction: 2, pattern: 1, characterIndex: 0 }, list,
+      moveFrequency: 3, moveRoute: { list: [{ code: 0, parameters: [] }], repeat: false, skippable: false, wait: false },
+      moveSpeed: 3, moveType: 0, priorityType: 1, stepAnime: false, through: false, trigger: 0, walkAnime: true
+    });
+    writeJson('data/Map001.json', { width: 5, height: 5, tilesetId: 1, autoplayBgm: false, autoplayBgs: false, data: Array(150).fill(0), events: [null, { id: 1, name: 'EV001', note: '', x: 1, y: 1, pages: [probePage([
+      { code: 356, indent: 0, parameters: ['ProbeCmd a b'] }, { code: 356, indent: 0, parameters: ['Nobody x'] }, { code: 0, indent: 0, parameters: [] }
+    ])] }] });
+    writeJson('data/Tilesets.json', [null, { id: 1, mode: 0, name: 'Outside', tilesetNames: ['', '', '', '', '', '', '', '', ''], flags: [0] }]);
+    // Plugin parameters that used to drive a named-plugin title (button positions, a screen size) must not.
+    writeFileSync(join(picDir, 'js', 'plugins.js'), 'var $plugins = [{"name":"MOG_TitlePictureCom","status":true,"parameters":{"Title Sprite":"true","Command Pos 1":"800,410","Command Pos 2":""}},{"name":"YEP_CoreEngine","status":true,"parameters":{"Screen Width":"1440","Screen Height":"810"}},{"name":"Probe_Handler","status":true,"parameters":{}}];');
+    mkdirSync(join(picDir, 'js', 'plugins'), { recursive: true });
+    writeFileSync(join(picDir, 'js', 'plugins', 'Probe_Handler.js'), "var _probe = Game_Interpreter.prototype.pluginCommand;\nGame_Interpreter.prototype.pluginCommand = function (command, args) { _probe.call(this, command, args); if (command === 'ProbeCmd') this._probed = args; };\n");
+    mkdirSync(join(picDir, 'img', 'titles2'), { recursive: true });
+    const tinyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    for (const file of ['Background.png', 'Logo_1.png', 'Command_0.png', 'Command_1.png', 'Command_0_RU.png']) writeFileSync(join(picDir, 'img', 'titles2', file), tinyPng);
+    const picOut = join(picDir, 'out');
+    let picManifest;
+    try {
+      execFileSync(process.execPath, [join(root, 'tools', 'convert-mv.js'), picDir, picOut], { stdio: 'pipe' });
+      picManifest = JSON.parse(readFileSync(join(picOut, 'mwgp.json'), 'utf8'));
+    } catch (error) {
+      fail(`title probe conversion failed: ${String(error.stderr || error.message).slice(0, 300)}`);
+    }
+    if (picManifest) {
+      const pluginReport = picManifest.compatibility?.plugins || {};
+      const picChecks = [
+        [picManifest.titleScreen?.pictureCommands === undefined, 'no picture-command title from plugin names'],
+        [picManifest.display?.width === 816 && picManifest.display?.height === 624, 'screen size stays the System.json one (plugin parameters ignored)'],
+        [picManifest.titleScreen?.drawTitle === false, 'optDrawTitle recorded on the title screen'],
+        [JSON.stringify(picManifest.titleScreen?.commandOffset) === '{"x":5,"y":-3}', 'title command offsets recorded'],
+        [(picManifest.pluginLibrary?.order || []).includes('Probe_Handler'), 'the plugin handling an event plugin command ships in the plugin library'],
+        [pluginReport.ProbeCmd?.status === 'partial' && JSON.stringify(pluginReport.ProbeCmd?.handledBy) === '["Probe_Handler"]', 'a handled plugin command is partial and names its plugin'],
+        [pluginReport.Nobody?.status === 'unsupported' && !pluginReport.Nobody?.handledBy, 'an unhandled plugin command is unsupported']
+      ];
+      for (const [ok, label] of picChecks) if (!ok) fail(`generic MV title/plugin probe: ${label}`);
+      if (picChecks.every(([ok]) => ok)) notes.push(`generic MV title/plugin probe ok (${picChecks.length} checks)`);
+      try {
+        const out = JSON.parse(execFileSync(process.execPath, [join(root, 'tools', 'validate-mwgp.js'), join(picOut, 'mwgp.json')], { stdio: 'pipe' }).toString());
+        if (out.valid !== true) fail('validator rejected the title probe manifest');
+        else notes.push('title probe manifest validates ok');
+      } catch (error) {
+        fail(`validator rejected the title probe manifest: ${String(error.stderr || error.message).slice(0, 200)}`);
+      }
+    }
+    rmSync(picDir, { recursive: true, force: true });
+  }
+  // MV/MZ web build (tools/build-web.js): the game's files as-is, the nw.js host first, every game script deferred to
+  // it, a native save/ folder left out, a previous MWGP conversion in the output replaced, and a rebuild copying only
+  // what changed.
+  {
+    const webDir = mkdtempSync(join(tmpdir(), 'mwgp-smoke-web-'));
+    const gameRoot = join(webDir, 'Game'), game = join(gameRoot, 'www'), out = join(webDir, 'out');
+    for (const dir of ['js/plugins', 'data', 'img/titles1', 'save']) mkdirSync(join(game, dir), { recursive: true });
+    mkdirSync(join(gameRoot, 'mods'), { recursive: true });
+    mkdirSync(join(gameRoot, 'logs'), { recursive: true });
+    writeFileSync(join(game, 'index.html'), '<!DOCTYPE html>\n<html>\n<head><meta charset="UTF-8"><title>t</title></head>\n<body>\n<script type="text/javascript" src="js/rpg_core.js"></script>\n<script src=\'js/main.js\'></script>\n<script>var inline = 1;</script>\n</body>\n</html>\n');
+    writeFileSync(join(game, 'js', 'rpg_core.js'), '// core');
+    writeFileSync(join(game, 'js', 'main.js'), '// main');
+    writeFileSync(join(game, 'data', 'System.json'), JSON.stringify({ gameTitle: 'Web Probe' }));
+    writeFileSync(join(game, 'img', 'titles1', 'Castle.rpgmvp'), 'encrypted-bytes');
+    writeFileSync(join(game, 'save', 'file1.rpgsave'), 'native save');
+    writeFileSync(join(gameRoot, 'mods', 'SampleMod.js'), '// sample mod');
+    mkdirSync(join(out, 'assets'), { recursive: true });
+    writeFileSync(join(out, 'mwgp.json'), JSON.stringify({ format: 'MWGP', version: 1 }));
+    writeFileSync(join(out, 'assets', 'stale.png'), 'x');
+    let firstLog = '', secondLog = '';
+    try {
+      firstLog = execFileSync(process.execPath, [join(root, 'tools', 'build-web.js'), join(webDir, 'Game'), out], { encoding: 'utf8' });
+      secondLog = execFileSync(process.execPath, [join(root, 'tools', 'build-web.js'), join(webDir, 'Game'), out], { encoding: 'utf8' });
+    } catch (error) { fail(`web build probe failed: ${String(error.stderr || error.message).slice(0, 300)}`); }
+    if (firstLog) {
+      const html = readFileSync(join(out, 'index.html'), 'utf8');
+      const info = JSON.parse(readFileSync(join(out, 'mwgp-web.json'), 'utf8'));
+      const list = JSON.parse(readFileSync(join(out, 'files.json'), 'utf8'));
+      const directories = JSON.parse(readFileSync(join(out, 'directories.json'), 'utf8'));
+      const webChecks = [
+        [html.indexOf('<script src="nwjs-host.js"></script>') > html.indexOf('<head') && html.indexOf('nwjs-host.js') < html.indexOf('data-mwgp-src'), 'host loads first, in <head>'],
+        [(html.match(/data-mwgp-src=/g) || []).length === 2 && html.includes('data-mwgp-src="js/rpg_core.js"') && html.includes("data-mwgp-src='js/main.js'") && html.includes('type="text/javascript" data-mwgp-src'), 'both game scripts deferred, attributes kept'],
+        [html.includes('<script>var inline = 1;</script>'), 'inline scripts untouched'],
+        [existsSync(join(out, 'nwjs-host.js')) && readFileSync(join(out, 'img', 'titles1', 'Castle.rpgmvp'), 'utf8') === 'encrypted-bytes', 'host copied, encrypted assets copied as-is'],
+        [!existsSync(join(out, 'save')) && !list.some(name => name.startsWith('save/')), 'native save/ folder left out'],
+        [existsSync(join(out, 'mods', 'SampleMod.js')) && readFileSync(join(out, 'mods', 'SampleMod.js'), 'utf8') === '// sample mod', 'project-level mods copied beside the web root'],
+        [directories.includes('logs') && directories.includes('save') && directories.includes('mods'), 'empty writable and mod directories are indexed'],
+        [JSON.stringify(list) === JSON.stringify(['data/System.json', 'img/titles1/Castle.rpgmvp', 'index.html', 'js/main.js', 'js/rpg_core.js', 'mods/SampleMod.js']), 'files.json indexes game and mod files'],
+        [info.format === 'MWGP-web' && info.title === 'Web Probe' && info.source?.engine === 'rpg-maker-mv' && info.source?.files === 6, 'mwgp-web.json describes the build'],
+        [!existsSync(join(out, 'mwgp.json')) && !existsSync(join(out, 'assets')), 'a previous MWGP conversion is replaced'],
+        [/6 files \(6 copied, 0 unchanged\)/.test(firstLog) && /\(1 copied, 5 unchanged\)/.test(secondLog), 'a rebuild copies only what changed (index.html is re-patched)']
+      ];
+      for (const [ok, label] of webChecks) if (!ok) fail(`web build probe: ${label}`);
+      if (webChecks.every(([ok]) => ok)) notes.push(`web build probe ok (${webChecks.length} checks)`);
+    }
+    rmSync(webDir, { recursive: true, force: true });
+  }
+  // RGSS web build: stored archive entries, original data, exclusions, core and player options.
+  {
+    const dir = mkdtempSync(join(tmpdir(), 'mwgp-smoke-rgss-web-'));
+    const source = join(dir, 'Game'), out = join(dir, 'out');
+    for (const folder of ['Data', 'Audio', 'GPUCache', 'Save']) mkdirSync(join(source, folder), { recursive: true });
+    writeFileSync(join(source, 'Game.ini'), '[Game]\nTitle=RGSS Probe\n');
+    writeFileSync(join(source, 'Data', 'Scripts.rxdata'), 'script bytes');
+    writeFileSync(join(source, 'Audio', 'theme.ogg'), 'audio bytes');
+    writeFileSync(join(source, 'Game.exe'), 'native executable');
+    writeFileSync(join(source, 'RGSS104E.dll'), 'native library');
+    writeFileSync(join(source, 'GPUCache', 'cache.bin'), 'cache');
+    writeFileSync(join(source, 'Save', 'Save1.rxdata'), 'native save');
+    let built = false;
+    try { execFileSync(process.execPath, [join(root, 'tools', 'build-web.js'), source, out], { stdio: 'pipe' }); built = true; }
+    catch (error) { fail(`RGSS web build probe failed: ${String(error.stderr || error.message).slice(0, 300)}`); }
+    if (built) {
+      const info = JSON.parse(readFileSync(join(out, 'mwgp-web.json'), 'utf8'));
+      const zip = readFileSync(join(out, 'game.mkxpz'));
+      const checks = [
+        [info.source.engine === 'rpg-maker-rgss' && info.title === 'RGSS Probe' && info.rgss.syntaxTransform === 2, 'classic RGSS uses syntax rewrite'],
+        [info.archive.entries.includes('Data/Scripts.rxdata') && info.archive.entries.includes('Audio/theme.ogg') && !info.archive.entries.some(name => /\.exe$|\.dll$|GPUCache|^Save\//i.test(name)), 'archive includes original data and omits native files and cache'],
+        [zip.readUInt32LE(0) === 0x04034b50 && zip.includes(Buffer.from('script bytes')) && zip.includes(Buffer.from('audio bytes')), 'mkxpz is an uncompressed ZIP with original bytes'],
+        [existsSync(join(out, 'mkxp-z_libretro.wasm')) && existsSync(join(out, 'nostalgist.umd.js')) && readFileSync(join(out, 'index.html'), 'utf8').includes('rgss-player.js'), 'core and our player page are packaged']
+      ];
+      for (const [ok, label] of checks) if (!ok) fail(`RGSS web build probe: ${label}`);
+      if (checks.every(([ok]) => ok)) notes.push(`RGSS web build probe ok (${checks.length} checks)`);
+    }
+    writeFileSync(join(source, 'x64-msvcrt-ruby310.dll'), 'modern Ruby');
+    const { rgssOptions } = await import(pathToFileURL(join(root, 'tools', 'build-rgss.mjs')).href);
+    if (rgssOptions(source).syntaxTransform !== 0) fail('RGSS web build probe: modern Ruby must disable syntax rewrite');
+    rmSync(dir, { recursive: true, force: true });
   }
   // Malformed event input never throws into the game loop: a non-array list
   // prepares to [], null entries become executable no-ops, and a truthy
@@ -1380,7 +1716,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
   // player-state conditions MV uses instead of loud markers.
   {
     const xpConverter = readFileSync(join(root, 'tools', 'convert-rgss.js'), 'utf8');
-    const needed = ['convertXpGameDataOperand', "kind: 'pokemonCount'", "operator: Number(parameters[2] || 0) === 0 ? 'gte' : 'lte'"];
+    const needed = ['convertXpGameDataOperand', "gameData = { kind: 'partySize' }", "operator: Number(parameters[2] || 0) === 0 ? 'gte' : 'lte'"];
     if (!needed.every(snippet => xpConverter.includes(snippet))) fail('XP converter does not cover facing/gold branches and game-data operands');
     else notes.push('XP facing/gold branches and game-data operands ok');
   }
@@ -1399,7 +1735,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
     const mvConverter = readFileSync(join(root, 'tools', 'convert-mv.js'), 'utf8');
     const xpConverter = readFileSync(join(root, 'tools', 'convert-rgss.js'), 'utf8');
     const fallthroughChecks = [
-      [mvConverter.includes('[0, 101, 108, 135, 405, 408, 505].includes(Number(command.code))'), 'MV silent no-op allowlist'],
+      [mvConverter.includes('[0, 101, 108, 405, 408, 505].includes(Number(command.code))'), 'MV silent no-op allowlist'],
       [mvConverter.includes('return [unsupportedCommand(Number(command.code), 0, context)]'), 'MV catch-all marker'],
       [xpConverter.includes('[212, 213, 214, 215, 216].includes(Number(command.code))'), 'XP engine-ignored allowlist'],
       [xpConverter.includes('return [unsupportedCommand(Number(command.code), 0, context.mapId, context.eventId)]'), 'XP catch-all marker'],
@@ -1629,8 +1965,9 @@ try {
     const sysIv = { '@game_title': `${engine} Probe`, '@start_map_id': 1, '@start_x': 2, '@start_y': 3,
       '@title_bgm': audioFile('Town1'), '@battle_bgm': audioFile('Battle1'),
       '@battle_end_me': audioFile('Victory1'), '@gameover_me': audioFile('GameOver1') };
+    sysIv['@party_members'] = [1];
+    if (!isVxLike) sysIv['@title_name'] = 'title';
     if (isVxLike) {
-      sysIv['@party_members'] = [1];
       sysIv['@sounds'] = [audioFile('Cursor1'), audioFile('Decision1'), null, null, null, null, null, null, null, null, null, null];
     }
     write('System', O('RPG::System', sysIv));
@@ -1644,6 +1981,7 @@ try {
     } else if (isVx) write('Actors', [O('RPG::Actor', { '@id': 1, '@character_name': 'Hero', '@character_index': 2 })]);
     else {
       const tilesetTable = layer => tableBytes(6, 5, 1, () => layer);
+      write('Actors', [null, O('RPG::Actor', { '@id': 1, '@character_name': 'Hero' })]);
       write('Tilesets', [O('RPG::Tileset', { '@id': 0, '@tileset_name': 'World', '@autotile_names': ['028-Weiner'],
         '@passages': O('Table', { '@raw': tilesetTable(15) }), '@priorities': O('Table', { '@raw': tilesetTable(0) }), '@terrain_tags': O('Table', { '@raw': tilesetTable(0) }) })]);
     }
@@ -1679,9 +2017,17 @@ try {
     if (isAce) mapIv['@tileset_id'] = 1;
     else if (!isVx) mapIv['@tileset_id'] = 0;
     write('Map001', O('RPG::Map', mapIv));
-    writeFileSync(join(dir, 'Data', 'Scripts' + ext), scriptsFile([[1, isAce ? 'AceLib' : 'VXLib', 'class Game_VX\nend\n']]));
+    const libScripts = [[1, isAce ? 'AceLib' : 'VXLib', 'class Game_VX\nend\n']];
+    // The game sets its own screen size from a constant: the converter resolves it (XP only here, so VX/Ace keep
+    // the engine default).
+    if (!isVxLike) libScripts.push([2, 'Settings', 'module Settings\n  SCREEN_W = 512\nend\nGraphics.resize_screen(Settings::SCREEN_W, 384)\n']);
+    writeFileSync(join(dir, 'Data', 'Scripts' + ext), scriptsFile(libScripts));
     mkdirSync(join(dir, 'Graphics', 'Characters'), { recursive: true });
     writeFileSync(join(dir, 'Graphics', 'Characters', 'Hero.png'), png(isVxLike ? 96 : 128, isVxLike ? 128 : 192));
+    if (!isVxLike) {
+      mkdirSync(join(dir, 'Graphics', 'Titles'), { recursive: true });
+      writeFileSync(join(dir, 'Graphics', 'Titles', 'title.png'), png(32, 32));
+    }
     if (isVx) {
       mkdirSync(join(dir, 'Graphics', 'System'), { recursive: true });
       for (const sheet of vx.VX_TILESET_SHEETS) writeFileSync(join(dir, 'Graphics', 'System', sheet + '.png'), png(32, 32));
@@ -1727,6 +2073,8 @@ try {
         && [1, 2, 3, 5].every(l => layer(l).every(t => t === 0)), 'VX tile layers land on MV 0/4, shadow dropped');
       strongly(m.playerSprite?.name === 'Hero' && m.playerSprite?.index === 2, 'VX start actor gives the player sprite');
       strongly(JSON.stringify(m.initialParty) === '[1]' && Object.keys(m.database || {}).length === 0, 'VX party comes from System, database stays empty');
+      strongly(one(c => c.modifyVariable?.operand?.gameData?.kind === 'partySize') !== undefined, 'VX 122-kind7 index 1 reads the party size');
+      strongly(m.display.width === 544 && m.display.height === 416, 'VX screen is the engine default without resize_screen');
       strongly(commands[0]?.say === 'Hello' && commands[1]?.say === 'World', 'VX text converts');
       strongly(one(c => c.wait === 0.5) !== undefined, 'VX 230 waits /60');
       strongly(one(c => c.eraseEvent) !== undefined, 'VX 214 erases');
@@ -1744,11 +2092,11 @@ try {
       strongly(one(c => c.changeParty?.actorId === 2) !== undefined, 'VX 129 changes the party');
       strongly(one(c => c.recoverAll) !== undefined, 'VX 314 recovers the party');
       strongly(one(c => c.choices && c.cancelBranch) !== undefined, 'VX choices keep branches');
-      strongly(JSON.stringify(loud) === JSON.stringify(['106:0', '122:7', '211:0', '313:0']), 'VX unknowns stay loud (106/122-kind7/211/313)');
+      strongly(JSON.stringify(loud) === JSON.stringify(['106:0', '211:0', '313:0']), 'VX unknowns stay loud (106/211/313)');
       const report = m.compatibility.commands;
       strongly(report['205']?.status === 'supported' && report['214']?.status === 'supported'
         && report['230']?.status === 'supported' && report['505']?.status === 'supported'
-        && report['111']?.status === 'supported' && report['122']?.status === 'partial'
+        && report['111']?.status === 'supported' && report['122']?.status === 'supported'
         && report['301']?.status === 'partial', 'VX compatibility report classifies');
     }
     if (converted.ace) {
@@ -1772,7 +2120,7 @@ try {
       strongly(one(c => c.vehicleLocation?.mapId === 1) !== undefined, 'Ace 202 places the vehicle');
       strongly(one(c => c.battle?.troopId === 7) !== undefined, 'Ace 301 designates the troop');
       strongly(one(c => typeof c.script === 'string' && typeof c.js === 'string') !== undefined, 'Ace scripts transpile');
-      strongly(JSON.stringify(loud) === JSON.stringify(['106:0', '122:7', '211:0', '313:0']), 'Ace unknowns stay loud (106/122-kind7/211/313)');
+      strongly(JSON.stringify(loud) === JSON.stringify(['106:0', '211:0', '313:0']), 'Ace unknowns stay loud (106/211/313)');
       const report = m.compatibility.commands;
       strongly(report['205']?.status === 'supported' && report['214']?.status === 'supported'
         && report['230']?.status === 'supported' && report['301']?.status === 'partial', 'Ace compatibility report classifies');
@@ -1791,8 +2139,14 @@ try {
       strongly(one(c => c.messageOptions) !== undefined, 'XP 104 keeps message options');
       strongly(one(c => c.scroll?.text === 'scroll line') !== undefined, 'XP 105 scrolls with 405 lines');
       strongly(one(c => c.battle?.troopId === 7) !== undefined, 'XP 301 keeps its troop');
-      strongly(one(c => c.modifyVariable?.operand?.gameData?.kind === 'pokemonCount') !== undefined, 'XP 122-kind7 keeps the Essentials operand');
-      strongly(m.maps[0].mwgEvents[0].pages[0].commands[2]?.then?.length === 0, 'XP 126 stays a dummy drop');
+      strongly(one(c => c.modifyVariable?.operand?.gameData?.kind === 'partySize') !== undefined, 'XP 122-kind7 index 1 reads the stock party size');
+      strongly(m.maps[0].mwgEvents[0].pages[0].commands[2]?.then?.[0]?.changeItem?.id === 5, 'XP 126 changes items like stock XP');
+      strongly(one(c => c.changeParty?.actorId === 2 && c.changeParty.add === true) !== undefined, 'XP 129 changes the party');
+      strongly(m.playerSprite?.name === 'Hero' && m.playerSprite?.index === 0 && m.playerSprite?.source === 'start-actor', 'XP start actor gives the player sprite');
+      strongly(m.titleScreen?.title1 === 'title' && m.titleScreen?.drawTitle === false && m.titleScreen?.assets?.kind === 'decoded' && !m.titleScreen?.kind, 'XP stock title uses System title_name');
+      strongly(m.display.width === 512 && m.display.height === 384, "XP screen size comes from the game's own resize_screen constant");
+      strongly(!m.playerMetadata, 'XP manifest carries no framework player metadata');
+      strongly(!converted.vx?.titleScreen && !converted.ace?.titleScreen, 'VX/Ace fixtures without title art keep the generic title');
     }
     for (const [ok, label] of vxChecks) if (!ok) fail(`VX fixture: ${label}`);
     if (converted.vx && converted.xp && converted.ace) notes.push(`VX/XP/Ace fixtures convert (${vxChecks.length} checks)`);
