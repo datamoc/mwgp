@@ -994,9 +994,11 @@ export async function startMwgPlayer(canvas, project) {
       this.rpgExtra.playerName = value || current || 'Player';
     }
     presentDialogue(request) {
+      // A portrait arrives as the converter's `{ name, index }` face reference; a face whose sheet did not load shows the text alone.
+      const face = request.portrait?.name !== undefined ? portraitSheets.get(request.portrait.name) : null;
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(), pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
+        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(face ? 'portrait' : 'normal'), pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker, portrait: face ? face.get(request.portrait.index) : undefined }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -1021,13 +1023,9 @@ export async function startMwgPlayer(canvas, project) {
         this.commonEventDepth--;
       }
     }
-    presentChoice(command) {
-      const sheet = command.portrait ? portraitSheets.get(command.portrait.name) : null;
-      return new Promise(resolve => {
-        this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(sheet ? 'portrait' : 'normal'), pages: [{ text: this.resolveEscapeCodes(command.ask || ''), portrait: sheet ? sheet.get(command.portrait.index) : undefined }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
-        this.windows.push(box);
-      }).then(chosen => this.runBranch((command.branches || [])[Number(chosen)]));
+    async presentChoice(command) {
+      const chosen = await this.presentDialogue({ text: command.ask || '', portrait: command.portrait, choices: command.choices || [] });
+      return this.runBranch((command.branches || [])[Number(chosen)]);
     }
     async openShop(spec) {
       const goods = (spec?.goods || []).filter(entry => Number(entry?.id) > 0);
@@ -1481,15 +1479,6 @@ export async function startMwgPlayer(canvas, project) {
       return new Promise(resolve => {
         this.dialogue = true;
         const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight('scroll'), pages: [{ text: this.resolveEscapeCodes(scroll.text) }], speed, autoAdvance: hold, dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: () => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(); } });
-        this.windows.push(box);
-      });
-    }
-    presentPortrait(command) {
-      const sheet = portraitSheets.get(command.portrait.name);
-      if (!sheet) return Promise.resolve();
-      return new Promise(resolve => {
-        this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight('portrait'), pages: [{ text: this.resolveEscapeCodes(command.say || command.ask || ''), portrait: sheet.get(command.portrait.index), }], choices: (command.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -3080,7 +3069,6 @@ export function prepareEventCommands(commands, scene) {
     // loudly and continue with the next command instead of aborting the event.
     if (command.unsupported) return { call: () => scene.unsupportedCommand('command', command.unsupported) };
     if (command.turn) return { call: () => typeof command.turn === 'object' ? scene.turnRoute(command.turn) : scene.turnPlayer(command.turn) };
-    if (command.portrait && (command.say !== undefined || command.ask !== undefined)) return { call: () => scene.presentPortrait(command) };
     return command;
   });
 }
