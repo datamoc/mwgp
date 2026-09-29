@@ -272,17 +272,23 @@ export async function startMwgPlayer(canvas, project) {
   const renderSheetEntries = sheetEntries.map((entry, index) => sheetResults[index]?.status === 'fulfilled' ? entry : { ...entry, url: placeholderUrl });
   const fallbackSheetUrl = renderSheetEntries[0]?.url || placeholderSheet();
   for (const entry of missingSheets) console.warn(`MWGP tileset sheet '${entry.url}' is missing; using a placeholder for slot ${entry.slot}`);
-  const sheets = await Promise.all(renderSheetEntries.map(entry => entry.slot < 4
+  // MV A4 (slot 3) is drawn by the library's native autotile layer (`mode: 'mixed'`: floor and wall tables by kind row)
+  // when the library also carries the table-edge strip and shadow layer this player pairs with it; older libraries
+  // keep the static atlas for every family. A placeholder standing in for a missing sheet has no autotile art to sample.
+  const hasEngineExtras = typeof mwg.TileMap.prototype?.addShadowLayer === 'function';
+  const mvA4Native = hasNativeAutotiles && hasEngineExtras && !isXp && renderSheetEntries.some(entry => entry.slot === 3 && entry.url !== placeholderUrl);
+  const sheets = await Promise.all(renderSheetEntries.map(entry => entry.slot < 4 && !(mvA4Native && entry.slot === 3)
     ? buildAutotileSheet(entry.url, entry.slot, mwg, tilesetFlags)
     : Promise.resolve(mwg.SpriteSheet.grid(entry.url, tileSize))));
+  const mvA4Sheet = mvA4Native ? sheets[renderSheetEntries.findIndex(entry => entry.slot === 3)] : null;
+  // The A2 sheet stays on the atlas; its table-edge strips read the raw sheet.
+  const mvA2Entry = renderSheetEntries.find(entry => entry.slot === 1 && entry.url !== placeholderUrl);
+  const mvA2Raw = hasEngineExtras && !isXp && mvA2Entry ? mwg.SpriteSheet.grid(mvA2Entry.url, tileSize) : null;
   const xpAutotileUrls = xpAutotileEntries.map(entry => entry.url);
   const xpAutotileResults = isXp ? await Promise.allSettled(xpAutotileUrls.map(loadResource)) : [];
   const xpAutotileSheets = isXp ? xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status === 'fulfilled').map(entry => ({ ...entry, sheet: mwg.SpriteSheet.grid(entry.url, 16) })) : [];
   for (const entry of xpAutotileEntries.filter((_, index) => xpAutotileResults[index]?.status !== 'fulfilled')) console.warn(`MWGP XP autotile '${entry.url}' is missing; keeping the compatibility path for this map`);
-  // XP's autotile layout is uniform per source image and maps directly to MWG.
-  // MV A4 mixes floor and wall tables by kind row, so it stays on the
-  // adapter's engine-faithful atlas path until MWG can express that per-kind
-  // table selection without duplicating a slot claim.
+  // XP's autotile layout is uniform per source image and maps directly to MWG; MV A4 rides `mode: 'mixed'` (above).
   const nativeAutotilesReady = hasNativeAutotiles && isXp && xpAutotileEntries.length > 0 && xpAutotileSheets.length === xpAutotileEntries.length;
   const playerUrl = project.assets?.characters && project.playerSprite?.name ? `${project.assets.root}/img/characters/${encodeURIComponent(project.playerSprite.name)}.png` : null;
   const eventNames = [...new Set([...(mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => [page.image?.name, ...collectRouteImageNames(page.commands)])), ...Object.values(project.commonEvents || {}).flatMap(commands => collectRouteImageNames(commands))].filter(Boolean))];
@@ -356,7 +362,9 @@ export async function startMwgPlayer(canvas, project) {
     ? Number(tileset?.priorities?.[tile] ?? 0) >= 2
     : (Number(tilesetFlags[tile] ?? 0) & 0x10) !== 0;
   const isAutotile = tile => isXp ? tile > 0 && tile < xpStaticBase : tile >= 2048 && tile < 8192;
-  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) || (nativeAutotilesReady && isAutotile(tile)) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
+  // Cells a native autotile layer draws instead of the static atlas: every XP autotile, and MV A4 (ids 5888-8191).
+  const isNativeAutotile = tile => isXp ? nativeAutotilesReady && isAutotile(tile) : mvA4Native && tile >= 5888 && tile < 8192;
+  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) || isNativeAutotile(tile) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
   // An XP autotile id (48 per slot) whose slot has no image in the tileset (or a missing file) has no set to
   // resolve against, and addAutotileLayer throws on it; such cells draw nothing (as RPG Maker does).
   const xpAutotileSlots = new Set(xpAutotileSheets.map(entry => entry.index));
@@ -370,8 +378,17 @@ export async function startMwgPlayer(canvas, project) {
     return 0;
   });
   const aboveLayers = isXp
-    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) && !(nativeAutotilesReady && isAutotile(tile)) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY))
-    : [effectiveTiles.map(tile => isAboveTile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY)];
+    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) && !isNativeAutotile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY))
+    : [effectiveTiles.map(tile => isAboveTile(tile) && !isNativeAutotile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY)];
+  // MV A4 cells, layer by layer: the ones drawn beneath characters, and (as one sparse layer, like the atlas path) the effective star tiles above them.
+  const isA4Cell = tile => tile >= 5888 && tile < 8192;
+  const mvA4Layers = mvA4Native ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isA4Cell(tile) && !isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
+  const mvA4AboveLayer = mvA4Native ? effectiveTiles.map(tile => isA4Cell(tile) && isAboveTile(tile) ? tile : mwg.EMPTY) : null;
+  // Map layer 4 holds shadow bits and the engine draws them after layers 0-1; a table's front edge goes on the cell below it.
+  const shadowBits = hasEngineExtras && !isXp ? rpgmLayer(map, 4) : null;
+  const hasShadow = shadowBits?.some(bits => (bits & 0x0f) !== 0);
+  const tableEdgeCells = mvA2Raw && !isXp ? mwg.rpgmTableEdgeCells({ width: map.width, height: map.height, ground: rpgmLayer(map, 0), objects: rpgmLayer(map, 1), flags: tilesetFlags }) : null;
+  const hasTableEdge = tableEdgeCells?.some(tile => tile > 0);
   const xpAboveAutotileLayers = isXp ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => tile > 0 && tile < xpStaticBase && isAboveTile(tile) && hasAutotileSet(tile) ? tile : mwg.EMPTY)) : [];
   const PlayerScene = class extends mwg.Scene2D {
     create() {
@@ -404,6 +421,9 @@ export async function startMwgPlayer(canvas, project) {
       layers.forEach((data, index) => {
         this.tileMap.addLayer(`rpgm-${index}`, data);
         if (isXp && xpAutotileSheets.length) this.tileMap.addAutotileLayer(`rpgm-xp-${index}`, xpAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
+        if (mvA4Native) this.tileMap.addAutotileLayer(`rpgm-a4-${index}`, mvA4Layers[index], { sheet: mvA4Sheet, slot: 3, mode: 'mixed' });
+        if (index === 1 && hasShadow) this.tileMap.addShadowLayer('rpgm-shadow', shadowBits.map(bits => bits & 0x0f));
+        if (index === 1 && hasTableEdge) this.tileMap.addAutotileLayer('rpgm-table-edge', tableEdgeCells, { sheet: mvA2Raw, slot: 1, tableEdge: true });
       });
       world.addChild(this.tileMap);
       this.tileMap.zIndex = 0;
@@ -412,6 +432,7 @@ export async function startMwgPlayer(canvas, project) {
         this.aboveMap.addLayer(`rpgm-above-${index}`, data);
         if (isXp && xpAutotileSheets.length) this.aboveMap.addAutotileLayer(`rpgm-xp-above-${index}`, xpAboveAutotileLayers[index], xpAutotileSheets.map(entry => ({ sheet: entry.sheet, format: 'rpgm-xp', index: entry.index })));
       });
+      if (mvA4AboveLayer) this.aboveMap.addAutotileLayer('rpgm-a4-above', mvA4AboveLayer, { sheet: mvA4Sheet, slot: 3, mode: 'mixed' });
       this.aboveMap.zIndex = 1000000000;
       this.fog = initialFogUrl && loadedUrls.has(initialFogUrl) && mwg.TiledSprite ? new mwg.TiledSprite({ texture: mwg.Resources.texture(initialFogUrl), width: game.width, height: game.height }) : null;
       if (this.fog) { this.fog.alpha = Math.max(0, Math.min(1, Number(mapSettings.fogOpacity ?? 0) / 255)); this.stage.addChild(this.fog); }
