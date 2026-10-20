@@ -45,6 +45,6 @@ jobs:
           npm run export:converter
           npm run export:studio
       - name: Stage the version on npm (goes live only after approval on npmjs.com)
-        run: npm stage publish --provenance --loglevel verbose
+        run: npm stage publish --provenance
       - name: Next step
         run: echo "Staged mwgp@${{ inputs.version }}. Approve it on https://www.npmjs.com/package/mwgp (Staged versions) with MFA."
