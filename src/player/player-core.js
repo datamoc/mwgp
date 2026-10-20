@@ -3,6 +3,7 @@ import { AudioManager } from './audio-manager.js';
 import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
 import { canEncounter, encounterProgress, encounterStepCount, followerStep, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
+import { WeatherLayer } from './weather.js';
 import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
 
 import { runMenu } from './menu.js';
@@ -520,6 +521,7 @@ export async function startMwgPlayer(canvas, project) {
       this.saves = new mwg.SaveSystem({ namespace: `mwgp:${project.source?.projectName || 'project'}`, version: 1 });
       const newGame = new URLSearchParams(globalThis.location?.search || '').get('newGame') === '1';
       if (newGame) {
+        globalThis.__mwgpArrival = 'new';
         try { this.saves.delete('runtime-transition'); } catch (error) { console.warn('MWGP new-game transition cleanup failed', error); }
         const clean = new URL(globalThis.location.href); clean.searchParams.delete('newGame'); history.replaceState(null, '', clean);
       }
@@ -587,11 +589,19 @@ export async function startMwgPlayer(canvas, project) {
       if (isXp && globalThis.__mwgpPlayerCharacter) Promise.resolve().then(() => this.setPlayerCharacter(globalThis.__mwgpPlayerCharacter));
       this.pictureLayer = new mwg.Container2D();
       this.stage.addChild(this.pictureLayer);
+      // Weather particles sit on the screen, above the map and pictures and below the windows.
+      this.weatherSprites = new mwg.Container2D();
+      this.stage.addChild(this.weatherSprites);
+      this.weatherLayer = new WeatherLayer({ layer: this.weatherSprites, width: game.width, height: game.height, createSprite: texture => new mwg.TintedSprite({ texture }), createTexture: spec => weatherTexture(mwg, spec) });
       // RPG Maker draws pictures below the message/choice windows: the window
       // stack joins the stage after the picture layer, so a fullscreen splash
       // can never cover the question text (Pokemon Void intro).
       this.windows = new mwg.WindowStack();
       this.stage.addChild(this.windows);
+      // Scene_Map starts the map name window only for a transfer or a new game, not for a loaded save.
+      const arrival = globalThis.__mwgpArrival || 'load';
+      globalThis.__mwgpArrival = null;
+      this.showMapName(arrival);
       this.windows.setViewport(game.width, game.height);
       this.pictureSprites = new Map();
       this.pictureTweens = new Map();
@@ -746,6 +756,8 @@ export async function startMwgPlayer(canvas, project) {
       this.windows.update(dt);
       this.tickTimer(dt);
       this.screenEffects?.update(dt);
+      this.weatherLayer?.update(dt);
+      this.updateMapName(dt);
       // AnimatedSprite deliberately does not advance itself: MWG expects the
       // owning scene (or a SpriteGroup) to provide the frame delta. Without
       // this call the player keeps the texture selected at construction time,
@@ -892,7 +904,7 @@ export async function startMwgPlayer(canvas, project) {
       this.cameraPan.y = tween.from.y + (tween.to.y - tween.from.y) * t;
       if (t >= 1) this.panTween = null;
     }
-    resize(width, height) { this.camera?.setViewport(width, height); this.windows.setViewport(width, height); this.screenEffects?.setViewport(width, height); this.updateCamera(); }
+    resize(width, height) { this.weatherLayer?.resize(width, height); this.camera?.setViewport(width, height); this.windows.setViewport(width, height); this.screenEffects?.setViewport(width, height); this.updateCamera(); }
     // Game_Followers: the party's second to fourth members walk behind the leader. Each follower takes the cell its
     // predecessor vacated on the same step, so the line follows the leader cell by cell (followerStep, map-rules.js).
     buildFollowers(world) {
@@ -1359,18 +1371,24 @@ export async function startMwgPlayer(canvas, project) {
         await this.presentDialogue({ text: 'Purchased ' + String(entry.item.name || 'item') + '.' });
       }
     }
+    // Change Weather (236): particles on the weather layer; a screen tint only when the layer could not be made.
     setWeather(weather) {
       const type = String(weather?.type || 'none').toLowerCase();
-      if (type === 'none' || !this.screenEffects) {
+      const power = Number(weather?.power || 0);
+      const wait = weather?.wait ? new Promise(resolve => setTimeout(resolve, Math.max(0, Number(weather.duration || 0)) * 1000)) : Promise.resolve();
+      if (type === 'none') {
         this.weather = { type: 'none', power: 0 };
+        this.weatherLayer?.clear();
         this.screenEffects?.clear();
-        return weather?.wait ? new Promise(resolve => setTimeout(resolve, Math.max(0, Number(weather.duration || 0)) * 1000)) : Promise.resolve();
+        return wait;
       }
-      const color = type === 'snow' ? 0xdcecff : type === 'storm' ? 0x53627a : 0x416fa8;
-      const strength = Math.max(0, Math.min(1, Number(weather.power || 0) / 9 * 0.35));
-      this.weather = { type, power: Number(weather.power || 0) };
-      this.screenEffects.setTint(color, strength);
-      return weather.wait ? new Promise(resolve => setTimeout(resolve, Math.max(0, Number(weather.duration || 0)) * 1000)) : Promise.resolve();
+      this.weather = { type, power };
+      if (this.weatherLayer) this.weatherLayer.set(type, power);
+      else if (this.screenEffects) {
+        const color = type === 'snow' ? 0xdcecff : type === 'storm' ? 0x53627a : 0x416fa8;
+        this.screenEffects.setTint(color, Math.max(0, Math.min(1, power / 9 * 0.35)));
+      }
+      return wait;
     }
     async gameOver() {
       const present = request => this.presentDialogue(request);
@@ -1466,6 +1484,7 @@ export async function startMwgPlayer(canvas, project) {
       return Boolean(database.troops && database.enemies && database.actors && database.classes && database.skills);
     }
     async startBattle(spec) {
+      this.hideMapName();
       this.rearmEncounter();
       if (this.hasTroopDatabase()) return this.startTroopBattle(spec, project.database || {});
       return this.startDuelBattle(spec, project.database || {});
@@ -2008,7 +2027,42 @@ export async function startMwgPlayer(canvas, project) {
     }
     // The full menu (Item / Skill / Equip / Status / Save / Options / Game End, src/player/menu.js) when the project
     // has the MV/MZ database; the small Save/Close box below otherwise (XP conversions carry no database).
+    // Window_MapName: the map's display name fades in across the top on a transfer or a new game, holds for about two
+    // and a half seconds, and fades out. Command 281 can switch it off; the menu and a battle close it.
+    showMapName(arrival) {
+      const name = String(mapEntry?.data?.displayName || '');
+      if (!name || (arrival !== 'transfer' && arrival !== 'new') || this.rpgExtra.system?.mapNameDisplay === false) return;
+      this.hideMapName();
+      const width = 360, height = 36;
+      const band = new mwg.TintedSprite({ texture: gradientTexture(mwg) });
+      band.width = width; band.height = height;
+      const label = new mwg.Label(name);
+      label.x = Math.max(0, (width - label.width) / 2); label.y = Math.max(0, (height - label.height) / 2);
+      const box = new mwg.Container2D();
+      box.addChild(band);
+      box.addChild(label);
+      box.alpha = 0;
+      this.stage.addChild(box);
+      this.mapName = { box, frames: 0 };
+    }
+    updateMapName(dt) {
+      const map = this.mapName;
+      if (!map) return;
+      map.frames += dt * 60;
+      // Fade in over 16 frames, hold, fade out over 16 frames from frame 166 (the window's +16 steps and 150-frame hold).
+      const fadeIn = Math.min(1, map.frames / 16);
+      const fadeOut = Math.max(0, 1 - Math.max(0, map.frames - 166) / 16);
+      map.box.alpha = Math.min(fadeIn, fadeOut);
+      if (map.frames >= 182) this.hideMapName();
+    }
+    hideMapName() {
+      if (!this.mapName) return;
+      this.mapName.box.removeFromParent?.();
+      this.mapName.box.destroy?.({ children: true });
+      this.mapName = null;
+    }
     async openMenu() {
+      this.hideMapName();
       const database = project.database || {};
       if (!(database.actors && database.classes && database.items && database.skills)) return this.openSimpleMenu();
       if (this.menuOpen) return undefined;
@@ -2894,6 +2948,7 @@ export async function startMwgPlayer(canvas, project) {
       if (active !== scene) previous = active;
       active = scene;
       release(staleNeighbour);
+      globalThis.__mwgpArrival = 'transfer';
       game.switchScene(scene);
     } catch (error) {
       console.warn('MWGP in-page map switch failed; reloading the page instead', error);
@@ -2928,6 +2983,34 @@ function bindPlayerInput(mwg) {
 // The character graphics of the followers (party members 2 to 4) are preloaded with the event graphics.
 function followerCharacterNames(project) {
   return (project.initialParty || []).slice(1, 4).map(id => project.database?.actors?.[Number(id)]?.characterName).filter(Boolean);
+}
+
+// A particle bitmap: a white streak, or a white disc for snow, as the engine's Weather sprite draws them.
+function weatherTexture(mwg, spec) {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, spec.width); canvas.height = Math.max(1, spec.height);
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  if (spec.circle) {
+    context.beginPath();
+    context.arc(canvas.width / 2, canvas.height / 2, canvas.width / 2, 0, Math.PI * 2);
+    context.fill();
+  } else context.fillRect(0, 0, canvas.width, canvas.height);
+  return mwg.Texture2D.from(canvas);
+}
+
+// The map name band: a horizontal dim gradient, clear at the ends and dark in the middle (Window_MapName).
+function gradientTexture(mwg) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 1;
+  const context = canvas.getContext('2d');
+  const gradient = context.createLinearGradient(0, 0, 256, 0);
+  gradient.addColorStop(0, 'rgba(0,0,0,0)');
+  gradient.addColorStop(0.5, 'rgba(0,0,0,0.6)');
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 256, 1);
+  return mwg.Texture2D.from(canvas);
 }
 
 function facingOf(dx, dy) {
