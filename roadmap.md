@@ -258,7 +258,7 @@ loudly. New test frameworks remain out of scope.
   transfer, story order, once-only gap warning, blocking tiles) plus an import check and a stale-
   reference search. `AGENTS.md` fallback paragraphs updated to match.
 - **T113 — Play all 5 converted games through the manual checklist and log results (done).** The four
-  remaining games (Karryn's Prison, Way of Corruption 0.33 A, Pokemon Void 0.1.4 and 0.1.5) were played
+  remaining games (Karryn's Prison, MV game C, Pokemon Void 0.1.4 and 0.1.5) were played
   in Chromium against `docs/play-checklist.md` and logged as dated rows, together with the common steps:
   movement (harness key-hold recipe — instant `keyboard.press` falls between frames under swiftshader;
   walls block, floors pass, turn-in-place counts), NPC dialogue with real text advancing and closing,

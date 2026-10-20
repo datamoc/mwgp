@@ -17,7 +17,7 @@
 `bypassed` plugins hook layers the player runs with its own code; their behaviour is not applied. Each is a candidate for an
 equivalent built on the mwg exports above or on a package; decide per plugin from its redefined members (`--json`).
 
-# Plugin capabilities: Way of Corruption 0.33 A
+# Plugin capabilities: MV game C
 
 14 plugins: mixed 7, logic-runs 6, bypassed 1
 

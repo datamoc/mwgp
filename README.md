@@ -115,7 +115,7 @@ Files already under `www/mods/` are copied as part of the web root.
 Convert a single MV/MZ project:
 
 ```powershell
-npm run convert:mv -- "RPGM_versions\Way of Corruption 0.33 A" "MWGP_versions\Way of Corruption 0.33 A" --copy-assets
+npm run convert:mv -- "RPGM_versions\<project>" "MWGP_versions\<project>" --copy-assets
 ```
 
 Convert a single XP/VX/Ace (Ruby / RGSS) project:
@@ -127,7 +127,7 @@ npm run convert:rgss -- "RPGM_versions\Pokemon Void 0.1.4" "MWGP_versions\Pokemo
 Use `--copy-tilesets` to decode only the tilesets needed by the Pixi player:
 
 ```powershell
-npm run convert:mv -- "RPGM_versions\Way of Corruption 0.33 A" "MWGP_versions\Way of Corruption 0.33 A" --copy-tilesets
+npm run convert:mv -- "RPGM_versions\<project>" "MWGP_versions\<project>" --copy-tilesets
 ```
 
 Add `--copy-characters` to include the first party actor's MV character sprite.
@@ -141,7 +141,7 @@ Add `--copy-audio` to decode only the referenced sound effects from `audio/se`.
 
 Use `--copy-assets` for a fully self-contained decoded copy. It can be very large for encrypted RPGM resources.
 
-Validate a generated project with `npm run validate:mwgp -- "MWGP_versions\Way of Corruption 0.33 A\mwgp.json"`.
+Validate a generated project with `npm run validate:mwgp -- "MWGP_versions\<project>\mwgp.json"`.
 
 Each generated manifest also contains `compatibility.commands`, with source MV command
 counts and `supported`, `partial`, or `unsupported` status. The player reads that report
