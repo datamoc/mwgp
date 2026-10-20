@@ -13,11 +13,12 @@
 //   keys:     { down(name), pressed(name), update() } keyboard probe (all false when absent)
 //   reopened: (name) => source text of a game unit that re-opens that module, or undefined
 
+import { loadAssetUrl } from './asset-url.js';
+
 const clamp255 = value => Math.max(0, Math.min(255, Number(value) || 0));
 const clampTone = value => Math.max(-255, Math.min(255, Number(value) || 0));
 
 // Standard RGSS Input constants (RPG Maker XP help, "Input"), mapped to the default keyboard.
-import { assetUrl } from './asset-url.js';
 
 export const INPUT_CONSTANTS = { USE: 13, BACK: 12, ACTION: 11, JUMPUP: 14, JUMPDOWN: 15, SPECIAL: 16, AUX1: 17, AUX2: 18, DOWN: 2, LEFT: 4, RIGHT: 6, UP: 8, A: 11, B: 12, C: 13, X: 14, Y: 15, Z: 16, L: 17, R: 18, SHIFT: 21, CTRL: 22, ALT: 23, F5: 25, F6: 26, F7: 27, F8: 28, F9: 29, MOUSELEFT: 38, MOUSEMIDDLE: 39, MOUSERIGHT: 40, MOUSEX1: 41, MOUSEX2: 42 };
 const INPUT_KEYS = {
@@ -223,7 +224,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
         this.width = image.naturalWidth; this.height = image.naturalHeight;
       };
       image.onerror = () => warnOnce(`Bitmap.new(${name})`, 'could not be loaded');
-      image.src = assetUrl(url);
+      loadAssetUrl(url).then(src => { image.src = src; });
     }
     get canvas() { return this.__canvas; }
     // mkxp-z's Bitmap#save_to_png / #to_file: the pixels become a file of the in-memory file system (see writeImage in rgss-script.js).

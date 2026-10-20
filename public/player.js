@@ -1,4 +1,4 @@
-import { assetUrl } from '/asset-url.js';
+import { assetUrl, loadAssetUrl } from '/asset-url.js';
 
 const playerHost = globalThis.mwgpPlayerHost;
 const id = playerHost?.id || new URLSearchParams(location.search).get('id');
@@ -225,12 +225,15 @@ async function capturePluginTitleLayers(project, savesExist) {
     if (!scene) return null;
     // Bitmap sizes drive the plugins' own frame/position maths (refresh runs
     // on update), so load the real images before updating the scene.
-    await Promise.all(bitmaps.map(b => new Promise(resolve => {
-      const img = new Image();
-      img.onload = () => { b.width = img.naturalWidth; b.height = img.naturalHeight; resolve(); };
-      img.onerror = () => resolve();
-      img.src = assetUrl(`${titleRoot}/img/${b.folder}/${encodeURIComponent(b.name)}.png`);
-    })));
+    await Promise.all(bitmaps.map(async b => {
+      const src = await loadAssetUrl(`${titleRoot}/img/${b.folder}/${encodeURIComponent(b.name)}.png`);
+      await new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => { b.width = img.naturalWidth; b.height = img.naturalHeight; resolve(); };
+        img.onerror = () => resolve();
+        img.src = src;
+      });
+    }));
     for (let i = 0; i < 3; i++) { try { scene.update && scene.update(); } catch { break; } }
     const layers = sprites.filter(s => s.bitmap?.name && s.visible !== false && s.bitmap.width > 0)
       .map(s => ({ folder: s.bitmap.folder, name: s.bitmap.name, x: Number(s.x) || 0, y: Number(s.y) || 0,
@@ -308,6 +311,13 @@ async function showTitleScreen(project) {
     try { pluginTitle = await capturePluginTitleLayers(project, savesExist); }
     catch (error) { console.warn('MWGP plugin title unavailable', error); }
   }
+  // The title is built with synchronous DOM URLs, so every image it shows is loaded first.
+  const titleImages = titleAssets ? [
+    title.title1 && `${titleRoot}/img/titles1/${encodeURIComponent(title.title1)}.png`,
+    title.title2 && `${titleRoot}/img/titles2/${encodeURIComponent(title.title2)}.png`,
+  ].filter(Boolean) : [];
+  for (const layer of pluginTitle?.layers ?? []) titleImages.push(`${titleRoot}/img/${layer.folder}/${encodeURIComponent(layer.name)}.png`);
+  await Promise.all(titleImages.map(url => loadAssetUrl(url)));
   if (pluginTitle) {
     const stage = document.createElement('div');
     stage.className = 'mwgp-title-stage';

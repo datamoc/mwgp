@@ -330,7 +330,9 @@ try {
         const assets = await gamePage.evaluate(async () => {
           const scene = globalThis.__MWG__.currentScene;
           const root = scene.project.assets.root;
-          const img = new Image(); img.src = mwg.Resources.resolve(root + '/img/pictures/' + encodeURIComponent('été') + '.png'); await img.decode();
+          const picture = root + '/img/pictures/' + encodeURIComponent('été') + '.png';
+          await mwg.Resources.load([picture]); // a typed image value is readable only after load()
+          const img = new Image(); img.src = mwg.Resources.resolve(picture); await img.decode();
           const audio = await scene.audio.load('bgm', 'test');
           return { tile: mwg.Resources.isLoaded(root + '/img/tilesets/Probe.png'),
             character: mwg.Resources.isLoaded(root + '/img/characters/%24Hero.png'), imageWidth: img.naturalWidth,

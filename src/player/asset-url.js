@@ -9,5 +9,28 @@ export function assetUrl(url) {
     // nonexistent server/file URL or aborting the title screen synchronously.
     return 'data:application/octet-stream,';
   }
-  return resources.resolve(url);
+  try {
+    return resources.resolve(url);
+  } catch (error) {
+    // A typed image value answers only after load() has read it (see loadAssetUrl).
+    console.warn(`MWGP embedded resource is not loaded: ${url}`, error);
+    return 'data:application/octet-stream,';
+  }
+}
+
+// Images in a compiled build may be typed values, which mwg reads only in
+// load(). Await this before a DOM consumer asks for an image URL. Fonts, movies
+// and audio stay plain URLs and keep using assetUrl().
+export async function loadAssetUrl(url) {
+  const resources = globalThis.mwg?.Resources;
+  const needsLoad = resources?.isCompiled?.() && !/^(?:blob|data):/.test(url) &&
+    (!resources.has || resources.has(url)) && !resources.isLoaded(url);
+  if (needsLoad) {
+    try {
+      await resources.load([url]);
+    } catch (error) {
+      console.warn(`MWGP embedded image could not be loaded: ${url}`, error);
+    }
+  }
+  return assetUrl(url);
 }

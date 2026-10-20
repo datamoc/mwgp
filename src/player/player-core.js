@@ -1,6 +1,6 @@
 
 import { AudioManager } from './audio-manager.js';
-import { assetUrl } from './asset-url.js';
+import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
 import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
 
@@ -2697,7 +2697,8 @@ function placeholderSheet() {
 
 async function buildAutotileSheet(url, slot, mwg, flags = []) {
   if (typeof document === 'undefined' || typeof Image === 'undefined') return mwg.SpriteSheet.grid(url, 48);
-  const image = await new Promise((resolve, reject) => { const value = new Image(); value.onload = () => resolve(value); value.onerror = reject; value.src = assetUrl(url); });
+  const src = await loadAssetUrl(url);
+  const image = await new Promise((resolve, reject) => { const value = new Image(); value.onload = () => resolve(value); value.onerror = reject; value.src = src; });
   const count = AUTOTILE_COUNTS[slot];
   const canvas = document.createElement('canvas');
   canvas.width = 16 * 48; canvas.height = Math.ceil(count / 16) * 48;
