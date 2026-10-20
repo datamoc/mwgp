@@ -126,10 +126,12 @@ async function mvFixture(folder, mz) {
   await mkdir(join(base, 'img/faces'), { recursive: true });
 }
 
+// The payload is one or more <script> elements, read back in order (standalone.js).
+const PAYLOAD_ELEMENT = /<script (?:data-mwgp-payload|id="mwgp-payload") type="application\/octet-stream">([\s\S]*?)<\/script>/g;
 function unpackStandalone(html) {
-  const payload = html.match(/<script id="mwgp-payload" type="application\/octet-stream">([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(payload, 'standalone contains a compressed payload');
-  const gzip = Buffer.concat(payload.trim().split('\n').map(line => Buffer.from(line, 'base64')));
+  const payloads = [...html.matchAll(PAYLOAD_ELEMENT)];
+  assert.ok(payloads.length, 'standalone contains a compressed payload');
+  const gzip = Buffer.concat(payloads.flatMap(match => match[1].trim().split('\n')).map(line => Buffer.from(line, 'base64')));
   assert.deepEqual([...gzip.subarray(0, 3)], [31, 139, 8], 'payload is gzip');
   const raw = gunzipSync(gzip), length = raw.readUInt32LE(0);
   const metadata = JSON.parse(raw.subarray(4, 4 + length));
@@ -363,7 +365,7 @@ try {
     } finally { await gamePage.close(); }
   }
   const goodHtml = await readFile(join(work, 'mv-play.html'), 'utf8');
-  const corruptHtml = goodHtml.replace(/(<script id="mwgp-payload" type="application\/octet-stream">)([\s\S]*?)(<\/script>)/, (_, before, payload, after) => {
+  const corruptHtml = goodHtml.replace(/(<script data-mwgp-payload type="application\/octet-stream">)([\s\S]*?)(<\/script>)/, (_, before, payload, after) => {
     const bytes = Buffer.concat(payload.trim().split('\n').map(line => Buffer.from(line, 'base64')));
     bytes[bytes.length - 8] ^= 1; // corrupt gzip CRC32, preserving the packed files
     return before + '\n' + bytes.toString('base64') + '\n' + after;
@@ -377,6 +379,21 @@ try {
     assert.ok(await corruptPage.evaluate(() => !globalThis.mwg), 'corrupt gzip never starts the player');
     console.log('PASS corrupted gzip: visible failure before player execution');
   } finally { await corruptPage.close(); }
+  // A game too large for one script element is written as several: the same
+  // page, its payload cut into one-line elements, must still open and start.
+  const chunkedPath = join(work, 'chunked-game.html');
+  const lines = [...goodHtml.matchAll(PAYLOAD_ELEMENT)][0][1].trim().split('\n');
+  assert.ok(lines.length > 1, 'the sample payload has several lines to split');
+  const chunkedHtml = goodHtml.replace(PAYLOAD_ELEMENT, () => lines
+    .map(line => `<script data-mwgp-payload type="application/octet-stream">\n${line}\n</script>`).join('\n'));
+  await writeFile(chunkedPath, chunkedHtml);
+  const chunkedPage = await context.newPage();
+  try {
+    await chunkedPage.goto(pathToFileURL(chunkedPath).href);
+    await chunkedPage.waitForFunction(() => globalThis.mwgpStandalone?.files?.has('mwgp.json'), null, { timeout: 60000 });
+    assert.equal(await chunkedPage.evaluate(() => document.querySelectorAll('script[data-mwgp-payload]').length), 0, 'every payload element is read and removed');
+    console.log('PASS chunked payload: several script elements unpack and start the player');
+  } finally { await chunkedPage.close(); }
   // A malformed input must recover without a reload; cancellation must
   // immediately return control and permit selecting another project.
   const bad = join(work, 'bad'); await put(bad, 'readme.txt', 'not a game');

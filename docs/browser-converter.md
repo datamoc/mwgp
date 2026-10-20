@@ -27,6 +27,16 @@ decompression and file reconstruction run as streams rather than one enormous JS
 The gzip checksum is checked before starting the game. The HTML file itself is ordinary HTML,
 so neither a `.gz` extension nor HTTP `Content-Encoding` headers are needed.
 
+The payload is split over several `<script data-mwgp-payload type="application/octet-stream">`
+elements, each at most 64M base64 characters (`PAYLOAD_PART_CHARS` in `src/converter-browser/standalone.js`).
+A single script's text cannot exceed the engine's string limit (about 512M characters): a larger one reads
+back empty and the gzip stream reports "truncated". Elements are split only between base64 lines, and the
+reader concatenates them in document order. Small games keep one element. Readers also accept the older
+single `id="mwgp-payload"` element. A page above 500 MB is refused by the converter page and the standalone
+Studio ("too large to open here"): reading it as one text would hit the same limit. The standalone player
+itself opens such pages. Its file host keeps the unpacked bytes and makes each image's data URL when the
+engine first asks for it: converting every image up front exhausted the browser's memory for large games.
+
 Alongside `mwgp.json` and the game's decoded `assets/` tree, the payload also carries the Studio
 files (`.mwgp-conversion.json`, `.mwgp-merge-report.json`) and the empty resource directories,
 so the editable MWGP directory can be recreated from the game page alone (see below). The

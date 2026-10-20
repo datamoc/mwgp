@@ -17,7 +17,7 @@ const I18N = {
     studio_recreated_folder: 'Folder recreated in {name}: {count} files{version}.', studio_writing: 'Writing the folder… {path}',
     studio_fail: 'Recreation failed: {message}', studio_version: ', player {version}', studio_version_unknown: ', unknown player version (older page)',
     err_gzip: 'This browser does not support gzip decompression. Use a recent browser.',
-    err_not_standalone: 'This file is not a self-contained MWGP game page.', err_truncated: 'The game content is truncated.',
+    err_not_standalone: 'This file is not a self-contained MWGP game page.', err_truncated: 'The game content is truncated.', err_too_large: 'This page is too large to open here. Use the standalone player to play it.',
     err_invalid_index: 'Invalid game index.', err_unknown_format: 'Unknown game format.', err_invalid_entry: 'Invalid game entry.',
     err_unexpected: 'Unexpected content after the game.', err_no_manifest: 'The game page contains no MWGP manifest (mwgp.json).',
     err_invalid_path: 'Invalid path in the game page: {path}', err_zip_files: 'The folder exceeds ZIP limits. Use folder writing instead.',
@@ -38,7 +38,7 @@ const I18N = {
     studio_recreated_folder: 'Dossier recréé dans {name} : {count} fichiers{version}.', studio_writing: 'Écriture du dossier… {path}',
     studio_fail: 'Recréation impossible : {message}', studio_version: ', player {version}', studio_version_unknown: ', player d’une version inconnue (page ancienne)',
     err_gzip: 'Ce navigateur ne prend pas en charge la décompression gzip. Utilisez un navigateur récent.',
-    err_not_standalone: 'Ce fichier n’est pas une page de jeu MWGP autoporteuse.', err_truncated: 'Le contenu du jeu est tronqué.',
+    err_not_standalone: 'Ce fichier n’est pas une page de jeu MWGP autoporteuse.', err_truncated: 'Le contenu du jeu est tronqué.', err_too_large: 'Cette page est trop volumineuse pour être ouverte ici. Utilisez le lecteur autonome pour y jouer.',
     err_invalid_index: 'Index de jeu invalide.', err_unknown_format: 'Format de jeu inconnu.', err_invalid_entry: 'Entrée de jeu invalide.',
     err_unexpected: 'Contenu inattendu après le jeu.', err_no_manifest: 'La page de jeu ne contient pas de manifeste MWGP (mwgp.json).',
     err_invalid_path: 'Chemin invalide dans la page de jeu : {path}', err_zip_files: 'Le dossier dépasse les limites du ZIP. Utilisez l’écriture dans un dossier.',
@@ -59,7 +59,7 @@ const I18N = {
     studio_recreated_folder: 'Ordner neu erstellt in {name}: {count} Dateien{version}.', studio_writing: 'Ordner wird geschrieben… {path}',
     studio_fail: 'Neuerstellung fehlgeschlagen: {message}', studio_version: ', Player {version}', studio_version_unknown: ', unbekannte Player-Version (ältere Seite)',
     err_gzip: 'Dieser Browser unterstützt keine gzip-Dekompression. Nutzen Sie einen aktuellen Browser.',
-    err_not_standalone: 'Diese Datei ist keine eigenständige MWGP-Spielseite.', err_truncated: 'Die Spieldaten sind abgeschnitten.',
+    err_not_standalone: 'Diese Datei ist keine eigenständige MWGP-Spielseite.', err_truncated: 'Die Spieldaten sind abgeschnitten.', err_too_large: 'Diese Seite ist zu groß, um sie hier zu öffnen. Nutzen Sie den eigenständigen Player zum Spielen.',
     err_invalid_index: 'Ungültiger Spielindex.', err_unknown_format: 'Unbekanntes Spielformat.', err_invalid_entry: 'Ungültiger Spieleintrag.',
     err_unexpected: 'Unerwarteter Inhalt nach dem Spiel.', err_no_manifest: 'Die Spielseite enthält kein MWGP-Manifest (mwgp.json).',
     err_invalid_path: 'Ungültiger Pfad in der Spielseite: {path}', err_zip_files: 'Der Ordner überschreitet die ZIP-Grenzen. Nutzen Sie stattdessen die Ordner-Ausgabe.',
@@ -237,11 +237,15 @@ $('#studio-source').onchange = () => {
   setStudioStatus(studioFile ? t('studio_ready') : t('studio_start'));
   studioBusyState();
 };
+// The payload is one or more <script> elements (see standalone.js). Pages above
+// this size cannot be held as one string by the engine, so they are refused.
+const STANDALONE_PAYLOAD_LIMIT = 500 * 1024 * 1024;
 async function readStandaloneGame(file) {
   if (typeof DecompressionStream !== 'function') throw new Error(t('err_gzip'));
-  const payload = (await file.text()).match(/<script id="mwgp-payload" type="application\/octet-stream">([\s\S]*?)<\/script>/)?.[1];
-  if (!payload) throw new Error(t('err_not_standalone'));
-  const lines = payload.trim().split('\n');
+  if (file.size > STANDALONE_PAYLOAD_LIMIT) throw new Error(t('err_too_large'));
+  const payloads = [...(await file.text()).matchAll(/<script (?:data-mwgp-payload|id="mwgp-payload") type="application\/octet-stream">([\s\S]*?)<\/script>/g)];
+  if (!payloads.length) throw new Error(t('err_not_standalone'));
+  const lines = payloads.flatMap(match => match[1].trim().split('\n'));
   let line = 0;
   const compressed = new ReadableStream({ pull(controller) {
     if (line === lines.length) { controller.close(); return; }

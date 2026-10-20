@@ -6,6 +6,12 @@
 import { PLAYER_VERSION } from '../standalone-player/player-version.js';
 import { t } from '../../public/i18n.js';
 
+// The payload layout of standalone.js (kept in step with it): <script> elements of
+// at most PAYLOAD_PART_CHARS base64 characters, read back in order. A page above
+// STANDALONE_PAYLOAD_LIMIT bytes cannot be held as one string, so it is refused.
+const PAYLOAD_PATTERN = /<script (?:data-mwgp-payload|id="mwgp-payload") type="application\/octet-stream">([\s\S]*?)<\/script>/g;
+const PAYLOAD_PART_CHARS = 64 * 1024 * 1024;
+const STANDALONE_PAYLOAD_LIMIT = 500 * 1024 * 1024;
 const textExtensions = new Set(['.js', '.json', '.txt', '.csv', '.xml', '.ini', '.css', '.rb', '.md', '.fnt']);
 const isTextAsset = path => textExtensions.has(path.slice(path.lastIndexOf('.')).toLowerCase());
 const stripStudio = value => {
@@ -147,10 +153,11 @@ export function installStudioHost(runtime) {
 
   async function unpack(file) {
     if (typeof DecompressionStream !== 'function') throw new Error(t('sa_no_gzip'));
+    if (file.size > STANDALONE_PAYLOAD_LIMIT) throw new Error(t('sa_too_large'));
     const pageText = await file.text();
-    const payload = pageText.match(/<script id="mwgp-payload" type="application\/octet-stream">([\s\S]*?)<\/script>/)?.[1];
-    if (!payload) throw new Error(t('sa_not_standalone'));
-    const lines = payload.trim().split('\n');
+    const payloads = [...pageText.matchAll(PAYLOAD_PATTERN)];
+    if (!payloads.length) throw new Error(t('sa_not_standalone'));
+    const lines = payloads.flatMap(match => match[1].trim().split('\n'));
     let line = 0;
     const compressed = new ReadableStream({ pull(controller) {
       if (line === lines.length) { controller.close(); return; }
@@ -271,21 +278,34 @@ export function installStudioHost(runtime) {
     const raw = new Blob([size, header, ...files.map(file => file.blob)]);
     const compressed = await new Response(raw.stream().pipeThrough(new CompressionStream('gzip'))).blob();
     const bytes = new Uint8Array(await compressed.arrayBuffer());
-    let payload = '';
-    for (let offset = 0; offset < bytes.length; offset += 512 * 1024) payload += base64(bytes.subarray(offset, offset + 512 * 1024)) + '\n';
-    const script = `<script id="mwgp-payload" type="application/octet-stream">\n${payload}</script>`;
-    let html;
+    // The payload goes out as several <script> elements, each under the engine's
+    // string limit (see standalone.js). Only the page's head and tail are
+    // strings; the payload is spliced in as Blob parts, never as one string.
+    const elements = [];
+    let lines = [], lineChars = 0;
+    const closeElement = () => { elements.push(`<script data-mwgp-payload type="application/octet-stream">\n${lines.join('')}</script>\n`); lines = []; lineChars = 0; };
+    for (let offset = 0; offset < bytes.length; offset += 512 * 1024) {
+      const line = base64(bytes.subarray(offset, offset + 512 * 1024)) + '\n';
+      if (lineChars > 0 && lineChars + line.length > PAYLOAD_PART_CHARS) closeElement();
+      lines.push(line); lineChars += line.length;
+    }
+    closeElement();
+    let head, tail;
     if (state.pageText) {
-      html = state.pageText.replace(/<script id="mwgp-payload" type="application\/octet-stream">[\s\S]*?<\/script>/, () => script);
+      const matches = [...state.pageText.matchAll(PAYLOAD_PATTERN)];
+      const last = matches.at(-1);
+      head = state.pageText.slice(0, matches[0].index);
+      tail = state.pageText.slice(last.index + last[0].length);
     } else {
       const [before, after] = runtime.shell.split('<!-- GAME_PAYLOAD -->');
-      html = before + script + '\n<script>' + runtime.bootstrap + '</script>\n' + after;
+      head = before;
+      tail = '\n<script>' + runtime.bootstrap + '</script>\n' + after;
     }
     // The shell carries its own copy of the version (head meta + visible
-    // line): restamp it so the page agrees with its payload.
-    html = html.replace(/<meta name="mwgp-player-version" content="[^"]*">/, `<meta name="mwgp-player-version" content="${playerVersion}">`)
+    // line, both before the payload): restamp it so the page agrees with its payload.
+    head = head.replace(/<meta name="mwgp-player-version" content="[^"]*">/, `<meta name="mwgp-player-version" content="${playerVersion}">`)
       .replace(/(id="player-version"[^>]*>Player MWGP )[^<]*/, `$1${playerVersion}`);
-    return new Blob([html], { type: 'text/html;charset=utf-8' });
+    return new Blob([head, ...elements, tail], { type: 'text/html;charset=utf-8' });
   }
 
   const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
