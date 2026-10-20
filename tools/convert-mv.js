@@ -868,8 +868,8 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
       return [{ systemFlag: { key: `vehicleBgm:${Number(command.parameters?.[0] || 0)}`, value: audio?.name ? audioParams(audio) : null } }];
     }
     if (command.code === 323) return [{ systemFlag: { key: `vehicleImage:${Number(command.parameters?.[0] || 0)}`, value: { name: String(command.parameters?.[1] || ''), index: Number(command.parameters?.[2] || 0) } } }];
-    // 217 gathers followers around the player; this player draws none, so there is nothing to gather.
-    if (command.code === 217) return [];
+    // 217 gathers the followers on the leader's cell while the event waits (the player is held meanwhile).
+    if (command.code === 217) return [{ gatherFollowers: true }];
     // 124 timer: [0 start | 1 stop, seconds]. 206 boards or leaves the vehicle at the player's position.
     if (command.code === 124) return [{ timer: Number(command.parameters?.[0] || 0) === 0 ? { start: Number(command.parameters?.[1] || 0) } : { stop: true } }];
     if (command.code === 206) return [{ vehicleBoard: true }];
@@ -1471,7 +1471,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
   function buildCompatibilityReport(counts) {
     const supported = new Set([
       301, 331, 332, 333, 334, 336, 351, 0, 101, 102, 105, 108, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129, 135,
-      201, 202, 203, 204, 211, 212, 335, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243,
+      201, 202, 203, 204, 211, 212, 335, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243, 136, 216, 217,
       244, 245, 246, 249, 250, 251, 311, 313, 314, 316, 318, 319, 321, 322,
       124, 132, 133, 134, 139, 206, 261, 312, 315, 317, 320, 324, 325, 326, 339, 354,
       104, 233, 282, 283, 284, 285, 340, 342,
@@ -1504,10 +1504,10 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
     // (src/player/battle.js), 331-334/336 act on the battle's enemies: all supported, within the limits
     // documented in AGENTS.md (no battle graphics, no plugin damage engines).
     // 352 is supported through the player's slot-1 save path.
-    // 337 draws no animation (battles have none). 136/216/281 are stored in rpgExtra.system but nothing consumes them
-    // yet: there are no random encounters, followers or map name window (see the map-features plan).
-    // 137 hides the formation screen; 138/140/323 are stored only; 217 (gather followers) is dropped.
-    const partial = new Set([111, 122, 205, 355, 356, 357, 136, 137, 138, 140, 216, 217, 281, 323, 337]);
+    // 337 draws no animation (battles have none). 136 switches random encounters, 216 shows the followers and 217
+    // gathers them. 281 (map name window) is stored in rpgExtra.system but nothing shows it yet.
+    // 137 hides the formation screen; 138/140/323 are stored only.
+    const partial = new Set([111, 122, 205, 355, 356, 357, 137, 138, 140, 281, 323, 337]);
     // Keep the report honest for each project. These command families are only
     // partial when this conversion actually had to emit a loud fallback for one
     // of their shapes; otherwise a game that uses only the supported subset

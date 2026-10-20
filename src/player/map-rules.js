@@ -48,3 +48,11 @@ export function isDashing({ allowed = false, shiftHeld = false, alwaysDash = fal
 export function moveSpeedFor(baseSpeed, dashing) {
   return dashing ? baseSpeed * 2 : baseSpeed;
 }
+
+// Game_Follower.chaseCharacter on the grid: one cell toward the target, along x first, or null when already on it.
+export function followerStep(own, target) {
+  const dx = target.x - own.x, dy = target.y - own.y;
+  if (dx === 0 && dy === 0) return null;
+  if (dx !== 0) return { dx: Math.sign(dx), dy: 0 };
+  return { dx: 0, dy: Math.sign(dy) };
+}

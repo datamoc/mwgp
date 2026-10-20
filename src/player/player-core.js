@@ -2,7 +2,7 @@
 import { AudioManager } from './audio-manager.js';
 import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
-import { canEncounter, encounterProgress, encounterStepCount, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
+import { canEncounter, encounterProgress, encounterStepCount, followerStep, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
 import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
 
 import { runMenu } from './menu.js';
@@ -326,7 +326,7 @@ export async function startMwgPlayer(canvas, project) {
   // XP's autotile layout is uniform per source image and maps directly to MWG; MV A4 rides `mode: 'mixed'` (above).
   const nativeAutotilesReady = hasNativeAutotiles && isXp && xpAutotileEntries.length > 0 && xpAutotileSheets.length === xpAutotileEntries.length;
   const playerUrl = project.assets?.characters && project.playerSprite?.name ? `${project.assets.root}/img/characters/${encodeURIComponent(project.playerSprite.name)}.png` : null;
-  const eventNames = [...new Set([...(mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => [page.image?.name, ...collectRouteImageNames(page.commands)])), ...Object.values(project.commonEvents || {}).flatMap(commands => collectRouteImageNames(commands))].filter(Boolean))];
+  const eventNames = [...new Set([...(mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => [page.image?.name, ...collectRouteImageNames(page.commands)])), ...Object.values(project.commonEvents || {}).flatMap(commands => collectRouteImageNames(commands)), ...followerCharacterNames(project)].filter(Boolean))];
   const eventUrls = project.assets?.characters ? eventNames.map(name => `${project.assets.root}/img/characters/${encodeURIComponent(name)}.png`) : [];
   const portraitNames = [...new Set((mapEntry?.mwgEvents || []).flatMap(event => event.pages.flatMap(page => collectPortraitNames(page.commands))))];
   const portraitUrls = project.assets?.faces ? portraitNames.map(name => `${project.assets.root}/img/faces/${encodeURIComponent(name)}.png`) : [];
@@ -582,6 +582,7 @@ export async function startMwgPlayer(canvas, project) {
       this.player.width = this.playerSize.w; this.player.height = this.playerSize.h; this.player.tint = 0xffffff;
       this.player.zIndex = characterDepth(position.y, 1);
       world.addChild(this.player);
+      this.buildFollowers(world);
       world.addChild(this.aboveMap);
       if (isXp && globalThis.__mwgpPlayerCharacter) Promise.resolve().then(() => this.setPlayerCharacter(globalThis.__mwgpPlayerCharacter));
       this.pictureLayer = new mwg.Container2D();
@@ -788,6 +789,7 @@ export async function startMwgPlayer(canvas, project) {
       // dialogue block this update, matching Scene_Map gating in the engine).
       this.rpgExtra.playtime = (this.rpgExtra.playtime || 0) + dt;
       this.mover.update(dt);
+      this.updateFollowers(dt);
       // Advance the repeat timer during a step. Freezing it until the mover is
       // idle creates a visible pause between consecutive held-key steps.
       this.cooldown -= dt;
@@ -796,7 +798,7 @@ export async function startMwgPlayer(canvas, project) {
       if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1; this.syncActiveVehicle(); if (!this.runEventAt(x, y, 'touch')) this.countEncounterStep(x, y); }
       if (!this.mover.isMoving) this.maybeStartEncounter();
       if (this.mover.isMoving) return;
-      if (this.cooldown <= 0) {
+      if (this.cooldown <= 0 && !this.gathering) {
         this.mover.speed = moveSpeedFor(PLAYER_MOVE_SPEED, this.dashRule());
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
         if (direction) {
@@ -873,6 +875,12 @@ export async function startMwgPlayer(canvas, project) {
       // top-left units), so fractional movement positions anchor correctly here.
       this.player.x = x * scale + (scale - this.playerSize.w) / 2 + this.tileMap.x; this.player.y = y * scale + scale - this.playerSize.h - this.playerSize.shift + this.tileMap.y; this.player.zIndex = characterDepth(y, 1);
       for (const item of this.eventSprites || []) { item.sprite.x = item.event.x * scale + (scale - item.w) / 2 + this.tileMap.x; item.sprite.y = item.event.y * scale + scale - item.h - item.shift + this.tileMap.y; item.sprite.zIndex = characterDepth(item.event.y); }
+      for (const follower of this.followers || []) {
+        const fx = follower.renderX ?? follower.mover.x, fy = follower.renderY ?? follower.mover.y;
+        follower.sprite.x = fx * scale + (scale - follower.size.w) / 2 + this.tileMap.x;
+        follower.sprite.y = fy * scale + scale - follower.size.h - follower.size.shift + this.tileMap.y;
+        follower.sprite.zIndex = characterDepth(fy, 0.5 - 0.1 * follower.memberIndex);
+      }
       for (const item of this.vehicleSprites || []) { item.sprite.x = Number(item.vehicle.x) * scale + this.tileMap.x; item.sprite.y = Number(item.vehicle.y) * scale + this.tileMap.y; item.sprite.zIndex = characterDepth(Number(item.vehicle.y)); }
     }
     updateCameraPan(dt) {
@@ -885,12 +893,77 @@ export async function startMwgPlayer(canvas, project) {
       if (t >= 1) this.panTween = null;
     }
     resize(width, height) { this.camera?.setViewport(width, height); this.windows.setViewport(width, height); this.screenEffects?.setViewport(width, height); this.updateCamera(); }
+    // Game_Followers: the party's second to fourth members walk behind the leader. Each follower takes the cell its
+    // predecessor vacated on the same step, so the line follows the leader cell by cell (followerStep, map-rules.js).
+    buildFollowers(world) {
+      for (const follower of this.followers || []) { follower.sprite.removeFromParent?.(); follower.sprite.destroy?.(); }
+      this.followers = [];
+      const party = this.rpgExtra.party || [];
+      for (let memberIndex = 1; memberIndex < Math.min(party.length, this.maxBattleMembers()); memberIndex++) {
+        const record = this.actorRecord(party[memberIndex]);
+        const actor = project.database?.actors?.[Number(party[memberIndex])] || {};
+        const name = String(record.characterName ?? actor.characterName ?? '');
+        const index = Number(record.characterIndex ?? actor.characterIndex ?? 0);
+        const geom = eventGeoms.get(name), sheet = eventSheets.get(name);
+        const hasGraphic = Boolean(name && geom && sheet);
+        const sprite = sheet ? new mwg.AnimatedSprite({ texture: sheet.get(characterCellIndex(geom, index, 2, 1)) }) : new mwg.TintedSprite({ texture: mwg.Resources.texture(fallbackSheetUrl) });
+        if (sheet) (isXp ? addXpCharacterAnimations : addCharacterAnimations)(sprite, sheet, index, geom.big);
+        const size = geom ? characterPixelSize(geom, tileSize) : { w: tileSize, h: tileSize, shift: 0 };
+        sprite.width = size.w; sprite.height = size.h; sprite.tint = 0xffffff;
+        const mover = new mwg.Rpg.GridMover(sprite, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: PLAYER_MOVE_SPEED, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
+        world.addChild(sprite);
+        this.followers.push({ memberIndex, hasGraphic, sprite, mover, size });
+      }
+    }
+    // Game_Followers.visible: switched by command 216 (the system flag is true when they show).
+    followersShown() { return this.rpgExtra.system?.followers !== false; }
+    // The cells before a step: the leader's, then each follower's. A follower moves to the cell in front of it in this list.
+    followerTrail() {
+      return [{ x: this.mover.x, y: this.mover.y }, ...(this.followers || []).map(follower => ({ x: follower.mover.x, y: follower.mover.y }))];
+    }
+    moveFollowers(trail) {
+      this.followers.forEach((follower, index) => {
+        const step = followerStep({ x: follower.mover.x, y: follower.mover.y }, trail[index]);
+        if (step) follower.mover.moveBy(step.dx, step.dy);
+      });
+    }
+    updateFollowers(dt) {
+      const shown = this.followersShown();
+      for (const follower of this.followers || []) {
+        follower.mover.speed = this.mover.speed;
+        follower.mover.update(dt);
+        // The mover writes each follower's map-space pixel position; updateCamera places it on screen.
+        follower.renderX = follower.sprite.x / tileSize; follower.renderY = follower.sprite.y / tileSize;
+        follower.sprite.visible = shown && follower.hasGraphic;
+      }
+      if (this.gathering) this.stepGather();
+    }
+    // Command 217 (Gather Followers): the event waits while the followers walk to the leader's cell; the player is held.
+    gatherFollowers() {
+      if (!this.followers?.length) return Promise.resolve();
+      return new Promise(resolve => { this.gathering = resolve; });
+    }
+    stepGather() {
+      let gathered = true;
+      this.followers.forEach((follower, index) => {
+        if (follower.mover.isMoving) { gathered = false; return; }
+        const target = index === 0 ? { x: this.mover.x, y: this.mover.y } : { x: this.followers[index - 1].mover.x, y: this.followers[index - 1].mover.y };
+        const step = followerStep({ x: follower.mover.x, y: follower.mover.y }, target);
+        if (step) { follower.mover.moveBy(step.dx, step.dy); gathered = false; }
+      });
+      if (!gathered) return;
+      const done = this.gathering;
+      this.gathering = null;
+      done();
+    }
     // One step of the player in a direction: the keyboard and a clicked route both take it.
     // Returns whether the player moved.
     stepPlayer(dx, dy, facing) {
       this.facing = facing;
       const x = this.mover.x + dx, y = this.mover.y + dy;
+      const trail = this.followerTrail();
       const moved = this.canStep(x, y, dx, dy) && this.mover.moveBy(dx, dy);
+      if (moved) this.moveFollowers(trail);
       // MV checks player-touch events at the attempted front cell even
       // when the event itself has priority 1 and therefore blocks entry.
       // Doors/stairs in XP projects commonly use exactly that shape.
@@ -2771,6 +2844,7 @@ export async function startMwgPlayer(canvas, project) {
     teardown() {
       window.removeEventListener('keydown', this.saveKey);
       canvas?.removeEventListener('pointerdown', this.onPointerDown);
+      if (this.gathering) { const done = this.gathering; this.gathering = null; done(); }
       this.audio?.stopAll();
       this.windows?.destroy();
     }
@@ -2849,6 +2923,11 @@ function bindPlayerInput(mwg) {
     mwg.Input.bindAxis('left', pad, 0, -1);
     mwg.Input.bindAxis('right', pad, 0, 1);
   }
+}
+
+// The character graphics of the followers (party members 2 to 4) are preloaded with the event graphics.
+function followerCharacterNames(project) {
+  return (project.initialParty || []).slice(1, 4).map(id => project.database?.actors?.[Number(id)]?.characterName).filter(Boolean);
 }
 
 function facingOf(dx, dy) {
@@ -3438,6 +3517,7 @@ export function prepareEventCommands(commands, scene) {
     if (Array.isArray(command.branches)) return { call: () => scene.presentChoice({ ...command, branches: command.branches.map(branch => prepareEventCommands(branch, scene)), cancelBranch: command.cancelBranch && prepareEventCommands(command.cancelBranch, scene) }) };
     if (command.transfer) return { call: state => scene.transfer(command.transfer, state) };
     if (command.systemFlag) return { call: () => scene.setSystemFlag(command.systemFlag) };
+    if (command.gatherFollowers) return { call: () => scene.gatherFollowers() };
     if (command.changeActorStat) return { call: state => scene.applyActorStat(state, command.changeActorStat) };
     if (command.changeActorText) return { call: () => scene.changeActorText(command.changeActorText) };
     if (command.changeActorImages) return { call: () => scene.changeActorImages(command.changeActorImages) };

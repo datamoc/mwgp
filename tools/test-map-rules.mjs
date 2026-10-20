@@ -1,6 +1,6 @@
 // Unit checks for the random encounter rules (src/player/map-rules.js). Pure functions, seeded randomness.
 import assert from 'node:assert/strict';
-import { canEncounter, encounterProgress, encounterStepCount, isDashing, moveSpeedFor, pickTroop } from '../src/player/map-rules.js';
+import { canEncounter, encounterProgress, encounterStepCount, followerStep, isDashing, moveSpeedFor, pickTroop } from '../src/player/map-rules.js';
 
 const fixed = value => () => value;
 // Small deterministic generator (mulberry32) so the distribution checks are repeatable.
@@ -84,4 +84,10 @@ assert.equal(isDashing({ allowed: true, alwaysDash: true, shiftHeld: true }), fa
 assert.equal(moveSpeedFor(6, false), 6);
 assert.equal(moveSpeedFor(6, true), 12);
 
-console.log('map rules ok (step counts, progress, blockers, troop pick, regions, weights, dash)');
+// followerStep: one cell toward the target, x before y, null on the target itself.
+assert.equal(followerStep({ x: 2, y: 2 }, { x: 2, y: 2 }), null);
+assert.deepEqual(followerStep({ x: 2, y: 2 }, { x: 5, y: 2 }), { dx: 1, dy: 0 });
+assert.deepEqual(followerStep({ x: 2, y: 2 }, { x: 0, y: 4 }), { dx: -1, dy: 0 });
+assert.deepEqual(followerStep({ x: 2, y: 2 }, { x: 2, y: 0 }), { dx: 0, dy: -1 });
+
+console.log('map rules ok (step counts, progress, blockers, troop pick, regions, weights, dash, followers)');

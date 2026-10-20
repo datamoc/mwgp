@@ -296,6 +296,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
     [{ changeEquipment: { actor: 2, slot: 1, item: 5 } }, 'applyActor'],
     [{ changeProfile: { actor: 2, profile: 'A hero' } }, 'applyActor'],
     [{ systemFlag: { key: 'menuAccess', value: false } }, 'setSystemFlag'],
+    [{ gatherFollowers: true }, 'gatherFollowers'],
     [{ changeActorStat: { stat: 'mp', scope: 1, actor: 1, amount: 5, sign: 1 } }, 'applyActorStat'],
     [{ changeActorText: { actor: 1, field: 'name', text: 'Ann' } }, 'changeActorText'],
     [{ changeActorImages: { actor: 1, characterName: 'Actor2', characterIndex: 1, faceName: '', faceIndex: 0, battlerName: '' } }, 'changeActorImages'],
