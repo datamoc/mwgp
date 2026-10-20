@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MWGP — Jouer à vos jeux RPG Maker et les éditer dans le navigateur</title>
+<meta name="description" content="MWGP convertit les jeux RPG Maker MV, MZ, XP, VX et VX Ace en un format portable qui se joue et s'édite dans tout navigateur — avec Node, ou en fichiers autoporteurs.">
+<link rel="stylesheet" href="style.css">
+<link rel="alternate" hreflang="en" href="index.html">
+<link rel="alternate" hreflang="de" href="de.html">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="fr.html">MWGP</a>
+    <nav aria-label="Navigation principale">
+      <a href="converter.html">Convertisseur</a>
+      <a href="studio-standalone.html">Studio</a>
+      <a href="https://github.com/datamoc/mwgp">GitHub</a>
+      <a href="https://www.npmjs.com/package/mwgp">npm</a>
+    </nav>
+    <nav aria-label="Langue">
+      <a href="index.html">EN</a>
+      <a href="fr.html" aria-current="true">FR</a>
+      <a href="de.html">DE</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <h1>Vos jeux RPG Maker, jouables et éditables dans tout navigateur.</h1>
+  <p class="lede">MWGP convertit les jeux créés avec RPG Maker MV, MZ, XP, VX et VX Ace en un manifeste
+  portable (<code>mwgp.json</code>) accompagné de ressources décodées. Les jeux convertis se jouent hors
+  connexion dans le navigateur, et MWGP Studio permet de les inspecter et de les éditer — cartes,
+  événements, dialogues, base de données et ressources — sans ouvrir RPG Maker. La conversion s'effectue
+  soit avec Node.js (la version de référence), soit directement dans votre navigateur depuis un seul
+  fichier autoporteur : aucune installation, aucun serveur, et vos fichiers de jeu ne quittent jamais
+  votre ordinateur.</p>
+  <div class="cta">
+    <a class="btn" href="converter.html">Convertir un jeu maintenant</a>
+    <a class="btn secondary" href="studio-standalone.html">Ouvrir le Studio</a>
+  </div>
+
+  <h2>À utiliser immédiatement, dans votre navigateur</h2>
+  <div class="grid">
+    <section class="card">
+      <h3>Convertisseur navigateur</h3>
+      <p>Choisissez le dossier complet d'un jeu et convertissez-le. Le résultat par défaut est une page
+      HTML jouable unique — lecteur, moteur et jeu embarqués — qui s'ouvre hors connexion par
+      double-clic. Les exports MWGP en ZIP ou en dossier restent disponibles pour le Studio.</p>
+      <p><a class="btn" href="converter.html">Utiliser le convertisseur en ligne</a></p>
+      <p><a class="btn secondary" href="converter.html" download>Télécharger converter.html</a></p>
+    </section>
+    <section class="card">
+      <h3>Studio autonome</h3>
+      <p>L'éditeur graphique complet en un seul fichier : ouvrez une page de jeu autoporteuse, éditez
+      cartes, événements, commandes, acteurs et ressources, testez le jeu, puis téléchargez la page de
+      jeu régénérée avec vos éditions et la version du player que vous avez définie.</p>
+      <p><a class="btn" href="studio-standalone.html">Utiliser le Studio en ligne</a></p>
+      <p><a class="btn secondary" href="studio-standalone.html" download>Télécharger le fichier du Studio</a></p>
+    </section>
+  </div>
+
+  <h2>Version Node ou version navigateur ?</h2>
+  <table>
+    <tr><th></th><th>Version Node (référence)</th><th>Versions navigateur (autoporteuses)</th></tr>
+    <tr><th>Convertisseur</th>
+      <td>Les commandes <code>convert-mv</code>, <code>convert-rgss</code> et <code>convert:auto</code> convertissent des bibliothèques entières, écrivent dans de vrais dossiers, protègent les projets édités lors des reconversions et sont couvertes par les suites de test du projet.</td>
+      <td>Un seul fichier HTML convertit un jeu à la fois, entièrement sur votre machine, et produit une page jouable, un ZIP ou un dossier. Mêmes règles de conversion et mêmes limites de compatibilité que la commande.</td></tr>
+    <tr><th>Studio</th>
+      <td>Le Studio serveur édite les dossiers convertis sur disque : sauvegardes protégées, versions des ressources, comparaison avec la dernière conversion, et validation par le validateur MWGP complet avant toute publication.</td>
+      <td>Le Studio autonome édite une page de jeu autoporteuse en mémoire et télécharge une page régénérée. C'est le même éditeur graphique, sans serveur.</td></tr>
+    <tr><th>Lecteur</th>
+      <td>Le lanceur sert votre bibliothèque en local et joue les jeux convertis dans le navigateur.</td>
+      <td>Chaque page de jeu embarque son lecteur, son moteur et ses ressources ; les sauvegardes vivent dans le stockage du navigateur.</td></tr>
+  </table>
+
+  <h3>Limites des versions autoporteuses</h3>
+  <ul>
+    <li>Tout tient dans la mémoire du navigateur : les très gros jeux peuvent dépasser ce qu'un onglet peut contenir ; préférez alors le convertisseur Node ou la sortie en dossier.</li>
+    <li>L'écriture directe dans un dossier exige l'API File System Access (Chromium) ; sinon, utilisez le téléchargement ZIP. L'export ZIP suit les limites classiques (moins de 4 Gio, moins de 65 535 fichiers).</li>
+    <li>Les pages de jeu demandent un navigateur récent avec décompression gzip (<code>DecompressionStream</code>). Les sauvegardes sont conservées par jeu dans le navigateur, jamais réécrites dans le fichier HTML.</li>
+    <li>Le Studio autonome conserve les éditions en mémoire jusqu'au téléchargement de la page régénérée ; il ne réécrit pas dans un dossier projet, les aperçus image/audio/vidéo des ressources ne se chargent pas via son API en mémoire (les ressources texte s'éditent normalement), et son contrôle structurel intégré est plus léger que le validateur Node.</li>
+    <li>La SoundFont propre au jeu est embarquée quand elle existe ; la SoundFont partagée de secours est une fonction du serveur Node, sinon le MIDI utilise le synthétiseur intégré.</li>
+    <li>La conversion ne vérifie pas le gameplay ; les suites de test Node et le harnais navigateur restent les contrôles de référence.</li>
+  </ul>
+
+  <h2>Télécharger avec npm</h2>
+  <p>Le paquet npm fournit la version Node : le lanceur, les convertisseurs et les commandes Studio,
+  sur toute machine avec Node.js 18 ou plus récent. Installation globale :</p>
+  <pre>npm install -g mwgp
+
+mwgp serve                      # lanceur local et serveur Studio
+mwgp convert-auto RPGM_versions MWGP_versions
+mwgp studio lift MWGP_versions/MonJeu/mwgp.json studio/MonJeu</pre>
+  <p>Ou sans installation, via <code>npx</code> :</p>
+  <pre>npx mwgp convert-mv "chemin/vers/MonJeu" "MWGP_versions/MonJeu"
+npx mwgp validate "MWGP_versions/MonJeu/mwgp.json"</pre>
+  <p>Vous préférez les sources ? Clonez le <a href="https://github.com/datamoc/mwgp">dépôt GitHub</a>,
+  lancez <code>npm install</code> puis <code>npm start</code>. Les versions navigateur en un fichier
+  ci-dessus sont générées depuis ces sources avec <code>npm run export:converter</code> et
+  <code>npm run export:studio</code>.</p>
+
+  <h2>Comment ça marche</h2>
+  <p>Les convertisseurs lisent les données du projet d'origine (JSON MV/MZ, ou données et scripts Ruby
+  XP/VX/Ace, archives RGSS chiffrées comprises) et écrivent un manifeste MWGP explicite : cartes avec
+  leurs commandes d'événements converties, base de données, images et audio décodés, JavaScript des
+  plugins du jeu et bibliothèque Ruby transpilée. Le lecteur exécute ce manifeste dans le navigateur ;
+  les scripts d'événements font tourner le code propre au jeu dans un bac à sable, sans réimplémenter
+  sa logique. La compatibilité est rapportée par projet, et toute forme non prise en charge produit un
+  avertissement explicite, jamais un abandon silencieux.</p>
+</main>
+<footer>
+  <div class="bar">
+    <span>MWGP — les jeux RPG Maker, partout.</span>
+    <nav aria-label="Pied de page">
+      <a href="https://github.com/datamoc/mwgp">Sources sur GitHub</a>
+      <a href="https://www.npmjs.com/package/mwgp">Paquet sur npm</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

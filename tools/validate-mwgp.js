@@ -17,6 +17,9 @@ check(Number.isInteger(project.version) && project.version >= 1, 'version must b
 check(Array.isArray(project.maps) && project.maps.length > 0, 'maps must be a non-empty array');
 check(project.initialMapId == null || project.maps.some(map => map.id === project.initialMapId), 'initialMapId must refer to a map');
 check(project.assets && typeof project.assets === 'object', 'assets metadata is required');
+// The player version a Studio assigns to the project; stamped into standalone
+// game pages when they are created. Optional: absent means the default.
+if (project.playerVersion !== undefined) check(typeof project.playerVersion === 'string' && /^\d+\.\d+\.\d+$/.test(project.playerVersion), 'playerVersion must be a version such as "0.0.1"');
 
 // A structurally valid manifest is not playable if its decoded resources were
 // never copied. Resolve relative asset roots from the manifest itself so this
@@ -181,7 +184,7 @@ function validateCommands(commands, eventId, mapId) {
       check(['set', 'add', 'subtract', 'multiply', 'divide', 'modulo'].includes(command.modifyVariable?.operation),
         `modifyVariable in event ${eventId} on map ${mapId} has an invalid operation`);
       const operand = command.modifyVariable?.operand;
-      if (operand?.gameData !== undefined) check(['itemCount', 'weaponCount', 'armorCount', 'playerX', 'playerY', 'partyMember', 'mapId', 'partySize', 'gold'].includes(operand.gameData?.kind),
+      if (operand?.gameData !== undefined) check(['itemCount', 'weaponCount', 'armorCount', 'playerX', 'playerY', 'partyMember', 'mapId', 'partySize', 'gold', 'steps', 'playtime', 'timer', 'saveCount', 'battleCount', 'winCount', 'escapeCount'].includes(operand.gameData?.kind),
         `modifyVariable in event ${eventId} on map ${mapId} has an invalid game-data kind`);
       if (operand?.script !== undefined) check(typeof operand.script?.source === 'string',
         `modifyVariable in event ${eventId} on map ${mapId} has a script operand without a source string`);

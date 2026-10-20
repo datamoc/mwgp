@@ -26,6 +26,10 @@ export const JS_NATIVE_ZERO_ARG_PROPERTIES = new Set([
   // method call on the left-hand side would become invalid JavaScript.
   'state'
 ]);
+// RPG::Map records decoded from RGSS Marshal files expose these as plain data
+// fields. A same-named accessor elsewhere in the game's Ruby must not turn
+// `@map.data` (or its sibling map metadata fields) into a JS method call.
+const RGSS_MAP_RECORD_FIELDS = new Set(['data', 'events', 'width', 'height', 'tileset_id']);
 
 let knownMethods = new Set(BUILTIN_ZERO_ARG_METHODS);
 
@@ -74,7 +78,17 @@ export class RgssCalls extends Filter.Processor {
     if (node.type === 'send' && receiver == null && selfMethods.has(String(method))) {
       return this.process_children(node.updated(args.length ? 'send' : 'call', [this.s('self'), method, ...args]));
     }
-    if (node.type === 'send' && args.length === 0 && knownMethods.has(method) && !JS_NATIVE_ZERO_ARG_PROPERTIES.has(String(method))) {
+    const mapRecordField = receiver?.type === 'ivar' && receiver.children?.[0] === '@map' && RGSS_MAP_RECORD_FIELDS.has(String(method));
+    // A Ruby class/module constant can expose its own zero-argument `keys` or
+    // `values` method, while `this.DATA.keys` is the transpiled Hash property
+    // that the runtime represents as an array. Force the call on constant
+    // receivers only; keeping the Hash property form intact is essential.
+    // All-caps constants conventionally hold data (especially Hash tables),
+    // whereas mixed-case constants name Ruby classes/modules with class methods.
+    // The runtime Hash adapter supports both `.keys` and `.keys()` already.
+    const constantHash = receiver?.type === 'const' && /^[A-Z0-9_]+$/.test(String(receiver.children?.[1]));
+    const constantMethod = receiver?.type === 'const' && !constantHash && ['keys', 'values', 'entries'].includes(String(method)) && knownMethods.has(method);
+    if (node.type === 'send' && args.length === 0 && knownMethods.has(method) && (!JS_NATIVE_ZERO_ARG_PROPERTIES.has(String(method)) || constantMethod) && !mapRecordField) {
       // Ruby permits receiver-less zero-argument method calls (current_gender)
       // and receiver calls (gender.capitalize) without parentheses. Ruby2JS
       // otherwise emits a function reference for the former, which then leaks

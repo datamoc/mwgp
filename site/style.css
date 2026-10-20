@@ -1,0 +1,32 @@
+:root { color-scheme: dark; --bg:#10131b; --panel:#191e2a; --line:#2e374a; --text:#f4f6fb; --muted:#aeb6c8; --accent:#e8b84b; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font-family: Georgia, 'Times New Roman', serif; }
+header { border-bottom: 2px solid var(--accent); }
+.bar { max-width: 1020px; margin: 0 auto; padding: 18px 24px; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+.brand { font-size: 22px; font-weight: 700; letter-spacing: .02em; color: var(--text); text-decoration:none; }
+nav { display:flex; gap:18px; flex-wrap:wrap; font-family: system-ui, sans-serif; font-size: 14px; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover, nav a:focus-visible { color: var(--accent); }
+nav a[aria-current] { color: var(--accent); font-weight: 700; }
+main { max-width: 1020px; margin: 0 auto; padding: 40px 24px 64px; }
+h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.08; margin: 0 0 16px; font-weight: 600; }
+h2 { font-size: 24px; margin: 44px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+h3 { font-size: 17px; margin: 22px 0 8px; font-family: system-ui, sans-serif; }
+p, li { font-family: system-ui, sans-serif; font-size: 15px; line-height: 1.65; color: var(--muted); }
+.lede { font-size: 18px; max-width: 68ch; }
+.cta { display:flex; gap:12px; flex-wrap:wrap; margin: 26px 0 6px; }
+.btn { font-family: system-ui, sans-serif; font-weight: 700; font-size: 14px; text-decoration:none; padding: 12px 20px; border-radius: 7px; border: 1px solid var(--accent); color:#141414; background: var(--accent); display:inline-block; }
+.btn.secondary { background: transparent; color: var(--accent); }
+.btn:hover, .btn:focus-visible { filter: brightness(1.1); }
+.grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:16px; margin-top: 18px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+.card h3 { margin-top: 0; color: var(--text); }
+.card p { font-size: 14px; }
+code, pre { font-family: Consolas, monospace; }
+code { background:#0b0e14; padding: 1px 5px; border-radius: 4px; color:#f0d48a; font-size: .92em; }
+pre { background:#0b0e14; border:1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x:auto; color:#f0d48a; font-size: 13px; line-height:1.6; }
+table { border-collapse: collapse; width: 100%; font-family: system-ui, sans-serif; font-size: 14px; margin: 14px 0; }
+th, td { border: 1px solid var(--line); padding: 9px 12px; text-align: left; vertical-align: top; color: var(--muted); }
+th { color: var(--text); background: var(--panel); }
+footer { border-top: 1px solid var(--line); }
+footer .bar { font-family: system-ui, sans-serif; font-size: 13px; color: var(--muted); }

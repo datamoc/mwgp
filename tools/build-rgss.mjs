@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { ensureCore, CORE_FILES, CORE_REVISION, sha256 } from './mkxp-core.mjs';
+import { assetLockBusy } from '../src/studio-assets.js';
 
 const require = createRequire(import.meta.url);
 const { ZipFile } = require('yazl');
@@ -46,6 +47,12 @@ async function archive(source, target, files) {
 }
 
 export async function buildRgss(source, output) {
+  if (['.mwgp-studio.json', '.mwgp-studio-assets.json'].some(name => existsSync(join(output, name)))) {
+    throw new Error('This output contains Studio edits. Use a separate output folder for the web build, or --mwgp for reconversion.');
+  }
+  if (await assetLockBusy(output)) {
+    throw new Error('A Studio resource operation is live on this output; wait for it and retry the web build.');
+  }
   if (!existsSync(join(source, 'Game.ini')) || !(
     existsSync(join(source, 'Game.rgssad')) || existsSync(join(source, 'Game.rgss2a')) || existsSync(join(source, 'Game.rgss3a')) ||
     existsSync(join(source, 'Data', 'Scripts.rxdata')) || existsSync(join(source, 'Data', 'Scripts.rvdata')) || existsSync(join(source, 'Data', 'Scripts.rvdata2'))

@@ -1,15 +1,23 @@
-// The game's own Marshal data (`Data/*.dat`: Pokémon Essentials' GameData registries, message tables, trainer lists...)
-// exported as JSON assets for the browser runtime. `load_data("Data/x.dat")` and the `GameData` registries read them
-// (src/player/rgss-script.js, `shipped`). Objects keep their Ruby class name and instance variables so the runtime can
-// rebuild instances of the game's own transpiled classes; a Hash becomes `{ "$map": [[key, value], ...] }` so integer and
-// string keys stay distinct.
+// The game's own Marshal data (`Data/*.dat` and RGSS database files) exported as JSON assets for the browser runtime.
+// This gives transformed startup code the same `load_data` inputs as the source game, including map and system data.
+// Ruby script archives are already transpiled and are excluded. Objects keep their Ruby class name and instance
+// variables so the runtime can rebuild instances of the game's own transpiled classes; a Hash becomes
+// `{ "$map": [[key, value], ...] }` so integer and string keys stay distinct.
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { rubySubclass } from './rgss-marshal.mjs';
 
 export function encodeRubyValue(value) {
   if (value === null || value === undefined || typeof value === 'string' || typeof value === 'boolean') return value ?? null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : { $num: String(value) };
   if (typeof value === 'bigint') return { $num: String(value) };
+  if (value?.[rubySubclass]) {
+    const base = Array.isArray(value) ? value.map(encodeRubyValue) : value instanceof Map
+      ? { $map: [...value].map(([key, item]) => [encodeRubyValue(key), encodeRubyValue(item)]) }
+      : null;
+    return { $rubySubclass: { ...value[rubySubclass], value: base, ivars: encodeRubyValue(value[rubySubclass].ivars) } };
+  }
+  if (value?.$rubySubclass) return { $rubySubclass: { ...value.$rubySubclass, value: encodeRubyValue(value.$rubySubclass.value), ivars: encodeRubyValue(value.$rubySubclass.ivars) } };
   if (value instanceof Map) return { $map: [...value].map(([key, item]) => [encodeRubyValue(key), encodeRubyValue(item)]) };
   if (Array.isArray(value)) return value.map(encodeRubyValue);
   if (value instanceof Uint8Array || (value?.type === 'Buffer' && Array.isArray(value.data))) return { $bytes: Buffer.from(value.data || value).toString('base64') };
@@ -17,11 +25,16 @@ export function encodeRubyValue(value) {
   return null;
 }
 
-// Every `Data/*.dat` that decodes becomes `<outDir>/<file>.json`; returns the file names written.
+// Every Marshal data file that decodes becomes `<outDir>/<file>.json`; returns the file names written.
 export async function exportRubyData(dataDir, outDir, decodeMarshal, log = () => {}) {
   const written = [];
   let names;
-  try { names = (await readdir(dataDir)).filter(name => /\.dat$/i.test(name)).sort(); } catch { return written; }
+  try {
+    names = (await readdir(dataDir))
+      .filter(name => /\.(?:dat|rxdata|rvdata|rvdata2)$/i.test(name))
+      .filter(name => !/^(?:Plugin)?Scripts\.(?:rxdata|rvdata|rvdata2)$/i.test(name))
+      .sort();
+  } catch { return written; }
   await mkdir(outDir, { recursive: true });
   for (const name of names) {
     try {

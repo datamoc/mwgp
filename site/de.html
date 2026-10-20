@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MWGP — RPG-Maker-Spiele im Browser spielen und bearbeiten</title>
+<meta name="description" content="MWGP wandelt Spiele aus RPG Maker MV, MZ, XP, VX und VX Ace in ein portables Format um, das in jedem Browser läuft und bearbeitet werden kann — mit Node oder als eigenständige Dateien.">
+<link rel="stylesheet" href="style.css">
+<link rel="alternate" hreflang="en" href="index.html">
+<link rel="alternate" hreflang="fr" href="fr.html">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="de.html">MWGP</a>
+    <nav aria-label="Hauptnavigation">
+      <a href="converter.html">Konverter</a>
+      <a href="studio-standalone.html">Studio</a>
+      <a href="https://github.com/datamoc/mwgp">GitHub</a>
+      <a href="https://www.npmjs.com/package/mwgp">npm</a>
+    </nav>
+    <nav aria-label="Sprache">
+      <a href="index.html">EN</a>
+      <a href="fr.html">FR</a>
+      <a href="de.html" aria-current="true">DE</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <h1>Ihre RPG-Maker-Spiele — in jedem Browser spielbar und bearbeitbar.</h1>
+  <p class="lede">MWGP wandelt Spiele aus RPG Maker MV, MZ, XP, VX und VX Ace in ein portables Manifest
+  (<code>mwgp.json</code>) mit dekodierten Ressourcen um. Umgewandelte Spiele laufen offline im Browser,
+  und mit dem MWGP Studio lassen sie sich ansehen und bearbeiten — Karten, Ereignisse, Dialoge,
+  Datenbank und Ressourcen — ohne RPG Maker zu öffnen. Die Umwandlung läuft entweder mit Node.js
+  (der Referenzversion) oder direkt in Ihrem Browser aus einer einzigen eigenständigen Datei:
+  keine Installation, kein Server, und Ihre Spieldateien verlassen Ihren Computer nie.</p>
+  <div class="cta">
+    <a class="btn" href="converter.html">Jetzt ein Spiel umwandeln</a>
+    <a class="btn secondary" href="studio-standalone.html">Studio öffnen</a>
+  </div>
+
+  <h2>Sofort im Browser nutzen</h2>
+  <div class="grid">
+    <section class="card">
+      <h3>Browser-Konverter</h3>
+      <p>Wählen Sie den vollständigen Ordner eines Spiels und wandeln Sie es um. Das Standard-Ergebnis
+      ist eine einzige spielbare HTML-Datei — Player, Runtime und Spiel eingebettet — die sich offline
+      per Doppelklick öffnet. MWGP-Exporte als ZIP oder Ordner bleiben für das Studio verfügbar.</p>
+      <p><a class="btn" href="converter.html">Konverter online nutzen</a></p>
+      <p><a class="btn secondary" href="converter.html" download>converter.html herunterladen</a></p>
+    </section>
+    <section class="card">
+      <h3>Eigenständiges Studio</h3>
+      <p>Der vollständige grafische Editor in einer Datei: Öffnen Sie eine eigenständige Spielseite,
+      bearbeiten Sie Karten, Ereignisse, Befehle, Akteure und Ressourcen, testen Sie das Spiel und
+      laden Sie die neu erzeugte Spielseite mit Ihren Änderungen und der von Ihnen gesetzten
+      Player-Version herunter.</p>
+      <p><a class="btn" href="studio-standalone.html">Studio online nutzen</a></p>
+      <p><a class="btn secondary" href="studio-standalone.html" download>Studio-Datei herunterladen</a></p>
+    </section>
+  </div>
+
+  <h2>Node-Version oder Browser-Version?</h2>
+  <table>
+    <tr><th></th><th>Node-Version (Referenz)</th><th>Browser-Versionen (eigenständig)</th></tr>
+    <tr><th>Konverter</th>
+      <td>Die Befehle <code>convert-mv</code>, <code>convert-rgss</code> und <code>convert:auto</code> wandeln ganze Bibliotheken um, schreiben in echte Ordner, schützen bearbeitete Projekte bei erneuter Umwandlung und sind durch die Testsuites des Projekts abgedeckt.</td>
+      <td>Eine einzige HTML-Datei wandelt ein Spiel nach dem anderen um, vollständig auf Ihrem Computer, und erzeugt eine spielbare Seite, eine ZIP-Datei oder einen Ordner. Gleiche Umwandlungsregeln und Kompatibilitätsgrenzen wie die Befehlszeile.</td></tr>
+    <tr><th>Studio</th>
+      <td>Das Server-Studio bearbeitet umgewandelte Ordner auf der Festplatte: geschützte Speicherstände, Ressourcen-Versionen, Vergleich mit der letzten Umwandlung und Prüfung durch den vollständigen MWGP-Validator vor jeder Veröffentlichung.</td>
+      <td>Das eigenständige Studio bearbeitet eine eigenständige Spielseite im Speicher und lädt eine neu erzeugte Seite herunter. Derselbe grafische Editor, ohne Server.</td></tr>
+    <tr><th>Player</th>
+      <td>Der Launcher stellt Ihre Bibliothek lokal bereit und spielt umgewandelte Spiele im Browser.</td>
+      <td>Jede spielbare Seite enthält Player, Runtime und Ressourcen; Spielstände liegen im Speicher des Browsers.</td></tr>
+  </table>
+
+  <h3>Grenzen der eigenständigen Versionen</h3>
+  <ul>
+    <li>Alles läuft im Speicher des Browsers: Sehr große Spiele können mehr brauchen, als ein Browser-Tab halten kann; bevorzugen Sie dann den Node-Konverter oder die Ordner-Ausgabe.</li>
+    <li>Direktes Schreiben in Ordner braucht die File System Access API (Chromium); sonst nutzen Sie den ZIP-Download. Der ZIP-Export folgt den klassischen ZIP-Grenzen (unter 4 GiB, weniger als 65.535 Dateien).</li>
+    <li>Spielseiten brauchen einen aktuellen Browser mit gzip-Dekompression (<code>DecompressionStream</code>). Spielstände werden pro Spiel im Browser gespeichert, nicht in die HTML-Datei zurückgeschrieben.</li>
+    <li>Das eigenständige Studio hält Änderungen im Speicher, bis Sie die neu erzeugte Spielseite herunterladen; es schreibt nicht in einen Projektordner zurück, Bild-/Audio-/Video-Vorschauen von Ressourcen laden nicht über seine Speicher-API (Textressourcen lassen sich normal bearbeiten), und seine eingebaute Strukturprüfung ist leichter als der Node-Validator.</li>
+    <li>Die spieleigene SoundFont wird eingebettet, wenn vorhanden; die gemeinsame Ersatz-SoundFont ist eine Funktion des Node-Servers, sonst nutzt MIDI den eingebauten Synthesizer.</li>
+    <li>Die Umwandlung prüft kein Gameplay; die Node-Testsuites und der Browser-Testlauf bleiben die Referenzprüfungen.</li>
+  </ul>
+
+  <h2>Mit npm herunterladen</h2>
+  <p>Das npm-Paket liefert die Node-Version: Launcher, Konverter und Studio-Befehle auf jeder Maschine
+  mit Node.js 18 oder neuer. Global installieren:</p>
+  <pre>npm install -g mwgp
+
+mwgp serve                      # lokaler Launcher und Studio-Server
+mwgp convert-auto RPGM_versions MWGP_versions
+mwgp studio lift MWGP_versions/MeinSpiel/mwgp.json studio/MeinSpiel</pre>
+  <p>Oder ohne Installation über <code>npx</code>:</p>
+  <pre>npx mwgp convert-mv "pfad/zu/MeinSpiel" "MWGP_versions/MeinSpiel"
+npx mwgp validate "MWGP_versions/MeinSpiel/mwgp.json"</pre>
+  <p>Lieber aus den Quellen? Klonen Sie das <a href="https://github.com/datamoc/mwgp">GitHub-Repository</a>,
+  dann <code>npm install</code> und <code>npm start</code>. Die obigen Ein-Datei-Browser-Versionen werden
+  aus diesen Quellen mit <code>npm run export:converter</code> und <code>npm run export:studio</code> erzeugt.</p>
+
+  <h2>So funktioniert es</h2>
+  <p>Die Konverter lesen die Daten des Originalprojekts (MV/MZ-JSON oder XP/VX/Ace-Daten und Ruby-Skripte,
+  inklusive verschlüsselter RGSS-Archive) und schreiben ein ausdrückliches MWGP-Manifest: Karten mit ihren
+  umgewandelten Ereignisbefehlen, die Datenbank, dekodierte Bilder und Audio, das eigene Plugin-JavaScript
+  des Spiels und die transpilierte Ruby-Bibliothek. Der Player führt dieses Manifest im Browser aus;
+  Ereignisskripte lassen den eigenen Code des Spiels in einer Sandbox laufen, sodass keine Spiellogik
+  nachgebaut wird. Die Kompatibilität wird pro Projekt berichtet, und nicht unterstützte Formen erzeugen
+  laute Warnungen statt stiller Auslassungen.</p>
+</main>
+<footer>
+  <div class="bar">
+    <span>MWGP — RPG-Maker-Spiele, überall.</span>
+    <nav aria-label="Fußzeile">
+      <a href="https://github.com/datamoc/mwgp">Quellen auf GitHub</a>
+      <a href="https://www.npmjs.com/package/mwgp">Paket auf npm</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>

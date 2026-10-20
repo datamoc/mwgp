@@ -29,17 +29,110 @@ import * as acorn from 'acorn';
 import { RgssCalls, setKnownMethods, addKnownMethods, setSelfMethods, collectDefNames, collectAttrNames } from './rgss-call-filter.mjs';
 import { resolveInitializeAliases } from './rgss-initialize-alias.mjs';
 import { repairCallAssignments } from './rgss-repair.mjs';
+import { renamePredicates } from './rgss-predicates.mjs';
+import { shiftTrailingBlock, bindYieldToBlock, emptyListForGlobalMatch, attachConditionalMethods, qualifyNestedConstants, classCaseSwitches } from './rgss-block-arg.mjs';
 
 // `def`s inside these are callable bare from anywhere (Ruby's global functions), so they
 // are indexed as top-level defs: `module Kernel; def pbMessage ... end; end`.
 const GLOBAL_SCOPES = ['Kernel', 'Object'];
 const INTERPRETER_CLASSES = ['Game_Interpreter', 'Interpreter'];
+let knownAccessorNames = new Set();
 // RGSS's own class names for the objects the player's built-in globals stand in for
 // ($game_map, $game_player, ...). Methods the shim lacks are borrowed from these classes at
 // run time (see openObject in rgss-script.js), so they ship whenever the game defines them.
 // They join the library without being expanded, keeping the closure bounded.
 const ENGINE_CLASSES = ['Game_Map', 'Game_Player', 'Game_Event', 'Game_Character', 'Game_Party', 'Game_Temp', 'Game_System', 'Game_Screen', 'Game_Picture'];
 const JS_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+// Ruby's bare `super` forwards the current method's arguments. Ruby2JS emits
+// it as `super()`; in a JavaScript constructor that drops the arguments needed
+// by the parent initializer. Make the forwarding explicit before transpiling.
+function forwardImplicitSuper(ruby, script) {
+  let ast;
+  try { [ast] = parse(ruby, script); } catch { return ruby; }
+  const edits = [];
+  const charIndex = byteOffset => {
+    let bytes = 0, chars = 0;
+    for (const character of ruby) {
+      const next = bytes + Buffer.byteLength(character, 'utf8');
+      if (next > byteOffset) break;
+      bytes = next;
+      chars += character.length;
+      if (bytes === byteOffset) break;
+    }
+    return chars;
+  };
+  const visit = (node, args = null) => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'def' || node.type === 'defs') {
+      const argsIndex = node.type === 'def' ? 1 : 2;
+      const bodyIndex = node.type === 'def' ? 2 : 3;
+      const params = node.children?.[argsIndex];
+      const forwarded = [];
+      let supported = !params || params.type === 'args';
+      for (const param of params?.children || []) {
+        const [name] = param.children || [];
+        if ((param.type === 'arg' || param.type === 'optarg') && typeof name === 'string') forwarded.push(name);
+        else if (param.type === 'restarg' && typeof name === 'string') forwarded.push(`...${name}`);
+        else { supported = false; break; }
+      }
+      visit(node.children?.[bodyIndex], supported ? forwarded : null);
+      return;
+    }
+    if (node.type === 'zsuper' && args?.length) {
+      const location = node.location ?? node.loc;
+      if (location) edits.push({ start: charIndex(location._start_offset), end: charIndex(location._end_offset), text: `super(${args.join(', ')})` });
+      return;
+    }
+    for (const child of node.children || []) {
+      if (Array.isArray(child)) child.forEach(value => visit(value, args));
+      else if (child && typeof child.type === 'string') visit(child, args);
+    }
+  };
+  visit(ast);
+  edits.sort((a, b) => b.start - a.start);
+  for (const edit of edits) ruby = `${ruby.slice(0, edit.start)}${edit.text}${ruby.slice(edit.end)}`;
+  return ruby;
+}
+
+function singletonAliases(ruby, script) {
+  let ast;
+  try { [ast] = parse(ruby, script); } catch { return []; }
+  const names = [];
+  const visit = (node, insideClass = false) => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'class' || node.type === 'module') {
+      for (const child of node.children || []) {
+        if (Array.isArray(child)) child.forEach(value => visit(value, node.type === 'class', false));
+        else if (child && typeof child.type === 'string') visit(child, node.type === 'class');
+      }
+      return;
+    }
+    if (node.type === 'sclass') {
+      const isSelf = node.children?.[0] === 'self' || node.children?.[0]?.type === 'self';
+      if (insideClass && isSelf) {
+        // Only aliases that are direct class-body statements can become JS
+        // static fields. An alias under `if` is a runtime assignment and must
+        // stay inside the generated method/module body.
+        for (const statement of bodyOf(node.children[1])) {
+          if (statement?.type === 'alias') {
+            const name = statement.children?.[0]?.children?.[0];
+            const target = statement.children?.[1]?.children?.[0];
+            if (typeof name === 'string' && typeof target === 'string' && JS_IDENTIFIER.test(name) && JS_IDENTIFIER.test(target)) names.push([name, target]);
+          }
+          visit(statement, insideClass);
+        }
+      } else visit(node.children[1], insideClass);
+      return;
+    }
+    for (const child of node.children || []) {
+      if (Array.isArray(child)) child.forEach(value => visit(value, insideClass));
+      else if (child && typeof child.type === 'string') visit(child, insideClass);
+    }
+  };
+  visit(ast);
+  return names;
+}
 
 const isNode = value => value && typeof value === 'object' && 'type' in value && 'children' in value;
 const constRoot = node => { while (node.children[0]?.type === 'const') node = node.children[0]; return String(node.children[1]); };
@@ -100,6 +193,18 @@ function bootRegistration(node, bytes) {
 // `ItemHandlers::UseOnPokemon.add(...)`, `GameData::TerrainTag.register(...)`, `MultipleForms.register(...)`): plain arguments (hashes of procs), no DSL. Kept as
 // an ordered "boot statement" so the registries are filled when the game starts, as they are when Ruby loads the scripts.
 const constPath = node => (node?.type === 'const' ? `${node.children[0] ? `${constPath(node.children[0])}::` : ''}${node.children[1]}` : null);
+const nestedConstPaths = (node, owner = constPath(node.children[0])) => {
+  const result = [];
+  const body = node.type === 'class' ? node.children[2] : node.children[1];
+  for (const child of bodyOf(body)) {
+    if (child.type !== 'class' && child.type !== 'module') continue;
+    const local = constPath(child.children[0]);
+    if (!local) continue;
+    const full = local === owner || local.startsWith(`${owner}::`) ? local : `${owner}::${local}`;
+    result.push(full, ...nestedConstPaths(child, full));
+  }
+  return result;
+};
 function bootStatement(node, bytes, typeConsts = null) {
   const call = node.type === 'block' ? node.children[0] : node;
   if (call?.type !== 'send') return null;
@@ -111,30 +216,41 @@ function bootStatement(node, bytes, typeConsts = null) {
 }
 
 export function indexScripts(scripts, log = () => {}) {
+  knownAccessorNames = new Set();
   const bootNames = [];
   const bootStatementNames = [];
   const units = new Map(); // name -> { kind, pieces: [{ script, text }], sends, consts, methods }
   const allDefNames = new Set();
   const typeConsts = new Set(); // every class/module const the game defines (not proc-holding casgn consts)
-  for (const script of scripts) {
+  for (const original of scripts) {
+    const script = { ...original, source: renamePredicates(String(original.source)) };
     let ast;
     try { [ast] = parse(script.source, script.name); }
     catch (error) { log(`index: skipping "${script.name}" (${String(error.message).split('\n')[0].slice(0, 80)})`); continue; }
     collectDefNames(ast, allDefNames);
-    collectAttrNames(ast, allDefNames);
+    const attrNames = collectAttrNames(ast);
+    attrNames.forEach(name => { allDefNames.add(name); knownAccessorNames.add(String(name).replace(/[?!]$/, '')); });
     const bytes = Buffer.from(script.source, 'utf8');
     const record = (name, kind, node, methods = new Set(), replacement = null) => {
       const location = node.location ?? node.loc;
       const text = replacement ?? bytes.subarray(location._start_offset, location._end_offset).toString('utf8');
       const unit = units.get(name) || { name, kind, pieces: [], sends: new Set(), consts: new Set(), methods: new Set() };
-      unit.pieces.push({ script: script.name, text });
+      const moduleMethods = node.type === 'module' ? bodyOf(node.children[1]).filter(member => member.type === 'def').map(member => String(member.children[0])) : [];
+      const moduleIncludes = node.type === 'class' ? bodyOf(node.children[2]).filter(member => member.type === 'send' && String(member.children[1]) === 'include').flatMap(member => member.children.slice(2).map(constPath).filter(Boolean)) : [];
+      const nestedConsts = node.type === 'module' || node.type === 'class' ? nestedConstPaths(node) : [];
+      unit.pieces.push({ script: script.name, text, nodeType: node.type, constName: node.type === 'module' || node.type === 'class' ? constPath(node.children[0]) : null, moduleMethods, moduleIncludes, nestedConsts });
       const refs = referencedNames(node);
       refs.sends.forEach(n => unit.sends.add(n));
       refs.consts.forEach(n => unit.consts.add(n));
       methods.forEach(n => unit.methods.add(n));
       units.set(name, unit);
     };
+    let pendingAliases = [];
     for (const node of bodyOf(ast)) {
+      if (node.type === 'alias') { pendingAliases.push(node); continue; }
+      const aliasName = node.type === 'def' ? String(node.children[0]) : null;
+      const aliasesForDef = aliasName ? pendingAliases.filter(alias => String(alias.children?.[1]?.children?.[0] ?? '') === aliasName) : [];
+      pendingAliases = [];
       if ((node.type === 'class' || node.type === 'module') && constPath(node.children[0])) typeConsts.add(constPath(node.children[0]));
       // `SaveData.register(:player) do save_value { ... }; load_value { |v| ... }; new_game_value { ... } end`: a save-data
       // registration written in Ruby's instance_eval DSL, which Ruby2JS cannot express. Kept as a "boot" unit: a hash of
@@ -147,7 +263,24 @@ export function indexScripts(scripts, log = () => {}) {
       const statement = bootStatement(node, bytes, typeConsts);
       if (statement) { const name = `BootStatement_${bootStatementNames.length}`; record(name, 'const', node, new Set(), statement.text); bootStatementNames.push(name); continue; }
       if ((node.type === 'module' || node.type === 'class') && GLOBAL_SCOPES.includes(constRoot(node.children[0])) && node.children[0].children[0] == null) {
-        for (const member of bodyOf(node.children[node.type === 'class' ? 2 : 1])) if (member.type === 'def') record(String(member.children[0]), 'def', member);
+        // A mod wraps a global method as `alias old pbX` + `def pbX` inside the global module. Only the `def` becomes a unit,
+        // so the alias line rides with it (the unit's pieces are joined in script order, and resolveInitializeAliases then
+        // renames the earlier `def pbX` to `old`); without it the wrapper calls `old`, which nothing defines.
+        const members = bodyOf(node.children[node.type === 'class' ? 2 : 1]);
+        // Dedented to the module's own level: the alias resolver closes a `def` at the `end` found at the alias's indentation.
+        const textOf = member => {
+          const where = member.location ?? member.loc;
+          const lineStart = bytes.lastIndexOf(10, where._start_offset - 1) + 1;
+          const indent = bytes.subarray(lineStart, where._start_offset).toString('utf8').match(/^[ \t]*/)[0];
+          return bytes.subarray(where._start_offset, where._end_offset).toString('utf8').split('\n').map((line, row) => row && line.startsWith(indent) ? line.slice(indent.length) : line).join('\n');
+        };
+        members.forEach((member, position) => {
+          if (member.type !== 'def') return;
+          const before = members[position - 1];
+          const aliasNode = before?.type === 'alias' ? before : before?.type === 'if' ? before.children.find(child => child?.type === 'alias') : null;
+          const aliasedMethod = aliasNode && String(aliasNode.children[1]?.children?.[0] ?? '');
+          record(String(member.children[0]), 'def', member, new Set(), aliasedMethod === String(member.children[0]) ? textOf(before) + '\n' + textOf(member) : null);
+        });
         continue;
       }
       let name, kind;
@@ -168,8 +301,27 @@ export function indexScripts(scripts, log = () => {}) {
           }
         }
       }
-      record(name, kind, node, methods);
+      if (node.type === 'def' && aliasesForDef.length) {
+        const aliasText = aliasesForDef.map(alias => {
+          const location = alias.location ?? alias.loc;
+          return bytes.subarray(location._start_offset, location._end_offset).toString('utf8');
+        }).join('\n');
+        const location = node.location ?? node.loc;
+        const definition = bytes.subarray(location._start_offset, location._end_offset).toString('utf8');
+        record(name, kind, node, methods, `${aliasText}\n${definition}`);
+      } else record(name, kind, node, methods);
     }
+  }
+  // Classes nested one level under each unit (`Battle::Move`), for qualifying their bare uses in every piece of the unit.
+  for (const unit of units.values()) unit.nested = new Set(unit.pieces.flatMap(piece => [...(piece.nestedConsts || []), ...(piece.constName ? [piece.constName] : [])].map(path => path.split('::')).filter(parts => parts.length >= 2 && parts[0] === unit.name).map(parts => parts[1].replace(/[?!]$/, ''))));
+  const moduleMethods = new Map();
+  for (const unit of units.values()) for (const piece of unit.pieces) if (piece.nodeType === 'module' && piece.constName) {
+    const names = moduleMethods.get(piece.constName) || new Set();
+    piece.moduleMethods.forEach(name => names.add(name));
+    moduleMethods.set(piece.constName, names);
+  }
+  for (const unit of units.values()) for (const piece of unit.pieces) for (const included of piece.moduleIncludes || []) {
+    for (const method of moduleMethods.get(included) || []) { unit.methods.add(method); allDefNames.add(method); }
   }
   const interpreter = INTERPRETER_CLASSES.find(name => units.get(name)?.kind === 'const' && units.get(name).methods.size) || null;
   return { units, allDefNames, typeConsts, bootNames, bootStatementNames, interpreter, interpreterMethods: interpreter ? units.get(interpreter).methods : new Set() };
@@ -225,7 +377,7 @@ export function setMethodOnlyNames(names) { methodOnlyNames = new Set(names || [
 // (operators, statement starts) ends it, and an empty receiver is left alone.
 // A leading `&.` is dropped: the helper is nil-safe, so the guard is implied.
 export function rewriteLiteralRespondTo(source) {
-  const pattern = /\.respond_to\?\s*\(\s*(?::(\w+)|"((?:[^"\\]|\\.)*)")\s*\)/g;
+  const pattern = /\.respond_to\?\s*\(\s*(?::(\w+[!?]?=?)|"((?:[^"\\]|\\.)*)")\s*\)/g;
   let out = '';
   let last = 0;
   let match;
@@ -296,10 +448,104 @@ function dropShadowedFunctions(js) {
   return out;
 }
 
+// Ruby modules hold instance methods that an `include` copies onto the host
+// class. For nested module paths Ruby2JS keeps those functions inside an IIFE
+// but may leave its exported object empty; return the methods as descriptors so
+// the player's generic include adapter can attach them to the receiving class.
+function exportModuleMethods(js, pieces) {
+  const wanted = new Map();
+  for (const piece of pieces) if (piece.nodeType === 'module' && piece.constName && piece.moduleMethods?.length) {
+    const names = wanted.get(piece.constName.replace(/::/g, '.')) || new Set();
+    piece.moduleMethods.filter(name => JS_IDENTIFIER.test(name)).forEach(name => names.add(name));
+    wanted.set(piece.constName.replace(/::/g, '.'), names);
+  }
+  if (!wanted.size) return js;
+  let ast;
+  try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); }
+  catch { return js; }
+  const pathOf = node => node?.type === 'Identifier' ? node.name
+    : node?.type === 'MemberExpression' && !node.computed ? `${pathOf(node.object)}.${node.property.name}` : null;
+  const edits = [];
+  const visit = node => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'AssignmentExpression' && node.operator === '=' && wanted.has(pathOf(node.left))) {
+      const call = node.right;
+      const fn = call?.type === 'CallExpression' && call.arguments.length === 0 && call.callee.type === 'ArrowFunctionExpression' ? call.callee : null;
+      if (fn?.body.type === 'BlockStatement') {
+        const empty = fn.body.body.find(statement => statement.type === 'ReturnStatement' && statement.argument?.type === 'ObjectExpression' && statement.argument.properties.length === 0)?.argument;
+        if (empty) edits.push({ start: empty.start, end: empty.end, names: [...wanted.get(pathOf(node.left))] });
+      }
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value.type === 'string') visit(value);
+    }
+  };
+  visit(ast);
+  edits.sort((a, b) => b.start - a.start);
+  for (const edit of edits) js = `${js.slice(0, edit.start)}{ ${edit.names.join(', ')} }${js.slice(edit.end)}`;
+  return js;
+}
+
 export function transpileUnit(unit) {
-  let source = unit.pieces.map(piece => `# ---- ${piece.script} ----\n${piece.text}`).join('\n\n');
+  const singletonAliasTargets = new Map(unit.pieces.flatMap(piece => singletonAliases(piece.text, piece.script)));
+  let source = unit.pieces.map(piece => {
+    let text = forwardImplicitSuper(piece.text, piece.script);
+    const getMethodRanges = ruby => {
+      const ranges = [];
+      try {
+        const [pieceAst] = parse(ruby, piece.script);
+        const collect = node => {
+          if (!node || typeof node.type !== 'string') return;
+          if (node.type === 'def' || node.type === 'defs') {
+            const location = node.location ?? node.loc;
+            if (location) ranges.push([location._start_offset, location._end_offset]);
+          }
+          for (const child of node.children || []) {
+            if (Array.isArray(child)) child.forEach(collect);
+            else if (child && typeof child.type === 'string') collect(child);
+          }
+        };
+        collect(pieceAst);
+      } catch { /* the main transpile reports malformed source */ }
+      return ranges;
+    };
+    let methodRanges = getMethodRanges(text);
+    if (unit.kind === 'const' && JS_IDENTIFIER.test(unit.name)) {
+      const escapedName = unit.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      text = text.replace(new RegExp(`\\b${escapedName}::(?=[A-Z])`, 'g'), (match, offset, original) => {
+        const lineStart = original.lastIndexOf('\n', offset - 1) + 1;
+        const declaration = /^\s*(?:class|module)\s+$/.test(original.slice(lineStart, offset));
+        const inMethod = methodRanges.some(([start, end]) => offset >= start && offset < end);
+        return declaration || inMethod ? match : '__MWGP_SELF__::';
+      });
+      methodRanges = getMethodRanges(text);
+    }
+    for (const nestedPath of piece.nestedConsts || []) {
+      const parts = nestedPath.split('::');
+      if (parts.length < 2 || parts[0] !== unit.name) continue;
+      const short = parts.at(-1).replace(/[?!]$/, '');
+      const escaped = short.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Qualify nested constants only when used as a receiver (`Nested.new`,
+      // `Nested.lookup`). This avoids touching local variables and declaration
+      // names while preserving Ruby's lexical lookup in the generated module.
+      text = text.replace(new RegExp(`(?<![:\\w])${escaped}(?=\\s*\\.)`, 'g'), (match, offset) =>
+        methodRanges.some(([start, end]) => offset >= start && offset < end) ? nestedPath : `__MWGP_SELF__::${short}`);
+    }
+    // Visibility does not matter to a running game, but Ruby2JS marks a private method by renaming it `_name`: a subclass in another unit
+    // then calls `name` and misses it, and a `private` in one script would reach the methods of the next (the pieces are transpiled as
+    // one class). Without the keyword every method keeps its own name. `private :a, :b` and `private def x` keep the definition.
+    text = text.replace(/^[ \t]*(?:private|protected|public)[ \t]*$/gm, '').replace(/^([ \t]*)(?:private|protected|public)[ \t]+(?=def\b)/gm, '$1').replace(/^[ \t]*(?:private|protected|public)[ \t]+:[^\n]*$/gm, '');
+    return `# ---- ${piece.script} ----\n${text}`;
+  }).join('\n\n');
   const resolvedAliases = resolveInitializeAliases(source);
   source = resolvedAliases.source;
+  // Ruby plugins commonly add a constant only when the engine has not defined
+  // it already (`VALUE = 1 if !const_defined?(:VALUE)`). Ruby2JS emits a const
+  // declaration as the body of an if, which is invalid JavaScript. The guarded
+  // value is an ordinary module constant; emit its declaration unconditionally
+  // and let the module-reopen merge preserve the other constants in each part.
+  source = source.replace(/^([ \t]*)([A-Z][A-Za-z0-9_]*)[ \t]*=[ \t]*(.+?)[ \t]+if[ \t]+![ \t]*const_defined\?[ \t]*\([ \t]*:\2[ \t]*\)[ \t]*$/gm, '$1$2 = $3');
   if (resolvedAliases.methods.size) addKnownMethods(resolvedAliases.methods);
   if (resolvedAliases.methods.size) unit = { ...unit, methods: new Set([...(unit.methods || []), ...resolvedAliases.methods]) };
   // Ruby's Exception is represented by JavaScript's Error. Ruby2JS emits a
@@ -317,6 +563,31 @@ export function transpileUnit(unit) {
   // Expand the common two-value attribute swap before conversion.
   source = source.replace(/([@A-Za-z_$][\w$\[\].]*\.index)\s*,\s*([@A-Za-z_$][\w$\[\].]*\.index)\s*=\s*([@A-Za-z_$][\w$\[\].]*\.index)\s*,\s*([@A-Za-z_$][\w$\[\].]*\.index)/g,
     '__mwgp_swap_index = $3; $1 = $4; $2 = __mwgp_swap_index');
+  // A bang method mutates an indexed Ruby value (`list[index].gsub!`,
+  // `hash[key].deep_merge!`). Ruby2JS emits an empty-index assignment for
+  // these receivers; write the returned mutated value back through the same
+  // index instead. The game's method call remains intact and can be generic.
+  source = source.replace(/((?:self|[A-Za-z_$][\w$]*)(?:\[[^\]\n]+\])+)[ \t]*\.([A-Za-z_$][\w$]*)!(?=\s*\()/g,
+    '$1 = $1.$2');
+  // Ruby2JS loses the receiver for aliases of accessor methods inside a
+  // nested class (`alias short width` -> `.prototype.short = ...`). Expanding
+  // only aliases whose target is declared by attr_reader/accessor preserves
+  // the same reader behavior while keeping arbitrary method aliases native.
+  const accessorNames = new Set();
+  for (const match of source.matchAll(/^\s*attr_(?:reader|accessor)\s+((?::[A-Za-z_$][\w$]*\s*,?\s*)+)$/gm)) {
+    for (const name of match[1].matchAll(/:([A-Za-z_$][\w$]*)/g)) accessorNames.add(name[1]);
+  }
+  knownAccessorNames.forEach(name => accessorNames.add(name));
+  // Ruby's `object.reader ||= value` calls both the reader and its setter.
+  // Ruby2JS treats the left side as a plain JS property; our callable RGSS
+  // accessors therefore need an explicit read followed by a setter call.
+  for (const name of accessorNames) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    source = source.replace(new RegExp(`(\\$?[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\.${escaped}\\s*\\|\\|=\\s*([^\\n]+)`, 'g'),
+      '$1.' + name + ' = $1.' + name + '() || $2');
+  }
+  if (accessorNames.size) source = source.replace(/^([ \t]*)alias[ \t]+([A-Za-z_$][\w$]*)[ \t]+([A-Za-z_$][\w$]*)[ \t]*$/gm,
+    (line, indent, aliasName, targetName) => accessorNames.has(targetName) ? `${indent}def ${aliasName}\n${indent}  ${targetName}\n${indent}end` : line);
   // Safe-navigation assignment (`object&.property = value`) has no direct
   // JavaScript assignment form. A missing optional UI object is equivalent to
   // a no-op in the portable renderer, so use an ordinary assignment and let
@@ -328,7 +599,8 @@ export function transpileUnit(unit) {
   // invalid JavaScript. In RGSS library code this idiom means “is the optional
   // helper available in the current script scope”; defined?(foo) has the same
   // useful meaning for the player shim and is handled by the transpiler.
-  source = source.replace(/respond_to\?\s*\(\s*:(\w+)\s*\)/g, 'defined?($1)');
+  source = source.replace(/(?<![\w$.])respond_to\?\s*\(\s*:(\w+)=\s*\)/g, 'self.respond_to?(:$1=)');
+  source = source.replace(/(?<![\w$.])respond_to\?\s*\(\s*:(\w+)\s*\)/g, 'self.respond_to?(:$1)');
   // The same filter lowers `rec.respond_to?("lit")` to `"lit" in rec`, which
   // throws when rec is a primitive (a species id string reaching a registry
   // `[]`). Ruby's respond_to? is total, so literal checks go through a
@@ -342,6 +614,17 @@ export function transpileUnit(unit) {
   // existing method/setter reconciliation covers the pair. Only the simple
   // space-separated `:sym` line form is expanded (the whole Void corpus);
   // anything else stays native, exactly as today.
+  // A singleton-class accessor is a class property. Ruby2JS handles explicit
+  // `def self.name=` as a JavaScript static setter, but emits invalid syntax
+  // for the `attr_accessor` form, so normalize an accessor-only eigenclass.
+  source = source.replace(/^([ \t]*)class[ \t]+<<[ \t]+self[ \t]*\r?\n((?:\1[ \t]+attr_(?:reader|accessor)[ \t]+(?::[A-Za-z_$][\w$]*[ \t]*,?[ \t]*)+\r?\n)+)\1end/gm, (_block, indent, body) => body.split(/\r?\n/).filter(Boolean).flatMap(line => {
+    const match = line.match(/attr_(reader|accessor)[ \t]+((?::[A-Za-z_$][\w$]*[ \t]*,?[ \t]*)+)/);
+    if (!match) return [line];
+    return match[2].split(',').map(raw => raw.trim().replace(/^:/, '')).flatMap(name => [
+      `${indent}def self.${name}\n${indent}  @${name}\n${indent}end`,
+      ...(match[1] === 'accessor' ? [`${indent}def self.${name}=(_value)\n${indent}  @${name} = _value\n${indent}end`] : [])
+    ]);
+  }).join('\n'));
   source = source.replace(/^([ \t]*)attr_(reader|accessor)[ \t]+((?::[A-Za-z_$][\w$]*[ \t]*,?[ \t]*)+?)([ \t]*(?:#[^\n]*)?)\r?$/gm,
     (line, indent, kind, names, comment) => {
       if (/,\s*$/.test(names)) return line;
@@ -358,11 +641,66 @@ export function transpileUnit(unit) {
   // (SelfCalls) goes before it. Return adds Ruby's implicit `return` of the last expression.
   const filters = [Functions.prototype, Return.prototype, Combiner.prototype];
   // Inherited instance methods are only assumed inside classes with instance methods of their own (not modules).
-  setSelfMethods(unit.kind === 'const' && unit.methods.size ? new Set([...unit.methods, ...methodOnlyNames]) : unit.methods);
+  const ownMethods = new Set(unit.methods);
+  if (unit.kind === 'const') {
+    for (const piece of unit.pieces) {
+      try { collectDefNames(parse(piece.text, piece.script)[0], ownMethods); } catch { /* an unparsed piece stays on the Ruby2JS fallback path */ }
+    }
+  }
+  setSelfMethods(unit.kind === 'const' && ownMethods.size ? new Set([...ownMethods, ...methodOnlyNames]) : unit.methods);
   filters.push(RgssCalls.prototype);
   // `x.name += 1` compiles to `x.name() += 1` (an assignment to a call): repaired here, so the syntax check below does not
   // send the unit down the "no call heuristic" fallback, which would turn every zero-argument call in it into a property read.
-  let js = dropShadowedFunctions(repairCallAssignments(nilSafeToString(convert(source, { preset: true, eslevel: 2022, loose_break: true, underscored_private: true, filters }).toString())));
+  let js = classCaseSwitches(qualifyNestedConstants(attachConditionalMethods(emptyListForGlobalMatch(bindYieldToBlock(shiftTrailingBlock(dropShadowedFunctions(repairCallAssignments(nilSafeToString(convert(source, { preset: true, eslevel: 2022, loose_break: true, underscored_private: true, filters }).toString())))))), unit.name), unit.name, unit.nested));
+  // A method renamed by an alias keeps calling its parent's original: `super` inside `void_x` is `super.x`, not `super.void_x`.
+  for (const [alias, original] of resolvedAliases.renames || []) js = js.split(`super.${alias}(`).join(`super.${original}(`);
+  // Namespaces emitted as IIFEs need the root dropped so eager references
+  // resolve to local nested constants. Direct class/object units have already
+  // initialized their root before later declarations, so keep that root.
+  if (source.includes('__MWGP_SELF__')) {
+    const escapedName = unit.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const selfIife = js.includes('const __self') || new RegExp(`\\bconst\\s+${escapedName}\\s*=\\s*\\(\\(\\)\\s*=>`).test(js);
+    if (selfIife) js = js.replace(/__MWGP_SELF__(?:\(\))?\./g, '');
+    else js = js.replace(/__MWGP_SELF__\(\)\./g, `${unit.name}.`).replace(/__MWGP_SELF__\./g, `${unit.name}.`);
+    js = js.replace(/__MWGP_SELF__/g, unit.name);
+  }
+  // Ruby's String and Symbol values are represented by JS primitive strings.
+  // Validation helpers commonly accept either class, so native instanceof
+  // rejects a value that is valid in the source runtime.
+  js = js.replace(/\b([A-Za-z_$][\w$]*)\s+instanceof\s+klass\b/g, '__ruby_is_a($1, klass)');
+  // Some Ruby module accessors become JavaScript property descriptors while
+  // RgssCalls has already rewritten their Ruby call sites to `name()`. Keep
+  // property reads consistent with those generated getters.
+  const getterNames = [...js.matchAll(/^\s*get\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{/gm)].map(match => match[1]);
+  for (const getter of new Set(getterNames)) {
+    const escaped = getter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    js = js.replace(new RegExp(`((?:this|[A-Za-z_$][\\w$]*)\\.)${escaped}\\(\\)`, 'g'), '$1' + getter);
+  }
+  // Ruby `alias new old` snapshots the current method object. Ruby2JS lowers
+  // that to an invocation (`new = old()`), which runs the old body at load
+  // time and stores its result. Preserve the alias as a function reference.
+  // `resolveInitializeAliases` removes aliases that pair with an override;
+  // these are the remaining plain aliases, including singleton methods.
+  for (const match of source.matchAll(/^\s*alias(?:_method)?\s+:?(\w+[?!]?),?\s+:?(\w+[?!]?)(?:=)?\s*$/gm)) {
+    const aliasName = match[1].replace(/[?!]/g, '');
+    const targetName = match[2].replace(/[?!]/g, '');
+    const escapedAlias = aliasName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedTarget = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const assignment = new RegExp(`((?:[\\w$]+\\.)+(?:prototype\\.)?)${escapedAlias}\\s*=\\s*\\1${escapedTarget}\\(\\)`, 'g');
+    js = js.replace(assignment, '$1' + aliasName + ' = $1' + targetName);
+  }
+  // Ruby `value.class.name` becomes JavaScript `value.constructor.name`,
+  // where `name` is a property on the constructor function. The call filter
+  // can mistake it for a game method and append `()`, breaking save-data
+  // validation and other class-name diagnostics at startup.
+  js = js.replace(/\.constructor\.name\(\)/g, '.constructor.name');
+  // Ruby includes can refer to a module defined later in the same script set.
+  // Ruby2JS evaluates the descriptor lookup immediately; defer that lookup so
+  // the complete class/module unit is available before the mixin is applied.
+  js = js.replace(/(?:Object\.defineProperties|__mixin)\(\s*([^,]+?),\s*Object\.getOwnPropertyDescriptors\(([^()]+)\)\s*\)/g, '__mixin($1, () => Object.getOwnPropertyDescriptors($2))');
+  // Ruby setters on a singleton class arrive as `static "name="(value)`;
+  // JavaScript spells these `static set name(value)`.
+  js = js.replace(/\bstatic\s+"([A-Za-z_$][\w$]*)="\s*\(([^()]*)\)\s*\{/g, 'static set $1($2) {');
   // Ruby methods with an implicit block parameter are emitted by Ruby2JS as
   // `get each(_implicitBlockYield)`, which is invalid JavaScript: accessors
   // cannot declare parameters. Such methods are called with a block and must
@@ -399,10 +737,24 @@ export function transpileUnit(unit) {
     const bodyStart = js.indexOf('=> {');
     if (bodyStart >= 0) js = `${js.slice(0, bodyStart + 4)}\n  ${literals.map(({ declaration }) => declaration).join('\n  ')}${js.slice(bodyStart + 4)}`;
   }
+  js = exportModuleMethods(js, unit.pieces);
+  for (const [name, target] of singletonAliasTargets) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const targetEscaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    js = js.replace(new RegExp(`^([ \\t]*)this\\.\\$?${escaped}\\s*=\\s*this\\.\\$?${targetEscaped};?[ \\t]*$`, 'gm'), '$1static ' + name + ' = this.' + target + ';');
+  }
   try {
     new Function(js); // a SyntaxError here means the unit is unusable
   } catch (error) {
-    if (process.env.MWGP_DEBUG_LIB) console.warn(`library: unit fallback (${String(error?.message || error).slice(0, 100)})`);
+    if (process.env.MWGP_DEBUG_LIB) {
+      let detail = '';
+      try { acorn.parse(js, { ecmaVersion: 'latest' }); }
+      catch (parseError) {
+        const position = parseError.pos ?? 0;
+        detail = `\n${parseError.message}\n${js.slice(Math.max(0, position - 240), Math.min(js.length, position + 240))}`;
+      }
+      console.warn(`library: unit fallback (${String(error?.message || error).slice(0, 100)})\n${error?.stack || ''}${detail}`);
+    }
     // Ruby permits shadowing a local in reopened/plugin code. Ruby2JS can
     // flatten those scopes into one IIFE and emit duplicate `state` bindings.
     // Relax only this proven collision; every other syntax error still uses
@@ -641,6 +993,21 @@ export async function buildRgssLibrary(scripts, snippets, { maxDepth = 3, log = 
       // Let progress output flush while the (synchronous) transpile runs.
       if (done % 10 === 0) await new Promise(resolve => setImmediate(resolve));
     }
+  }
+  // Essentials' `validate({ value => Class })` is a type assertion for programmer errors. A Ruby hash keyed by arbitrary values does
+  // not survive as a JS object (`{ 0 => Integer }` keeps the string "0"), so the check fails on correct calls and would stop the
+  // event; the assertion is dropped, which only loses the error message for a call that was already wrong.
+  if (typeof out.units.validate === 'string' && /Invalid argument passed to method/.test(out.units.validate)) {
+    out.units.validate = '// ---- Validation (type assertions are not enforced) ----\nfunction validate(value_pairs) { return }\n';
+  }
+  // `alias old pbX` + `def pbX` leaves the original body as a second top-level function in pbX's unit. Ruby makes `old` a global
+  // method that every other script can call, but here it would live only in that unit's closure, so each such function is also
+  // registered as a unit of its own (a copy: these are plain functions, and the copy keeps its own alias chain).
+  for (const [name, js] of Object.entries(out.units)) {
+    if (typeof js !== 'string' || index.units.get(name)?.kind !== 'def' || !js.includes('function ')) continue;
+    let ast;
+    try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); } catch { continue; }
+    for (const node of ast.body) if (node.type === 'FunctionDeclaration' && node.id && node.id.name !== name && JS_IDENTIFIER.test(node.id.name) && !out.units[node.id.name]) out.units[node.id.name] = js;
   }
   out.boot = (index.bootNames || []).filter(name => out.units[name]);
   out.bootStatements = (index.bootStatementNames || []).filter(name => out.units[name]);

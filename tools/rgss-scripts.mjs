@@ -1,7 +1,7 @@
 // Read the Ruby library an RGSS game ships: Data/Scripts.rxdata (XP), plus the
 // Pokémon Essentials-style Data/PluginScripts.rxdata. In pure Node, no Ruby:
 // the containers are Ruby Marshal arrays of [id, name, zlib(source)], whose
-// strings must stay raw bytes (decodeMarshal in mw_games decodes them as text,
+// strings must stay raw bytes (decodeMarshal in mwg decodes them as text,
 // which corrupts the zlib stream), so this carries its own minimal reader for
 // exactly the types these files use.
 import { readFile } from 'node:fs/promises';

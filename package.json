@@ -1,14 +1,47 @@
 {
-  "name": "rpgm-mwg-player",
-  "version": "0.2.0",
-  "private": true,
+  "name": "mwgp",
+  "version": "0.2.2",
   "type": "module",
-  "description": "Local RPG Maker game launcher with an mw_games-ready runtime boundary.",
+  "description": "Play and edit RPG Maker games (MV, MZ, XP, VX, VX Ace) in any browser: converter, player and graphical Studio, with Node or as single self-contained HTML files.",
+  "homepage": "https://datamoc.github.io/mwgp/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/datamoc/mwgp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/datamoc/mwgp/issues"
+  },
+  "keywords": ["rpg-maker", "rpg-maker-mv", "rpg-maker-mz", "rgss", "game-converter", "browser-game", "editor"],
+  "bin": {
+    "mwgp": "bin/mwgp.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "tools",
+    "public",
+    "transpilers",
+    "!transpilers/ruby2js-master/test",
+    "!transpilers/ruby2js-master/spec",
+    "!transpilers/ruby2js-master/docs",
+    "!transpilers/ruby2js-master/editor",
+    "!transpilers/ruby2js-master/plans",
+    "soundfonts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node src/server.js",
     "scan": "node src/server.js --scan",
     "convert:mv": "node tools/convert-mv.js",
+    "convert:rgss": "node tools/convert-rgss.js",
+    "export:converter": "node tools/export-browser-converter.mjs",
+    "export:studio": "node tools/export-standalone-studio.mjs",
+    "test:converter-browser": "node tools/test-browser-converter.mjs",
     "convert:auto": "node tools/convert-auto.js",
+    "studio": "node tools/mwgp-studio.mjs",
     "build:web": "node tools/build-web.js",
     "validate:mwgp": "node tools/validate-mwgp.js",
     "transpile:ruby": "node tools/transpile-ruby.mjs",
@@ -17,14 +50,26 @@
     "bundle:rgss": "node tools/bundle-rgss-scripts.mjs",
     "rgss:api": "node tools/rgss-api-dump.mjs",
     "rgss:coverage": "node tools/rgss-coverage.mjs",
+    "plugins:coverage": "node tools/plugin-capabilities.mjs",
     "compat:review": "node tools/compat-review.mjs",
-    "test": "node tools/test-smoke.mjs"
+    "play:all": "node tools/play-all.mjs",
+    "test:rgss-screen": "node tools/test-rgss-screen.mjs",
+    "test:battle-engine": "node tools/test-battle-engine.mjs && node tools/test-list-hook.mjs",
+    "test:studio": "node tools/test-mwgp-studio.mjs && node tools/test-studio-code.mjs && node tools/test-studio-reconversion.mjs",
+    "test:lcf": "node tools/test-lcf.mjs",
+    "test": "node tools/test-rgss-screen.mjs && node tools/test-smoke.mjs"
   },
   "dependencies": {
-    "@datamoc/mw_games": "^0.22.0",
+    "@datamoc/mwg": "^0.47.0",
     "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",
     "nostalgist": "^0.20.2",
     "yazl": "^3.3.1"
+  },
+  "devDependencies": {
+    "@bjorn3/browser_wasi_shim": "0.4.2",
+    "buffer": "6.0.3",
+    "esbuild": "0.28.2",
+    "fflate": "0.8.3"
   }
 }

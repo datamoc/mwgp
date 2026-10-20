@@ -46,6 +46,12 @@ function callReceiver(callee, kind, thisCls) {
   let at = callee;
   while (at.type === 'MemberExpression' && !at.computed && (at.property.name === 'call' || at.property.name === 'apply') && at.object) at = at.object;
   if (at.type === 'MemberExpression' && !at.computed && at.object.type === 'Identifier') return at.object.name;
+  // `this._scene.f()` inside a screen class: Essentials pairs `XxxScreen` (or `Xxx`) with its scene class `Xxx_Scene`, so the receiver is
+  // that class. Only when the receiver is the instance's own scene field, never a guess for other fields.
+  if (thisCls && at.type === 'MemberExpression' && !at.computed && at.object.type === 'MemberExpression' && !at.object.computed
+    && at.object.object.type === 'ThisExpression' && at.object.property.type === 'Identifier' && /^_?scene$/.test(at.object.property.name)) {
+    return `${thisCls.replace(/Screen$/, '')}_Scene`;
+  }
   return null;
 }
 const blockingCall = callee => callee.type === 'MemberExpression' && !callee.computed && callee.object.type === 'Identifier' && callee.property.type === 'Identifier' && BLOCKING.has(`${callee.object.name}.${callee.property.name}`);
@@ -196,7 +202,7 @@ function editsFor(entry, names, report) {
   };
   const handle = (bodyRoot, fn) => {
     const calls = [];
-    walkShallow(bodyRoot, node => { if (awaited(node)) calls.push(node); });
+    walkShallow(bodyRoot, node => { if (awaited(node, fn)) calls.push(node); });
     if (!calls.length) return;
     // A function that cannot be async (constructor/getter/setter) or an anonymous callback keeps its calls as they are.
     if (fn && (fn.skip || fn.anonymous || fn.node.generator)) { report.unawaited += calls.length; return; }
@@ -694,6 +700,12 @@ export function lowerRuby(js, known = null, zeroArg = null, callModules = null) 
   while (stack.length) {
     const node = stack.pop();
     if (!node || typeof node.type !== 'string') continue;
+    // Ruby's `a |= b` / `a &= b` on arrays is set union / intersection (and logical or/and on booleans); JS's operators are bitwise and
+    // turn arrays into 0. The runtime's helpers choose by the left operand's type.
+    if (node.type === 'AssignmentExpression' && (node.operator === '|=' || node.operator === '&=')) {
+      const at = js.slice(node.left.end, node.right.start).indexOf(node.operator);
+      if (at >= 0) edits.push({ pos: node.left.end + at, del: 2, text: '=' }, { pos: node.right.start, text: `${node.operator === '|=' ? '__bor' : '__band'}(${js.slice(node.left.start, node.left.end)}, ` }, { pos: node.right.end, text: ')' });
+    }
     if (node.type === 'BinaryExpression' && node.operator === '%') {
       const at = js.slice(node.left.end, node.right.start).indexOf('%');
       if (at >= 0) edits.push({ pos: node.start, text: '__mod(' }, { pos: node.left.end + at, del: 1, text: ',' }, { pos: node.end, text: ')' });

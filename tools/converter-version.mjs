@@ -34,6 +34,6 @@ export function readManifestConverterVersion(file) {
 
 // The release that last changed what the converter writes. Bump this (not just the package version) whenever a
 // conversion fix or a new command changes existing manifests' meaning; a manifest stamped older is stale.
-export const LAST_OUTPUT_CHANGE = '0.2.0';
+export const LAST_OUTPUT_CHANGE = '0.2.2';
 
 export const isStaleConverterVersion = version => version === null || version === undefined || compareVersions(version, LAST_OUTPUT_CHANGE) < 0;

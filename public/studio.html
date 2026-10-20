@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MWGP Studio — Éditeur universel</title>
+<style>
+:root {
+  --bg-dark: #0d1117;
+  --bg-panel: #161b22;
+  --bg-card: #21262d;
+  --border: #30363d;
+  --text: #f0f6fc;
+  --text-muted: #8b949e;
+  --accent: #d2a35b;
+  --accent-hover: #b78343;
+  --ok: #238636;
+  --warn: #d29922;
+  --danger: #da3633;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+dialog {
+  margin: auto;
+  padding: 20px;
+  max-width: 94vw;
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, .7); }
+dialog h2, dialog h3, dialog p { margin-bottom: 12px; }
+dialog p { color: var(--text-muted); line-height: 1.5; }
+dialog a { display: block; margin: 8px 0; color: var(--accent); }
+#asset-reference, #asset-edited { padding: 12px 0; }
+#asset-reference img, #asset-edited img {
+  display: block;
+  width: 100%;
+  height: 240px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: var(--bg-dark);
+}
+#asset-status { margin: 16px 0; overflow-wrap: anywhere; font-size: 12px; }
+body {
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  background: var(--bg-dark);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+header {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  z-index: 10;
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-left h1 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  color: var(--accent);
+}
+.badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.badge.modified {
+  background: #38240f;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.badge.ok {
+  background: #0f2d1a;
+  border-color: var(--ok);
+  color: #3fb950;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+button, .btn {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all .15s ease;
+}
+button:hover, .btn:hover {
+  background: #30363d;
+  border-color: #8b949e;
+}
+button.primary, .btn.primary {
+  background: var(--accent);
+  color: #0d1117;
+  border-color: var(--accent-hover);
+}
+button.primary:hover, .btn.primary:hover {
+  background: var(--accent-hover);
+}
+button.success {
+  background: var(--ok);
+  color: #fff;
+  border-color: #2ea043;
+}
+button.success:hover {
+  background: #2ea043;
+}
+#workspace {
+  display: grid;
+  grid-template-columns: 280px 1fr 340px;
+  flex: 1;
+  overflow: hidden;
+}
+.panel {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.panel.right {
+  border-right: 0;
+  border-left: 1px solid var(--border);
+}
+.panel-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-dark);
+}
+.panel-tab {
+  flex: 1;
+  padding: 10px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+}
+.panel-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--bg-panel);
+}
+.panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.search-box {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+.item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.item-row {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+.item-row:hover {
+  border-color: var(--border);
+  background: #282e38;
+}
+.item-row.active {
+  border-color: var(--accent);
+  background: #282415;
+}
+.item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+.item-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.item-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+#center-panel {
+  display: flex;
+  flex-direction: column;
+  background: #080d16;
+  overflow: hidden;
+  position: relative;
+}
+#canvas-bar {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+#canvas-container {
+  flex: 1;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background-image: radial-gradient(var(--border) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+#map-canvas {
+  background: #111;
+  box-shadow: 0 4px 24px rgba(0,0,0,.6);
+  border: 1px solid var(--border);
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+#canvas-footer {
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.form-group label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+input, textarea, select {
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+input:focus, textarea:focus, select:focus {
+  outline: 1px solid var(--accent);
+  border-color: var(--accent);
+}
+.palette-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.tile-btn {
+  padding: 8px 4px;
+  font-size: 11px;
+  text-align: center;
+  border-radius: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.tile-btn.active {
+  border-color: var(--accent);
+  background: #282415;
+}
+.tile-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,.2);
+}
+.cmd-box {
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.cmd-header {
+  display: flex;
+  justify-content: space-between;
+  color: var(--accent);
+  font-weight: 700;
+  font-family: Consolas, monospace;
+}
+.tool-btn-group {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tool-btn {
+  flex: 1;
+  padding: 6px;
+  font-size: 12px;
+  text-align: center;
+}
+.tool-btn.active {
+  background: var(--accent);
+  color: #0d1117;
+  border-color: var(--accent-hover);
+}
+#toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  padding: 10px 18px;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.5);
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition: all .2s ease;
+  z-index: 100;
+}
+#toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-left">
+    <h1>MWGP Studio</h1>
+    <span id="project-title" class="badge">Chargement…</span>
+    <span id="engine-badge" class="badge">MWGP</span>
+    <span id="mod-badge" class="badge ok">Non modifié</span>
+  </div>
+  <div class="toolbar">
+    <a href="/" class="btn">◀ Catalogue</a>
+    <button id="btn-new-project" class="btn" title="Créer un projet MWGP vierge, éditable dès maintenant">✚ Nouveau projet</button>
+    <button id="btn-play" class="btn primary">▶ Tester (Play MWGP)</button>
+    <button id="btn-save" class="btn success">💾 Sauvegarder</button>
+    <button id="btn-export" class="btn">⬇ Exporter</button>
+    <button id="btn-manifest" class="btn">Manifeste complet</button>
+    <button id="btn-assets" class="btn">Ressources</button>
+    <button id="btn-reconvert" class="btn" title="Comparer avec la dernière conversion enregistrée">Comparer la conversion</button>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);" title="Version du player inscrite dans le projet et dans les pages de jeu autoporteuses créées">Player
+      <input id="player-version" type="text" inputmode="numeric" placeholder="0.0.1" size="7" style="padding:6px 8px;">
+    </label>
+  </div>
+</header>
+
+<div id="workspace">
+  <!-- Left panel: Maps / Database / Tools -->
+  <section class="panel">
+    <div class="panel-tabs">
+      <div class="panel-tab active" data-tab="maps">Cartes</div>
+      <div class="panel-tab" data-tab="database">Acteurs</div>
+      <div class="panel-tab" data-tab="tools">Outils</div>
+    </div>
+    
+    <!-- Tab 1: Maps -->
+    <div id="tab-maps" class="panel-content">
+      <input type="text" id="map-search" class="search-box" placeholder="Rechercher une carte…">
+      <button id="btn-add-map" class="btn" style="margin:6px 0; width:100%;">✚ Nouvelle carte</button>
+      <div id="map-list" class="item-list"></div>
+    </div>
+    
+    <!-- Tab 2: Database Actors -->
+    <div id="tab-database" class="panel-content" style="display:none">
+      <h3 style="font-size:13px; color:var(--accent);">Acteurs de la base</h3>
+      <div id="actor-list" class="item-list"></div>
+      <div id="actor-editor" style="display:none; flex-direction:column; gap:8px; margin-top:8px; border-top:1px solid var(--border); padding-top:8px;">
+        <div class="form-group">
+          <label>Nom de l'acteur</label>
+          <input type="text" id="act-name">
+        </div>
+        <div class="form-group">
+          <p>PV et autres paramètres par niveau : table « classes », champ « params », dans la base complète.</p>
+        </div>
+        <div class="form-group">
+          <label>Profil</label>
+          <textarea id="act-profile" rows="2"></textarea>
+        </div>
+        <button id="btn-apply-actor" class="primary" style="margin-top:4px;">Appliquer à l'Acteur</button>
+      </div>
+    </div>
+    
+    <!-- Tab 3: Tools & Tiles -->
+    <div id="tab-tools" class="panel-content" style="display:none">
+      <div class="form-group">
+        <label>Mode de manipulation</label>
+        <div class="tool-btn-group">
+          <button class="tool-btn active" data-tool="inspect">👆 Inspecter</button>
+          <button class="tool-btn" data-tool="paint">🖌️ Peindre</button>
+          <button class="tool-btn" data-tool="player">🚩 Joueur</button>
+          <button class="tool-btn" data-tool="add-event">➕ Événement</button>
+        </div>
+      </div>
+      
+      <div class="form-group" style="margin-top:8px;">
+        <label>Couche active</label>
+        <select id="layer-select">
+          <option value="0">Couche 0 (Sol / Terrain)</option>
+          <option value="1">Couche 1 (Éléments / Bas)</option>
+          <option value="2">Couche 2 (Détails / Haut)</option>
+        </select>
+      </div>
+      
+      <div class="form-group" style="margin-top:8px;">
+        <label>Palette de tuiles</label>
+        <div id="palette-grid" class="palette-grid"></div>
+      </div>
+      
+      <div class="form-group" style="margin-top:8px;">
+        <label>ID Tuile personnalisé</label>
+        <input type="number" id="custom-tile-id" value="0">
+      </div>
+    </div>
+  </section>
+
+  <!-- Center panel: Map Canvas -->
+  <section id="center-panel">
+    <div id="canvas-bar">
+      <span id="map-header-info">Carte #1 : Chargement…</span>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <label style="font-size:12px; display:flex; align-items:center; gap:4px; cursor:pointer;">
+          <input type="checkbox" id="toggle-grid" checked> Grille
+        </label>
+        <button id="zoom-out" style="padding:2px 8px;">-</button>
+        <span id="zoom-level" style="font-size:12px; font-weight:600;">100%</span>
+        <button id="zoom-in" style="padding:2px 8px;">+</button>
+      </div>
+    </div>
+    <div id="canvas-container">
+      <canvas id="map-canvas" width="640" height="480"></canvas>
+    </div>
+    <div id="canvas-footer">
+      <span id="cursor-pos">X: 0, Y: 0</span>
+      <span id="tool-hint">Outil actif : Inspecter. Cliquez sur un événement ou une tuile.</span>
+    </div>
+  </section>
+
+  <!-- Right panel: Event Inspector & Commands -->
+  <section class="panel right">
+    <div class="panel-tabs">
+      <div class="panel-tab active">Inspecteur d'Événement</div>
+    </div>
+    <div class="panel-content" id="event-inspector">
+      <div id="no-event-selected" style="color:var(--text-muted); font-size:13px; text-align:center; padding:32px 0;">
+        Sélectionnez un événement sur la carte ou créez-en un avec l'outil ➕ Événement.
+      </div>
+      
+      <div id="event-editor" style="display:none; flex-direction:column; gap:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span id="evt-id-badge" class="badge">evt-1</span>
+          <span id="evt-mod-badge" class="badge ok">Original</span>
+        </div>
+        
+        <div class="form-group">
+          <label>Nom de l'événement</label>
+          <input type="text" id="evt-name">
+        </div>
+        
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <div class="form-group">
+            <label>Position X</label>
+            <input type="number" id="evt-x">
+          </div>
+          <div class="form-group">
+            <label>Position Y</label>
+            <input type="number" id="evt-y">
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label>Déclencheur (Trigger)</label>
+          <select id="evt-trigger">
+            <option value="0">Touche Action (Enter/Espace)</option>
+            <option value="1">Contact Joueur (Touch)</option>
+            <option value="2">Contact Événement</option>
+            <option value="3">Automatique (Autorun)</option>
+            <option value="4">Processus Parallèle</option>
+          </select>
+        </div>
+        
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+          <label style="font-size:12px; font-weight:700; color:var(--accent);">Flux de commandes</label>
+          <button id="btn-add-cmd" style="padding:2px 8px; font-size:11px;">➕ Commande</button>
+        </div>
+        
+        <div id="cmd-list" style="display:flex; flex-direction:column; gap:6px;"></div>
+        
+        <button id="btn-apply-event" class="primary" style="margin-top:12px;">Appliquer à l'Événement</button>
+      </div>
+      
+      <!-- Reconversion simulation modal / block -->
+      <div id="reconvert-box" style="display:none; flex-direction:column; gap:8px; margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+        <h3 style="font-size:13px; color:var(--accent);">Comparaison avec la conversion</h3>
+        <p style="font-size:11px; color:var(--text-muted);">
+          Les entités marquées « modifié (protégé) » par leur empreinte originHash sont préservées lors d'une nouvelle conversion.
+        </p>
+        <div id="reconvert-report" class="cmd-box" style="max-height:160px; overflow-y:auto; font-family:Consolas, monospace; font-size:11px;"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div id="toast">Projet sauvegardé</div>
+<dialog id="manifest-dialog" style="width:85vw;">
+  <h2>Manifeste complet</h2>
+  <p>Tous les champs convertis sont accessibles ici : pages, choix, images, sons, cartes, base de données et scripts. Le JSON doit respecter le format MWGP.</p>
+  <textarea id="manifest-json" aria-label="Manifeste MWGP complet" spellcheck="false" style="width:100%;height:60vh;font-family:Consolas,monospace;"></textarea>
+  <button id="btn-apply-manifest">Appliquer</button>
+  <button onclick="document.querySelector('#manifest-dialog').close()">Fermer</button>
+</dialog>
+
+<script type="module" src="/studio.js"></script>
+<dialog id="asset-dialog" style="width:90vw;">
+  <h2>Ressources du jeu</h2>
+  <p>Modifiez les fichiers texte ou remplacez les images et sons. Les éditions sont enregistrées dans le dossier jouable et conservées après reconversion.</p>
+  <button id="asset-up">Dossier parent</button> <span id="asset-prefix"></span>
+  <select id="asset-select" aria-label="Ressource" style="width:100%;margin:12px 0;"></select>
+  <div id="asset-detail" hidden>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <section><label>Comparer avec <select id="asset-reference-version"><option value="fresh">La dernière conversion</option><option value="base">La référence avant édition</option></select></label><div id="asset-reference"></div></section>
+      <section><h3>Édition jouable</h3><div id="asset-edited"></div></section>
+    </div>
+    <button id="asset-save-text">Enregistrer le texte</button>
+    <label>Remplacer le fichier <input id="asset-replacement" type="file"></label>
+  </div>
+  <pre id="asset-status" style="white-space:pre-wrap;"></pre>
+  <button id="asset-close">Fermer</button>
+</dialog>
+</body>
+</html>

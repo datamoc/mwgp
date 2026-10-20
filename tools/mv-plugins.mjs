@@ -16,11 +16,16 @@
 //      plugins mention (bounded by `depth` and `maxBytes`).
 //
 // Returns { order, sources, stats } for manifest `pluginLibrary`. `order`
-// keeps plugins.js load order, which the player evaluates in.
+// keeps plugins.js load order, which the player evaluates in. The library also
+// carries `commandReach` (word -> plugin -> the display classes the plugin's own
+// command dispatch touches), which the compatibility report uses to tell a plugin
+// command that runs fully here from one whose effect lands on the display layer
+// the player never runs (tools/plugin-reach.mjs).
 import { existsSync } from 'node:fs';
 import { readdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { dispatchReach } from './plugin-reach.mjs';
 
 const IDENT = /[A-Za-z_$][\w$]*/g;
 const MIN_MEMBER_LENGTH = 5;
@@ -54,6 +59,14 @@ async function engineNames(gameRoot) {
 // A plugin that hooks the engine's plugin-command dispatch can handle command words (through any alias of
 // Game_Interpreter, e.g. `var _GI = Game_Interpreter; _GI.prototype.pluginCommand = ...`).
 const HOOKS_COMMANDS = /\.prototype\.pluginCommand\s*=(?!=)|\bPluginManager\.registerCommand\s*\(/;
+// The title screen is part of a game's visible surface too: a plugin that
+// decorates Scene_Title (background/foreground/command sprites) ships even
+// when no event ever reaches it, so the player can run it at title time.
+const HOOKS_TITLE = /\bScene_Title\.prototype\.\w+\s*=(?!=)/;
+// A plugin that re-orders or filters the item and skill lists wraps the list builders (`makeItemList`); the player runs
+// those hooks over its own menu and battle lists (rgss-script.js `listHook`), so such a plugin ships even when no event
+// reaches it.
+const HOOKS_LISTS = /\bWindow_(?:Item|Skill)List\.prototype\.makeItemList\s*=(?!=)/;
 const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const mentionsWord = (source, word) => new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(word)}(?![A-Za-z0-9_$])`, 'i').test(source);
 
@@ -67,7 +80,8 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
   for (const source of scriptSources) for (const token of String(source).match(IDENT) || []) referenced.add(token);
   const words = new Set([...commandWords].map(String).filter(Boolean));
   const namedPlugins = new Set([...commandPlugins].map(String).filter(Boolean));
-  if (!referenced.size && !words.size && !namedPlugins.size) return null;
+  // (The empty-library bail lives below, once plugin sources are read: a
+  // title-only plugin is a reason to ship a library on its own.)
 
   const engine = await engineNames(gameRoot);
   const plugins = [];
@@ -85,6 +99,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
   for (const plugin of plugins) {
     if ([...plugin.top].some(name => referenced.has(name)) || [...plugin.members].some(name => referenced.has(name))) selected.add(plugin.name);
     if (namedPlugins.has(plugin.name)) selected.add(plugin.name);
+    if (HOOKS_TITLE.test(plugin.source) || HOOKS_LISTS.test(plugin.source)) selected.add(plugin.name);
     if (!words.size || !HOOKS_COMMANDS.test(plugin.source)) continue;
     const handled = [...words].filter(word => mentionsWord(plugin.source, word));
     if (handled.length) { selected.add(plugin.name); handles.set(plugin.name, handled); }
@@ -125,6 +140,24 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
       if (!list.includes(name)) list.push(name);
     }
   }
+  // What each shipped plugin's own command dispatch reaches (tools/plugin-reach.mjs):
+  // word -> plugin -> the display classes (windows, scenes, sprites) its command code
+  // touches. An MV pluginCommand override answers every word the plugin handles, an MZ
+  // PluginManager.registerCommand answers its own. A word a handler answers but whose
+  // dispatch the probe could not read has no entry: the compatibility report treats that
+  // as reaching (partial), which is the conservative side.
+  const commandReach = {};
+  for (const name of order) {
+    const reach = dispatchReach(sources[name]);
+    if (!reach) continue;
+    for (const entry of reach) {
+      const words = entry.word === null ? (handles.get(name) || []) : [entry.word];
+      for (const word of words) {
+        const bucket = commandReach[word.toLowerCase()] ||= {};
+        if (!bucket[name]) bucket[name] = entry.reaches;
+      }
+    }
+  }
   // The engine's own logic files (no scenes/sprites/windows): the Game_* objects the
   // plugins extend, so plugin code runs against real classes instead of stubs.
   const engineSources = {};
@@ -135,7 +168,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
       if (existsSync(path)) { engineSources[`${prefix}_${base}`] = await readFile(path, 'utf8'); break; }
     }
   }
-  return { order, sources, parameters, descriptions, engine: [...engine.top].sort(), engineSources, commandHandlers, stats: { total: plugins.length, direct, selected: order.length, bytes } };
+  return { order, sources, parameters, descriptions, engine: [...engine.top].sort(), engineSources, commandHandlers, commandReach, stats: { total: plugins.length, direct, selected: order.length, bytes } };
 }
 
 // The sources are the bulk of the library (Karryn's Prison: ~14 MB of a 26 MB manifest). Written as

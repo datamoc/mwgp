@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MWGP — Play and edit RPG Maker games in your browser</title>
+<meta name="description" content="MWGP converts RPG Maker MV, MZ, XP, VX and VX Ace games into a portable format that plays and can be edited in any browser — with Node, or with single self-contained files.">
+<link rel="stylesheet" href="style.css">
+<link rel="alternate" hreflang="fr" href="fr.html">
+<link rel="alternate" hreflang="de" href="de.html">
+</head>
+<body>
+<header>
+  <div class="bar">
+    <a class="brand" href="index.html">MWGP</a>
+    <nav aria-label="Main">
+      <a href="converter.html">Converter</a>
+      <a href="studio-standalone.html">Studio</a>
+      <a href="https://github.com/datamoc/mwgp">GitHub</a>
+      <a href="https://www.npmjs.com/package/mwgp">npm</a>
+    </nav>
+    <nav aria-label="Language">
+      <a href="index.html" aria-current="true">EN</a>
+      <a href="fr.html">FR</a>
+      <a href="de.html">DE</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <h1>Your RPG Maker games, playable and editable in any browser.</h1>
+  <p class="lede">MWGP converts games made with RPG Maker MV, MZ, XP, VX and VX Ace into a portable
+  manifest (<code>mwgp.json</code>) plus decoded resources. Converted games play offline in the browser,
+  and the MWGP Studio lets you inspect and edit them — maps, events, dialogues, database and resources —
+  without opening RPG Maker. Conversion runs either with Node.js (the reference version) or directly in
+  your browser from a single self-contained file: no installation, no server, and your game files never
+  leave your computer.</p>
+  <div class="cta">
+    <a class="btn" href="converter.html">Convert a game now</a>
+    <a class="btn secondary" href="studio-standalone.html">Open the Studio</a>
+  </div>
+
+  <h2>Use it immediately, in your browser</h2>
+  <div class="grid">
+    <section class="card">
+      <h3>Browser converter</h3>
+      <p>Choose a complete game folder and convert it. The default result is a single playable HTML
+      file — player, runtime and game embedded — that opens offline by double-click. MWGP ZIP and
+      folder exports are also available for the Studio.</p>
+      <p><a class="btn" href="converter.html">Use the converter online</a></p>
+      <p><a class="btn secondary" href="converter.html" download>Download converter.html</a></p>
+    </section>
+    <section class="card">
+      <h3>Standalone Studio</h3>
+      <p>The full graphical editor in one file: open a self-contained game page, edit maps, events,
+      commands, actors and resources, test the game, and download the regenerated game page with
+      your edits and the player version you set.</p>
+      <p><a class="btn" href="studio-standalone.html">Use the Studio online</a></p>
+      <p><a class="btn secondary" href="studio-standalone.html" download>Download the Studio file</a></p>
+    </section>
+  </div>
+
+  <h2>Node version or browser version?</h2>
+  <table>
+    <tr><th></th><th>Node version (reference)</th><th>Browser versions (self-contained)</th></tr>
+    <tr><th>Converter</th>
+      <td><code>convert-mv</code>, <code>convert-rgss</code> and <code>convert:auto</code> CLIs convert whole libraries, write into real folders, protect edited projects on reconversion, and are covered by the project's test suites.</td>
+      <td>One HTML file converts one game at a time, entirely on your machine, and can produce a playable page, a ZIP or a folder. Same conversion rules and compatibility limits as the CLI.</td></tr>
+    <tr><th>Studio</th>
+      <td>The Studio server edits converted folders on disk: protected saves, asset versioning, comparison with the last conversion, and validation by the full MWGP validator before anything is published.</td>
+      <td>The standalone Studio edits a self-contained game page in memory and downloads a regenerated page. It is the same graphical editor, without a server.</td></tr>
+    <tr><th>Player</th>
+      <td>The launcher serves your library locally and plays converted games in the browser.</td>
+      <td>Each playable game page carries its player, runtime and resources; saves live in the browser's storage.</td></tr>
+  </table>
+
+  <h3>Limits of the self-contained versions</h3>
+  <ul>
+    <li>Everything runs in browser memory: very large games may exceed what a browser tab can hold; prefer the Node converter or folder output for those.</li>
+    <li>Direct folder writing needs the File System Access API (Chromium); elsewhere, use the ZIP download. ZIP export follows classic ZIP limits (under 4 GiB, fewer than 65,535 files).</li>
+    <li>Game pages need a recent browser with gzip decompression (<code>DecompressionStream</code>). Saves are stored per game in the browser, not written back into the HTML file.</li>
+    <li>The standalone Studio keeps edits in memory until you download the regenerated game page; it does not write back into a project folder, image/audio/video resource previews by URL do not load through its in-memory API (text resources edit normally), and its built-in structural check is lighter than the Node validator.</li>
+    <li>A game's own SoundFont is embedded when present; the shared fallback SoundFont is a Node-server feature, so MIDI otherwise uses the built-in synth.</li>
+    <li>Conversion does not verify gameplay; the Node test suites and browser harness remain the reference checks.</li>
+  </ul>
+
+  <h2>Download with npm</h2>
+  <p>The npm package gives you the Node version: the launcher, the converters and the Studio commands
+  on any machine with Node.js 18 or newer. Install it globally:</p>
+  <pre>npm install -g mwgp
+
+mwgp serve                      # local launcher and Studio server
+mwgp convert-auto RPGM_versions MWGP_versions
+mwgp studio lift MWGP_versions/MyGame/mwgp.json studio/MyGame</pre>
+  <p>Or use it without installing, through <code>npx</code>:</p>
+  <pre>npx mwgp convert-mv "path/to/MyGame" "MWGP_versions/MyGame"
+npx mwgp validate "MWGP_versions/MyGame/mwgp.json"</pre>
+  <p>Working from the source instead? Clone the <a href="https://github.com/datamoc/mwgp">GitHub repository</a>,
+  run <code>npm install</code> then <code>npm start</code>. The single-file browser versions above are
+  generated from that source with <code>npm run export:converter</code> and <code>npm run export:studio</code>.</p>
+
+  <h2>How it works</h2>
+  <p>Converters read the original project's data (MV/MZ JSON, or XP/VX/Ace data and Ruby scripts, including
+  encrypted RGSS archives) and write an explicit MWGP manifest: maps with their converted event commands,
+  the database, decoded images and audio, the game's own plugin JavaScript and transpiled Ruby library.
+  The player runs that manifest in the browser; event scripts run the game's own code in a sandbox, so no
+  game-specific logic is reimplemented. Compatibility is reported per project, and unsupported shapes are
+  loud warnings, never silent drops.</p>
+</main>
+<footer>
+  <div class="bar">
+    <span>MWGP — RPG Maker games, everywhere.</span>
+    <nav aria-label="Footer">
+      <a href="https://github.com/datamoc/mwgp">Source on GitHub</a>
+      <a href="https://www.npmjs.com/package/mwgp">Package on npm</a>
+    </nav>
+  </div>
+</footer>
+</body>
+</html>
