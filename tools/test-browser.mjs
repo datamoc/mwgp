@@ -22,6 +22,7 @@ import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } 
 import os from 'node:os';
 import { join, resolve } from 'node:path';
 import { filterResumedMaps, parseResumeSkips, pruneProjectLines } from './resume-log.mjs';
+import { requireConvertedGames } from './test-games.mjs';
 // Progress log: one line per booted map, flushed synchronously so an
 // interrupted run still shows how far it got. The console output may be
 // piped through tail (invisible until the end); this file is the live view.
@@ -54,6 +55,7 @@ const webBuilds = readdirSync(mwgpRoot, { withFileTypes: true })
   .filter(entry => entry.isDirectory() && !existsSync(join(mwgpRoot, entry.name, 'mwgp.json')) && existsSync(join(mwgpRoot, entry.name, 'mwgp-web.json')))
   .map(entry => entry.name)
   .filter(name => !only || name === only);
+requireConvertedGames(mwgpRoot);
 if (!projects.length && !webBuilds.length) {
   console.error(`SKIPPED (loud): no converted project under MWGP_versions/${only ? ` matching "${only}"` : ''} to drive.`);
   process.exit(1);

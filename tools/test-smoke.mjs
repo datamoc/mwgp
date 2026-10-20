@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import './test-asset-usage.mjs';
+import { requireConvertedGames } from './test-games.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const failures = [];
@@ -51,9 +52,8 @@ function collectKeys(commands, used, unknown) {
 
 // 1+2: manifests in MWGP_versions/
 const allowed = allowedSet();
-const convertedDirs = readdirSync(join(root, 'MWGP_versions'), { withFileTypes: true })
-  .filter(entry => entry.isDirectory()).map(entry => entry.name);
-if (!convertedDirs.length) fail('MWGP_versions/ has no converted projects to smoke-test');
+// One converted project per game in RPGM_versions/ (at least two; see tools/test-games.mjs).
+const convertedDirs = requireConvertedGames().map(game => game.name);
 for (const dir of convertedDirs) {
   const manifestPath = join(root, 'MWGP_versions', dir, 'mwgp.json');
   if (!existsSync(manifestPath)) {

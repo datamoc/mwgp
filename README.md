@@ -188,6 +188,11 @@ MWGP Studio allows inspecting and developing RPG Maker games directly in the bro
    npm run studio -- edit <studioDir> [--port 4300]    # Standalone editor server
    ```
 
+The repository ships no game. The local checks run on the games you keep in `RPGM_versions/`: put at least two
+RPG Maker games there (one folder each, with `Game.exe`), convert them with `npm run convert:auto -- RPGM_versions MWGP_versions`,
+and the checks fail until that is done. Nothing is skipped silently. The checks read whatever games are present;
+none is named in the code.
+
 Run `npm test` for the complete smoke test suite: it validates every manifest under `MWGP_versions/`, asserts vocabulary parity, runs synthetic and real-world Studio integration tests (`tools/test-mwgp-studio.mjs`, `tools/test-studio-integration.mjs`), and boots every converted project in Chromium.
 
 ## Next milestones

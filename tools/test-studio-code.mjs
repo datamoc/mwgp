@@ -1,8 +1,9 @@
 // Edited Ruby event scripts must regenerate the JavaScript the player runs
 // (src/studio-code.js). Synthetic manifests only. Run: node tools/test-studio-code.mjs
 import assert from 'node:assert';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { recompileScripts } from '../src/studio-code.js';
+import { requireConvertedGames } from './test-games.mjs';
 
 if (!existsSync(new URL('../transpilers/ruby2js-master/demo/selfhost/ruby2js.js', import.meta.url))) {
   console.log('studio-code test SKIPPED: transpilers/ruby2js-master is not present (gitignored vendor copy)');
@@ -119,23 +120,18 @@ const base = manifest();
   assert.match(published.js, /false/, 'the saved manifest must carry the js regenerated from the edited Ruby');
 }
 
-// 8. Fidelity on a real project: recompiling every script of a converted XP/VX/Ace game must give
-// back exactly the js the converter stored (skipped when no such conversion is on disk).
+// 8. Fidelity on the converted XP/VX/Ace games in RPGM_versions/: recompiling every script of each
+// must give back exactly the js the converter stored. Fails when no such game is converted.
 {
-  const { readdirSync, readFileSync } = await import('node:fs');
-  const root = new URL('../MWGP_versions/', import.meta.url);
-  const hasRuby = name => {
-    const file = new URL(`${name}/mwgp.json`, root);
-    return existsSync(file) && readFileSync(file, 'utf8').includes('"rubyLibrary"');
-  };
-  const project = existsSync(root) ? readdirSync(root).find(hasRuby) : null;
-  if (!project) console.log('studio-code fidelity check skipped: no converted XP/VX/Ace project in MWGP_versions/');
-  else {
-    const real = JSON.parse(readFileSync(new URL(`${project}/mwgp.json`, root), 'utf8'));
+  const rubyGames = requireConvertedGames(undefined, { manifest: true })
+    .filter(game => readFileSync(game.manifestPath, 'utf8').includes('"rubyLibrary"'));
+  assert.ok(rubyGames.length > 0, 'no converted XP/VX/Ace game in RPGM_versions/ to check script fidelity on');
+  for (const game of rubyGames) {
+    const real = JSON.parse(readFileSync(game.manifestPath, 'utf8'));
     const stored = JSON.stringify(real.maps);
     const { report } = await recompileScripts(real, null);
-    assert.equal(JSON.stringify(real.maps), stored, `recompiling unchanged scripts of ${project} changed their js (${report.failed.length} failed)`);
-    console.log(`studio-code fidelity: ${report.recompiled.length} scripts of ${project} recompile to their stored js`);
+    assert.equal(JSON.stringify(real.maps), stored, `recompiling unchanged scripts of ${game.name} changed their js (${report.failed.length} failed)`);
+    console.log(`studio-code fidelity: ${report.recompiled.length} scripts of ${game.name} recompile to their stored js`);
   }
 }
 
