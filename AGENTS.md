@@ -204,8 +204,9 @@ forceAction, returnToTitle
 
 The last row (0.2.0) covers the Game_Interpreter codes the first converter left out: `systemFlag` folds 134-137 (save,
 menu, encounter, formation access), 138 (window tone), 132/133/139 (battle BGM, victory/defeat ME), 140/323 (vehicle
-BGM/image), 216 and 281 into `rpgExtra.system`; menu and save access, and the battle/victory/defeat audio, are honoured
-(Esc/X, the menu's Save entry, `startTroopBattle`), the rest is stored only. `changeActorStat` is 312/315/317/326 (MP, EXP
+BGM/image), 216 and 281 into `rpgExtra.system`; menu and save access, encounter access (136), followers (216), the map
+name band (281), and the battle/victory/defeat audio are honoured (Esc/X, the menu's Save entry, `startTroopBattle`, the
+map scene), the rest (138, 140, 323) is stored only. `changeActorStat` is 312/315/317/326 (MP, EXP
 with level-up, parameter bonus, TP), `changeActorText` 320/324, `changeActorImages` 322 (which the first converter wrongly
 stored as the profile; the profile is 325), `timer` 124 plus the `if.timer` condition (no on-screen counter), `vehicleBoard`
 206, `playMovie` 261 (a `<video>` overlay over `assets/movies/<name>.webm`, copied by the converter), `forceAction` 339
@@ -469,6 +470,40 @@ Save/Close box. There is no Formation screen and no graphical windows.
 and level, map name, date; `savedSlots()`, `slotLabel()`, `pickSlot()` in `player-core.js`). The menu's Save asks
 which file and Load lists the non-empty ones; F5/F9 use the last file used; the title screen's Continue loads the only
 save or asks which; Game Over offers Continue (when a save exists), Restart (a new game) and To Title.
+
+### Map features (MV/MZ, the engine's rules the data does not hold)
+
+The player implements the rules the engine runs (not the data): `src/player/map-rules.js` holds the pure ones (random
+encounters: step count, progress, blockers, weighted troop by region; dash; follower steps), unit-tested with a seeded
+generator in `tools/test-map-rules.mjs`. In `player-core.js`: a completed step counts the encounter count down
+(`countEncounterStep`), and when it is spent and nothing runs the troop battles the player with escape allowed and
+defeat not fatal (`maybeStartEncounter`); the count is re-armed on entering a map, on command 136, and in `startBattle`.
+Encounters need a complete database (`hasTroopDatabase`), and the encounter lists come from the map's raw data (MV) or
+from `encounter_list`/`encounter_step` (XP, `convert-rgss.js`, equal weights).
+
+- **Dash**: Shift (`ShiftLeft`/`ShiftRight`, action `dash`) doubles the mover's speed between tiles, unless the player is
+  in a vehicle or the map has `disableDashing`; a click destination dashes too. "Always dash" is not implemented.
+- **Gamepad**: `bindPlayerInput` binds pads 0 to 3: A confirms, X dashes, Y opens the menu (action `padMenu`, so the
+  keyboard's I and Tab keep their meaning), the d-pad and the left stick walk. The title screen (DOM) is not
+  navigable with a pad yet.
+- **Click on an event**: a click on a blocked cell walks next to it (`routeToCell`), faces it and runs its action page
+  on arrival (`finishPointerAction`).
+- **Followers** (`buildFollowers`, `moveFollowers`): the party's second to fourth members walk behind the leader; each
+  takes the cell its predecessor vacated, so the line follows cell by cell. Command 216 shows or hides them
+  (`rpgExtra.system.followers`), command 217 (`gatherFollowers`) walks them onto the leader's cell while the event waits
+  and the player is held. The party is read when a map is entered; followers do not jump, and they are not solid.
+- **Map name band** (`showMapName`): on a transfer or a new game only (`__mwgpArrival`), fades in across the top for
+  about two and a half seconds; command 281 switches it off; the menu and a battle close it.
+- **Weather** (`src/player/weather.js`): Change Weather draws rain, storm or snow particles on a screen layer, with a
+  grey dimmer; the count and the fall follow the engine (`floor(power * 10)`, rebirth below 40 opacity). The screen tint
+  remains as the fallback when the layer cannot be made.
+- **The game's own rules** (`src/player/map-engine.js`): the plugin library lists `mapHooks` (`HOOKS_MAP`,
+  `mapHookNames` in `tools/mv-plugins.mjs`), the Game_Player methods a selected plugin overrides. When `canEncounter` or
+  `encounterProgressValue` is among them, the sandbox runs the game's own method on a bare player; any failure warns once
+  and the stock rule runs. `makeEncounterCount` and `makeEncounterTroopId` are detected but not delegated yet, and
+  dashing and followers stay native. Manifests converted before this have no `mapHooks`: reconvert to use them.
+- **Not done**: the party's encounter-ability traits (no encounters, half encounters) are not read; preemptive and
+  surprise battles are not modelled (`runBattle` has no such rule); the left stick uses mwg's default axis threshold.
 
 ### Event scripts (Ruby in XP/VX/Ace events, JavaScript in MV/MZ events)
 

@@ -61,7 +61,7 @@ Two branches, picked from `manifest.titleScreen`, the same for every engine:
   below the window stack so effects wash the world, never the text.
 - Characters from `characterFrames` cell math (never assumed 48px),
   feet-anchored with the 6px shiftY (`!` objects exempt); grid movement,
-  event alpha/erased sets, vehicles, followers of the engine where modeled.
+  event alpha/erased sets, vehicles, party followers behind the leader (216/217, AGENTS.md "Map features").
   A `null` `playerSprite` (the start actor's charset does not ship) draws a
   static placeholder tile for the player.
 - **Pictures** below the message windows (a fullscreen splash can never cover
