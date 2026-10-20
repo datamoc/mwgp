@@ -484,6 +484,10 @@ export async function startMwgPlayer(canvas, project) {
       this.screenEffects = mwg.ScreenEffects ? new mwg.ScreenEffects({ width: game.width, height: game.height }) : null;
       if (this.screenEffects) this.stage.addChild(this.screenEffects);
       mwg.Input.attach();
+      // Click (or tap) a cell to walk there, as MV's touch movement does.
+      this.pointerRoute = null;
+      this.onPointerDown = event => this.pointerDown(event);
+      canvas?.addEventListener('pointerdown', this.onPointerDown);
       this.cooldown = 0;
       this.autotileFrame = 0;
       this.autotileElapsed = 0;
@@ -763,7 +767,7 @@ export async function startMwgPlayer(canvas, project) {
       }
       // A map switch is being built: this scene is done, so it takes no more input or events.
       if (this.transferring) return;
-      if (this.dialogue) return;
+      if (this.dialogue) { this.pointerRoute = null; return; }
       if (this.confirmLock) {
         // A browser/embedded keyboard can lose the matching keyup while a
         // dialogue is being removed.  Do not leave the whole map frozen in
@@ -788,16 +792,13 @@ export async function startMwgPlayer(canvas, project) {
       if (this.cooldown <= 0) {
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
         if (direction) {
+          this.pointerRoute = null;
           const [dx, dy, facing] = direction;
-          this.facing = facing;
-          const x = this.mover.x + dx, y = this.mover.y + dy;
-          const moved = this.canStep(x, y, dx, dy) && this.mover.moveBy(dx, dy);
-          // MV checks player-touch events at the attempted front cell even
-          // when the event itself has priority 1 and therefore blocks entry.
-          // Doors/stairs in XP projects commonly use exactly that shape.
-          if (!moved && this.runEventAt(x, y, 'touch')) { this.cooldown = 0.12; }
-          else if (moved) { this.pendingStep = [x, y]; this.cooldown = 0; }
-          else { this.mover.turnTo(dx, dy); this.cooldown = 0.12; }
+          this.stepPlayer(dx, dy, facing);
+        } else if (this.pointerRoute?.length) {
+          const [nextX, nextY] = this.pointerRoute.shift();
+          const dx = nextX - this.mover.x, dy = nextY - this.mover.y;
+          if (!this.stepPlayer(dx, dy, facingOf(dx, dy))) this.pointerRoute = null;
         }
         if (mwg.Input.justPressed('confirm')) {
           if (!this.tryVehicleAction()) this.runEventAt(...this.targetCell(), 'action');
@@ -873,6 +874,53 @@ export async function startMwgPlayer(canvas, project) {
       if (t >= 1) this.panTween = null;
     }
     resize(width, height) { this.camera?.setViewport(width, height); this.windows.setViewport(width, height); this.screenEffects?.setViewport(width, height); this.updateCamera(); }
+    // One step of the player in a direction: the keyboard and a clicked route both take it.
+    // Returns whether the player moved.
+    stepPlayer(dx, dy, facing) {
+      this.facing = facing;
+      const x = this.mover.x + dx, y = this.mover.y + dy;
+      const moved = this.canStep(x, y, dx, dy) && this.mover.moveBy(dx, dy);
+      // MV checks player-touch events at the attempted front cell even
+      // when the event itself has priority 1 and therefore blocks entry.
+      // Doors/stairs in XP projects commonly use exactly that shape.
+      if (!moved && this.runEventAt(x, y, 'touch')) { this.cooldown = 0.12; }
+      else if (moved) { this.pendingStep = [x, y]; this.cooldown = 0; }
+      else { this.mover.turnTo(dx, dy); this.cooldown = 0.12; }
+      return moved;
+    }
+    // A click on the map: the screen point becomes a cell, and the player walks the shortest route there.
+    pointerDown(event) {
+      if (event.button !== 0 || this.dialogue || this.transferring || this.confirmLock) return;
+      const rect = canvas.getBoundingClientRect();
+      const screenX = (event.clientX - rect.left) * (game.width / rect.width);
+      const screenY = (event.clientY - rect.top) * (game.height / rect.height);
+      const world = this.camera?.world || this.stage;
+      const scale = world.scale?.x || 1;
+      const cellX = Math.floor((screenX - world.x) / scale / tileSize);
+      const cellY = Math.floor((screenY - world.y) / scale / tileSize);
+      this.pointerRoute = this.findRoute(this.mover.x, this.mover.y, cellX, cellY);
+    }
+    // Breadth-first search over the cells the player can enter, with the same rules as the keyboard.
+    // Returns the cells after the start up to the target, or null when there is no route.
+    findRoute(fromX, fromY, toX, toY) {
+      if (fromX === toX && fromY === toY) return null;
+      if (toX < 0 || toY < 0 || toX >= map.width || toY >= map.height) return null;
+      const previous = new Map([[fromY * map.width + fromX, null]]);
+      const queue = [[fromX, fromY]];
+      for (let head = 0; head < queue.length; head++) {
+        const [x, y] = queue[head];
+        for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+          const nextX = x + dx, nextY = y + dy;
+          if (nextX < 0 || nextY < 0 || nextX >= map.width || nextY >= map.height) continue;
+          const key = nextY * map.width + nextX;
+          if (previous.has(key) || !this.canStep(nextX, nextY, dx, dy)) continue;
+          previous.set(key, [x, y]);
+          if (nextX === toX && nextY === toY) return tracePath(previous, map.width, fromX, fromY, toX, toY);
+          queue.push([nextX, nextY]);
+        }
+      }
+      return null;
+    }
     targetCell() { const offsets = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const [dx, dy] = offsets[this.facing]; return [position.x + dx, position.y + dy, 'action']; }
     canStep(x, y, dx, dy) {
       if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
@@ -2632,7 +2680,12 @@ export async function startMwgPlayer(canvas, project) {
         return true;
       } catch (error) { console.error('MWGP load failed', error); this.flashTitle('✗ Load failed — see console (F12)'); return false; }
     }
-    teardown() { window.removeEventListener('keydown', this.saveKey); this.audio?.stopAll(); this.windows?.destroy(); }
+    teardown() {
+      window.removeEventListener('keydown', this.saveKey);
+      canvas?.removeEventListener('pointerdown', this.onPointerDown);
+      this.audio?.stopAll();
+      this.windows?.destroy();
+    }
   };
   // What the scene cache needs to know about a built map. The class is reusable: entering it again only has to place the
   // player and start the events from their initial state; its atlases are freed when the cache lets it go.
@@ -2688,6 +2741,23 @@ export async function startMwgPlayer(canvas, project) {
   active = await buildScene();
   await game.start(active);
   return game;
+}
+
+function facingOf(dx, dy) {
+  if (dy < 0) return 'up';
+  if (dy > 0) return 'down';
+  return dx < 0 ? 'left' : 'right';
+}
+
+// The cells from the start (excluded) to the target (included), following the search's back links.
+function tracePath(previous, width, fromX, fromY, toX, toY) {
+  const path = [];
+  let cell = [toX, toY];
+  while (cell[0] !== fromX || cell[1] !== fromY) {
+    path.unshift(cell);
+    cell = previous.get(cell[1] * width + cell[0]);
+  }
+  return path;
 }
 
 function placeholderSheet() {
