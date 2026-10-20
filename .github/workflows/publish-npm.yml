@@ -1,8 +1,10 @@
 name: Publish to npm
 
-# Manual publication: run it from the Actions tab with the version to publish. It publishes
-# directly to npm through trusted publishing (OIDC, no token): npmjs.com must trust this
-# repository and this workflow file for the package (package settings > Trusted Publisher).
+# Manual staging: run it from the Actions tab with the version to publish. It stages the
+# version on npm through trusted publishing (OIDC, no token) with `npm stage publish`; nothing
+# goes live until a maintainer approves it on npmjs.com (Staged versions) with MFA.
+# npmjs.com must trust this repository and this workflow file, with staging allowed
+# (Trusted Publisher > allow staged publish).
 
 on:
   workflow_dispatch:
@@ -26,8 +28,8 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
-      - name: Use an npm that supports trusted publishing (11.5.1 or later)
-        run: npm install -g npm@latest
+      - name: Use the npm that has `npm stage` (12.2.0, tested)
+        run: npm install -g npm@12.2.0
       - name: Confirm the requested version
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
@@ -41,5 +43,7 @@ jobs:
         run: |
           npm run export:converter
           npm run export:studio
-      - name: Publish with provenance
-        run: npm publish --provenance
+      - name: Stage the version on npm (goes live only after approval on npmjs.com)
+        run: npm stage publish --provenance
+      - name: Next step
+        run: echo "Staged mwgp@${{ inputs.version }}. Approve it on https://www.npmjs.com/package/mwgp (Staged versions) with MFA."
