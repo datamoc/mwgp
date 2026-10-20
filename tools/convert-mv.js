@@ -848,7 +848,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
     // 136 encounter, 137 formation access (0 disables), 216 followers (0 shows), 281 map name display (0 on),
     // 138 window tone, 132/133/139 battle BGM and victory/defeat ME, 140 vehicle BGM, 323 vehicle image.
     // The player stores them in rpgExtra.system and honours the ones that have a consumer (menu, save,
-    // battle music); the rest are kept so a save round-trips them.
+    // formation access, battle music); the rest are kept so a save round-trips them.
     if (command.code === 134 || command.code === 135 || command.code === 136 || command.code === 137) {
       const key = { 134: 'saveAccess', 135: 'menuAccess', 136: 'encounterAccess', 137: 'formationAccess' }[command.code];
       return [{ systemFlag: { key, value: Number(command.parameters?.[0] || 0) !== 0 } }];
@@ -1504,9 +1504,9 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
     // (src/player/battle.js), 331-334/336 act on the battle's enemies: all supported, within the limits
     // documented in AGENTS.md (no battle graphics, no plugin damage engines).
     // 352 is supported through the player's slot-1 save path.
-    // 337 draws no animation (battles have none). 136/137/138/140/216/217/281/323 are stored as system settings (rpgExtra.system) that nothing in this
-    // player consumes yet: there are no random encounters, formation screen, followers, map name window or
-    // vehicle art, and window colours are not applied.
+    // 337 draws no animation (battles have none). 136/216/281 are stored in rpgExtra.system but nothing consumes them
+    // yet: there are no random encounters, followers or map name window (see the map-features plan).
+    // 137 hides the formation screen; 138/140/323 are stored only; 217 (gather followers) is dropped.
     const partial = new Set([111, 122, 205, 355, 356, 357, 136, 137, 138, 140, 216, 217, 281, 323, 337]);
     // Keep the report honest for each project. These command families are only
     // partial when this conversion actually had to emit a loud fallback for one
