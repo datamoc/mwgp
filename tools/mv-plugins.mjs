@@ -67,6 +67,13 @@ const HOOKS_TITLE = /\bScene_Title\.prototype\.\w+\s*=(?!=)/;
 // those hooks over its own menu and battle lists (rgss-script.js `listHook`), so such a plugin ships even when no event
 // reaches it.
 const HOOKS_LISTS = /\bWindow_(?:Item|Skill)List\.prototype\.makeItemList\s*=(?!=)/;
+// Game_Player methods the map's encounter rules may ask the game for (map-engine.js): a plugin that overrides one
+// ships even when no event reaches it, and the library records which methods it overrides (`mapHooks`).
+const MAP_HOOK_METHODS = ['canEncounter', 'encounterProgressValue', 'makeEncounterCount', 'makeEncounterTroopId'];
+const HOOKS_MAP = new RegExp(`\\.prototype\\.(?:${MAP_HOOK_METHODS.join('|')})\\s*=(?!=)`);
+export function mapHookNames(source) {
+  return MAP_HOOK_METHODS.filter(name => new RegExp(`\\.prototype\\.${name}\\s*=(?!=)`).test(source));
+}
 const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const mentionsWord = (source, word) => new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(word)}(?![A-Za-z0-9_$])`, 'i').test(source);
 
@@ -99,7 +106,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
   for (const plugin of plugins) {
     if ([...plugin.top].some(name => referenced.has(name)) || [...plugin.members].some(name => referenced.has(name))) selected.add(plugin.name);
     if (namedPlugins.has(plugin.name)) selected.add(plugin.name);
-    if (HOOKS_TITLE.test(plugin.source) || HOOKS_LISTS.test(plugin.source)) selected.add(plugin.name);
+    if (HOOKS_TITLE.test(plugin.source) || HOOKS_LISTS.test(plugin.source) || HOOKS_MAP.test(plugin.source)) selected.add(plugin.name);
     if (!words.size || !HOOKS_COMMANDS.test(plugin.source)) continue;
     const handled = [...words].filter(word => mentionsWord(plugin.source, word));
     if (handled.length) { selected.add(plugin.name); handles.set(plugin.name, handled); }
@@ -121,6 +128,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
   }
   let bytes = 0;
   const order = [], sources = {}, parameters = {}, descriptions = {};
+  const mapHooks = new Set();
   for (const plugin of plugins) {
     if (!selected.has(plugin.name)) continue;
     if (bytes + plugin.source.length > maxBytes) { log(`plugin library: size cap reached, skipping ${plugin.name}`); continue; }
@@ -129,6 +137,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
     sources[plugin.name] = plugin.source;
     parameters[plugin.name] = plugin.parameters;
     descriptions[plugin.name] = plugin.description;
+    for (const name of mapHookNames(plugin.source)) mapHooks.add(name);
   }
   log(`plugin library: ${order.length}/${plugins.length} plugins (${direct} directly referenced, ${Math.round(bytes / 1024)} KiB)`);
   // Which shipped plugin handles which plugin-command word (lowercased key), for the compatibility report.
@@ -168,7 +177,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
       if (existsSync(path)) { engineSources[`${prefix}_${base}`] = await readFile(path, 'utf8'); break; }
     }
   }
-  return { order, sources, parameters, descriptions, engine: [...engine.top].sort(), engineSources, commandHandlers, commandReach, stats: { total: plugins.length, direct, selected: order.length, bytes } };
+  return { order, sources, parameters, descriptions, mapHooks: [...mapHooks].sort(), engine: [...engine.top].sort(), engineSources, commandHandlers, commandReach, stats: { total: plugins.length, direct, selected: order.length, bytes } };
 }
 
 // The sources are the bulk of the library (Karryn's Prison: ~14 MB of a 26 MB manifest). Written as

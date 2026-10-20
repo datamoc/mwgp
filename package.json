@@ -59,7 +59,7 @@
     "play:all": "node tools/play-all.mjs",
     "test:rgss-screen": "node tools/test-rgss-screen.mjs",
     "test:battle-engine": "node tools/test-battle-engine.mjs && node tools/test-list-hook.mjs",
-    "test:map-rules": "node tools/test-map-rules.mjs && node tools/test-weather.mjs",
+    "test:map-rules": "node tools/test-map-rules.mjs && node tools/test-weather.mjs && node tools/test-map-engine.mjs",
     "test:studio": "node tools/test-mwgp-studio.mjs && node tools/test-studio-code.mjs && node tools/test-studio-reconversion.mjs",
     "test:lcf": "node tools/test-lcf.mjs",
     "test": "node tools/test-rgss-screen.mjs && node tools/test-smoke.mjs"

@@ -4,6 +4,7 @@ import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
 import { canEncounter, encounterProgress, encounterStepCount, followerStep, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
 import { WeatherLayer } from './weather.js';
+import { createMapEngine } from './map-engine.js';
 import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
 
 import { runMenu } from './menu.js';
@@ -1062,9 +1063,21 @@ export async function startMwgPlayer(canvas, project) {
     }
     // Game_Player.updateEncounterCount: a completed step counts down while encounters are on.
     countEncounterStep(x, y) {
-      const enabled = canEncounter({ disabled: this.rpgExtra.system?.encounterAccess === false, inAirship: this.activeVehicle === 'airship' });
+      const disabled = this.rpgExtra.system?.encounterAccess === false;
+      const engine = this.gameMapRules();
+      const state = { x, y, vehicle: this.activeVehicle || 'walk', disabled };
+      // A plugin that overrides the rule runs the game's own method; otherwise, or when that fails, the stock rule.
+      const enabled = engine?.canEncounter(state) ?? canEncounter({ disabled, inAirship: this.activeVehicle === 'airship' });
       if (!enabled) return;
-      this.encounterCount -= encounterProgress({ bush: this.tileFlagAt(x, y, 0x40, [0, 1, 2, 3]), inShip: this.activeVehicle === 'ship' });
+      const progress = engine?.encounterProgressValue(state) ?? encounterProgress({ bush: this.tileFlagAt(x, y, 0x40, [0, 1, 2, 3]), inShip: this.activeVehicle === 'ship' });
+      this.encounterCount -= progress;
+    }
+    // The game's own map rules, when a plugin overrides one (map-engine.js); built on first use, null without an engine.
+    gameMapRules() {
+      if (this.mapRules === undefined) {
+        this.mapRules = project.pluginLibrary?.order?.length && this.rgss ? createMapEngine(this.rgss, this.gameState, { mapHooks: project.pluginLibrary.mapHooks || [] }) : null;
+      }
+      return this.mapRules;
     }
     // Scene_Map.updateEncounter: once the count is spent and nothing is running, the encounter's troop battles the player.
     maybeStartEncounter() {
