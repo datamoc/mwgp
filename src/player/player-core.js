@@ -2,6 +2,7 @@
 import { AudioManager } from './audio-manager.js';
 import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
+import { canEncounter, encounterProgress, encounterStepCount, pickTroop } from './map-rules.js';
 import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
 
 import { runMenu } from './menu.js';
@@ -488,6 +489,8 @@ export async function startMwgPlayer(canvas, project) {
       this.pointerRoute = null;
       this.onPointerDown = event => this.pointerDown(event);
       canvas?.addEventListener('pointerdown', this.onPointerDown);
+      this.encounterBusy = false;
+      this.rearmEncounter();
       this.cooldown = 0;
       this.autotileFrame = 0;
       this.autotileElapsed = 0;
@@ -767,7 +770,7 @@ export async function startMwgPlayer(canvas, project) {
       }
       // A map switch is being built: this scene is done, so it takes no more input or events.
       if (this.transferring) return;
-      if (this.dialogue) { this.pointerRoute = null; return; }
+      if (this.dialogue || this.encounterBusy) { this.pointerRoute = null; return; }
       if (this.confirmLock) {
         // A browser/embedded keyboard can lose the matching keyup while a
         // dialogue is being removed.  Do not leave the whole map frozen in
@@ -787,7 +790,8 @@ export async function startMwgPlayer(canvas, project) {
       this.cooldown -= dt;
       this.renderPosition = { x: this.player.x / tileSize, y: this.player.y / tileSize };
       this.updateCamera();
-      if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1; this.syncActiveVehicle(); this.runEventAt(x, y, 'touch'); }
+      if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1; this.syncActiveVehicle(); if (!this.runEventAt(x, y, 'touch')) this.countEncounterStep(x, y); }
+      if (!this.mover.isMoving) this.maybeStartEncounter();
       if (this.mover.isMoving) return;
       if (this.cooldown <= 0) {
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
@@ -920,6 +924,36 @@ export async function startMwgPlayer(canvas, project) {
         }
       }
       return null;
+    }
+    // Game_Player.makeEncounterCount: re-armed on entering the map, on Change Encounter (136) and before each battle.
+    rearmEncounter() {
+      this.encounterCount = encounterStepCount(Number(mapEntry?.data?.encounterStep ?? 30), Math.random);
+    }
+    // Game_Player.updateEncounterCount: a completed step counts down while encounters are on.
+    countEncounterStep(x, y) {
+      const enabled = canEncounter({ disabled: this.rpgExtra.system?.encounterAccess === false, inAirship: this.activeVehicle === 'airship' });
+      if (!enabled) return;
+      this.encounterCount -= encounterProgress({ bush: this.tileFlagAt(x, y, 0x40, [0, 1, 2, 3]), inShip: this.activeVehicle === 'ship' });
+    }
+    // Scene_Map.updateEncounter: once the count is spent and nothing is running, the encounter's troop battles the player.
+    maybeStartEncounter() {
+      if (this.encounterCount > 0 || this.eventRunning || this.dialogue || this.encounterBusy || !this.hasTroopDatabase()) return;
+      const troopId = pickTroop(mapEntry?.data?.encounterList, this.tileIdAt(this.mover.x, this.mover.y, 5), Math.random);
+      // No battle to start: the count is re-armed anyway, as the engine does.
+      if (!troopId || !project.database?.troops?.[troopId]) { this.rearmEncounter(); return; }
+      this.encounterBusy = true;
+      this.startBattle({ troopId, canEscape: true, canLose: false })
+        .catch(error => console.warn('MWGP random encounter failed', error))
+        .finally(() => { this.encounterBusy = false; });
+    }
+    // The tile id on one layer (layer 5 holds regions), 0 outside the map.
+    tileIdAt(x, y, layer) {
+      if (x < 0 || y < 0 || x >= map.width || y >= map.height) return 0;
+      return map.data?.[layer * map.width * map.height + y * map.width + x] || 0;
+    }
+    // Whether any of the given layers at (x, y) carries the flag bit in the tileset's flags.
+    tileFlagAt(x, y, bit, layers) {
+      return layers.some(layer => (Number(tilesetFlags[this.tileIdAt(x, y, layer)] ?? 0) & bit) !== 0);
     }
     targetCell() { const offsets = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const [dx, dy] = offsets[this.facing]; return [position.x + dx, position.y + dy, 'action']; }
     canStep(x, y, dx, dy) {
@@ -1307,10 +1341,15 @@ export async function startMwgPlayer(canvas, project) {
     }
     // Full troop battle (src/player/battle.js) when the project has the MV/MZ database; the dialogue
     // duel below stays for manifests without one (XP conversions carry no database yet).
-    async startBattle(spec) {
+    // The troop battle needs a complete database; a partial one keeps the dialogue duel.
+    hasTroopDatabase() {
       const database = project.database || {};
-      if (database.troops && database.enemies && database.actors && database.classes && database.skills) return this.startTroopBattle(spec, database);
-      return this.startDuelBattle(spec, database);
+      return Boolean(database.troops && database.enemies && database.actors && database.classes && database.skills);
+    }
+    async startBattle(spec) {
+      this.rearmEncounter();
+      if (this.hasTroopDatabase()) return this.startTroopBattle(spec, project.database || {});
+      return this.startDuelBattle(spec, project.database || {});
     }
     // The battle stage: the map's battle background and each enemy's battler at its troop position, drawn over the
     // map while the dialogue-driven battle runs (no animations). Missing images degrade to nothing, never an error.
@@ -2063,7 +2102,10 @@ export async function startMwgPlayer(canvas, project) {
     // ---- system settings (commands 132-140, 216, 281, 323 and the access flags 134-137) ------------------
     // Game_System keeps these; saves round-trip them through rpgExtra.system. Only menuAccess, saveAccess and
     // the battle/victory/defeat audio have a consumer here; see the compatibility notes in convert-mv.js.
-    setSystemFlag({ key, value }) { (this.rpgExtra.system ||= {})[key] = value; }
+    setSystemFlag({ key, value }) {
+      (this.rpgExtra.system ||= {})[key] = value;
+      if (key === 'encounterAccess') this.rearmEncounter();
+    }
     // 312 MP, 315 EXP, 317 parameter, 326 TP. TP has no battle model, so it is only recorded on the actor.
     applyActorStat(state, spec) {
       for (const id of this.actorTargets(state, spec)) {

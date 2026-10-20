@@ -2627,7 +2627,7 @@ try {
 }
 
 // Edited Ruby event scripts regenerate their JS, and battles hand noted skills to the game's own engine.
-for (const [file, label] of [['test-studio-code.mjs', 'studio Ruby recompile'], ['test-battle-engine.mjs', 'battle engine bridge'], ['test-list-hook.mjs', 'list hooks']]) {
+for (const [file, label] of [['test-studio-code.mjs', 'studio Ruby recompile'], ['test-battle-engine.mjs', 'battle engine bridge'], ['test-list-hook.mjs', 'list hooks'], ['test-map-rules.mjs', 'map rules']]) {
   try {
     const output = execFileSync(process.execPath, [join(root, 'tools', file)], { stdio: 'pipe', encoding: 'utf8' });
     notes.push(`${label} ok${/SKIPPED/.test(output) ? ' (some checks skipped: see the test output)' : ''}`);
