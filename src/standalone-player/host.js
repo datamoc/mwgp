@@ -6,20 +6,11 @@ const MIME = {
   js: 'application/javascript', json: 'application/json', txt: 'text/plain',
 };
 
-// Base64 data URL of a file's byte parts, built when mwg first asks for it.
-// Pixi picks an image's parser from the data URL's type, which a blob: URL
-// does not carry. Building these up front held the whole image set as text
-// (about a gigabyte for a large game) and the browser refused the reads.
-function dataUrl(parts, type) {
-  let text = '';
-  for (const part of parts) for (let offset = 0; offset < part.length; offset += 0x8000) text += String.fromCharCode(...part.subarray(offset, offset + 0x8000));
-  return `data:${type};base64,${btoa(text)}`;
-}
-
 // A local host for the normal player's API and MWG compiled-resource map.
-// The files are the byte parts the page unpacked; images become data URLs and
-// other files typed Blob URLs, each made on first use. The original bytes
-// remain available to the local fetch host.
+// The files are the byte parts the page unpacked. Each becomes a typed Blob
+// URL on first use: mwg takes an image's format from the path's extension for
+// any blob: URL, so no base64 copy of the image set is needed. The original
+// bytes remain available to the local fetch host.
 export async function createStandaloneHost(files, metadata) {
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const lookup = new Map([...files].map(([name, parts]) => [name.toLowerCase(), parts]));
@@ -48,7 +39,7 @@ export async function createStandaloneHost(files, metadata) {
     if (!parts) return undefined;
     if (!urls.has(key)) {
       const type = MIME[name.split('.').pop().toLowerCase()] || 'application/octet-stream';
-      urls.set(key, type.startsWith('image/') ? dataUrl(parts, type) : URL.createObjectURL(blobOf(parts, type)));
+      urls.set(key, URL.createObjectURL(blobOf(parts, type)));
     }
     return urls.get(key);
   }

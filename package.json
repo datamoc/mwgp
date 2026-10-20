@@ -64,7 +64,7 @@
     "test": "node tools/test-rgss-screen.mjs && node tools/test-smoke.mjs"
   },
   "dependencies": {
-    "@datamoc/mwg": "^0.47.0",
+    "@datamoc/mwg": "^0.48.1",
     "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",
     "nostalgist": "^0.20.2",
