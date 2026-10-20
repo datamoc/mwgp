@@ -36,3 +36,15 @@ export function pickTroop(encounterList, regionId, random) {
   }
   return 0;
 }
+
+// Game_Player.updateDashing: decided between tiles. Dashing needs the player free to move (not in a vehicle, the
+// map not disabling it) and either the dash button or a click destination. "Always dash" inverts the button.
+export function isDashing({ allowed = false, shiftHeld = false, alwaysDash = false, destination = false } = {}) {
+  const dashButton = alwaysDash ? !shiftHeld : shiftHeld;
+  return allowed && (dashButton || destination);
+}
+
+// Game_CharacterBase.realMoveSpeed: a dash adds one speed step, which doubles the distance covered per frame.
+export function moveSpeedFor(baseSpeed, dashing) {
+  return dashing ? baseSpeed * 2 : baseSpeed;
+}

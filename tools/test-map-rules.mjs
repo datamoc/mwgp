@@ -1,6 +1,6 @@
 // Unit checks for the random encounter rules (src/player/map-rules.js). Pure functions, seeded randomness.
 import assert from 'node:assert/strict';
-import { canEncounter, encounterProgress, encounterStepCount, pickTroop } from '../src/player/map-rules.js';
+import { canEncounter, encounterProgress, encounterStepCount, isDashing, moveSpeedFor, pickTroop } from '../src/player/map-rules.js';
 
 const fixed = value => () => value;
 // Small deterministic generator (mulberry32) so the distribution checks are repeatable.
@@ -74,4 +74,14 @@ assert.equal(pickTroop([{ troopId: 4, weight: 0, regionSet: [] }], 0, fixed(0.5)
   assert.ok(Math.abs(share - 0.25) < 0.02, `troop 1 share ${share} should be about 0.25`);
 }
 
-console.log('map rules ok (step counts, progress, blockers, troop pick, regions, weights)');
+// isDashing: the button or a click destination dashes, a blocker or always-dash inversion decides the rest.
+assert.equal(isDashing({ allowed: true, shiftHeld: true }), true);
+assert.equal(isDashing({ allowed: true, destination: true }), true);
+assert.equal(isDashing({ allowed: true }), false);
+assert.equal(isDashing({ shiftHeld: true }), false, 'not allowed (vehicle or disabled map) never dashes');
+assert.equal(isDashing({ allowed: true, alwaysDash: true }), true, 'always dash runs without Shift');
+assert.equal(isDashing({ allowed: true, alwaysDash: true, shiftHeld: true }), false, 'Shift walks when always dash is on');
+assert.equal(moveSpeedFor(6, false), 6);
+assert.equal(moveSpeedFor(6, true), 12);
+
+console.log('map rules ok (step counts, progress, blockers, troop pick, regions, weights, dash)');

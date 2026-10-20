@@ -2,7 +2,7 @@
 import { AudioManager } from './audio-manager.js';
 import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
-import { canEncounter, encounterProgress, encounterStepCount, pickTroop } from './map-rules.js';
+import { canEncounter, encounterProgress, encounterStepCount, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
 import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
 
 import { runMenu } from './menu.js';
@@ -11,6 +11,8 @@ import { stagePositions } from './formation.js';
 // Event page triggers the scene can never fire (an editor typo or a hand-edited manifest): like every
 // unknown vocabulary entry it warns loudly once per page instead of dropping the page in silence.
 const KNOWN_TRIGGERS = new Set(['action', 'touch', 'autorun', 'parallel']);
+// Cells per frame of a walking character (a dash doubles it, see map-rules.js).
+const PLAYER_MOVE_SPEED = 6;
 const warnedTriggers = new Set();
 export function checkPageTriggers(mapEntry) {
   for (const event of mapEntry?.mwgEvents || [])
@@ -486,11 +488,12 @@ export async function startMwgPlayer(canvas, project) {
       if (this.screenEffects) this.stage.addChild(this.screenEffects);
       mwg.Input.attach();
       // Click (or tap) a cell to walk there, as MV's touch movement does.
-      this.pointerRoute = null;
+      this.clearPointer();
       this.onPointerDown = event => this.pointerDown(event);
       canvas?.addEventListener('pointerdown', this.onPointerDown);
       this.encounterBusy = false;
       this.rearmEncounter();
+      bindPlayerInput(mwg);
       this.cooldown = 0;
       this.autotileFrame = 0;
       this.autotileElapsed = 0;
@@ -551,7 +554,7 @@ export async function startMwgPlayer(canvas, project) {
       // grid), feet-anchored like the engine: Sprite_Character centers x on
       // the tile and puts the sprite bottom at the tile bottom minus shiftY
       // (6px, or 0 for `!` object characters).
-      this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } if ((event.key === 'Escape' || event.key === 'x' || event.key === 'X') && !this.dialogue && !this.eventRunning && !this.menuOpen && this.rpgExtra?.system?.menuAccess !== false && !this.mover?.isMoving && !event.ctrlKey && !event.altKey && !event.metaKey) { event.preventDefault(); this.openMenu(); } if (event.key === 'm' && !event.ctrlKey && !event.altKey && !event.metaKey && !this.dialogue && this.audio) { this.flashTitle(this.audio.toggleMute() ? '🔇 Muted (M)' : '🔊 Sound on (M)'); } };
+      this.saveKey = event => { if (event.key === 'F5') { event.preventDefault(); this.saveGame(); } if (event.key === 'F9') { event.preventDefault(); this.loadGame(); } if ((event.key === 'Escape' || event.key === 'x' || event.key === 'X') && this.menuAllowed() && !event.ctrlKey && !event.altKey && !event.metaKey) { event.preventDefault(); this.openMenu(); } if (event.key === 'm' && !event.ctrlKey && !event.altKey && !event.metaKey && !this.dialogue && this.audio) { this.flashTitle(this.audio.toggleMute() ? '🔇 Muted (M)' : '🔊 Sound on (M)'); } };
       window.addEventListener('keydown', this.saveKey);
       this.dialogue = null;
       // MessageBox is updated before the scene. When the final confirm closes
@@ -595,7 +598,7 @@ export async function startMwgPlayer(canvas, project) {
       this.overlayLayer.zIndex = 1000000001;
       world.addChild(this.overlayLayer);
       this.overlayAnims = [];
-      this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
+      this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: PLAYER_MOVE_SPEED, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
       this.pendingStep = null;
       this.refreshEventSprites();
       this.refreshVehicleSprites();
@@ -770,7 +773,7 @@ export async function startMwgPlayer(canvas, project) {
       }
       // A map switch is being built: this scene is done, so it takes no more input or events.
       if (this.transferring) return;
-      if (this.dialogue || this.encounterBusy) { this.pointerRoute = null; return; }
+      if (this.dialogue || this.encounterBusy) { this.clearPointer(); return; }
       if (this.confirmLock) {
         // A browser/embedded keyboard can lose the matching keyup while a
         // dialogue is being removed.  Do not leave the whole map frozen in
@@ -794,19 +797,23 @@ export async function startMwgPlayer(canvas, project) {
       if (!this.mover.isMoving) this.maybeStartEncounter();
       if (this.mover.isMoving) return;
       if (this.cooldown <= 0) {
+        this.mover.speed = moveSpeedFor(PLAYER_MOVE_SPEED, this.dashRule());
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
         if (direction) {
-          this.pointerRoute = null;
+          this.clearPointer();
           const [dx, dy, facing] = direction;
           this.stepPlayer(dx, dy, facing);
         } else if (this.pointerRoute?.length) {
           const [nextX, nextY] = this.pointerRoute.shift();
           const dx = nextX - this.mover.x, dy = nextY - this.mover.y;
-          if (!this.stepPlayer(dx, dy, facingOf(dx, dy))) this.pointerRoute = null;
+          if (!this.stepPlayer(dx, dy, facingOf(dx, dy))) this.clearPointer();
+        } else if (this.pointerAction) {
+          this.finishPointerAction();
         }
         if (mwg.Input.justPressed('confirm')) {
           if (!this.tryVehicleAction()) this.runEventAt(...this.targetCell(), 'action');
         }
+        if (mwg.Input.justPressed('padMenu') && this.menuAllowed()) this.openMenu();
       }
     }
     // A game that gives its player a graphic at run time (`$game_player.character_name = "walk"`, often a sheet it composed and wrote
@@ -832,7 +839,7 @@ export async function startMwgPlayer(canvas, project) {
         previous.destroy?.();
         this.player = sprite;
         // The mover drives the sprite it was built with, so it is rebuilt around the new one at the same spot.
-        if (this.mover) this.mover = new mwg.Rpg.GridMover(sprite, this.mover.x, this.mover.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
+        if (this.mover) this.mover = new mwg.Rpg.GridMover(sprite, this.mover.x, this.mover.y, { tileWidth: tileSize, tileHeight: tileSize, speed: PLAYER_MOVE_SPEED, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
         this.updateCamera();
       };
       if (written) apply(mwg.Texture2D.from(written), written.width, written.height);
@@ -902,7 +909,46 @@ export async function startMwgPlayer(canvas, project) {
       const scale = world.scale?.x || 1;
       const cellX = Math.floor((screenX - world.x) / scale / tileSize);
       const cellY = Math.floor((screenY - world.y) / scale / tileSize);
-      this.pointerRoute = this.findRoute(this.mover.x, this.mover.y, cellX, cellY);
+      const route = this.routeToCell(cellX, cellY);
+      this.pointerRoute = route;
+      this.pointerAction = route ? { x: cellX, y: cellY } : null;
+    }
+    // The route a click follows. A cell blocked by an event or a wall is reached from its nearest reachable neighbour,
+    // so the player stands next to it and acts on it on arrival (MV's touch movement does the same).
+    routeToCell(cellX, cellY) {
+      const fromX = this.mover.x, fromY = this.mover.y;
+      if (cellX === fromX && cellY === fromY) return [];
+      const direct = this.findRoute(fromX, fromY, cellX, cellY);
+      if (direct) return direct;
+      let best = null;
+      for (const [dx, dy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+        const nextX = cellX + dx, nextY = cellY + dy;
+        const route = nextX === fromX && nextY === fromY ? [] : this.findRoute(fromX, fromY, nextX, nextY);
+        if (route && (!best || route.length < best.length)) best = route;
+      }
+      return best;
+    }
+    // Stock Game_Player.triggerTouchAction: an action event on the clicked cell runs once the player is there, or
+    // from the adjacent cell the player turns to face.
+    finishPointerAction() {
+      const { x, y } = this.pointerAction;
+      this.pointerAction = null;
+      const dx = x - this.mover.x, dy = y - this.mover.y;
+      if (Math.abs(dx) + Math.abs(dy) === 1) { this.facing = facingOf(dx, dy); this.mover.turnTo(dx, dy); }
+      this.runEventAt(x, y, 'action');
+    }
+    clearPointer() { this.pointerRoute = null; this.pointerAction = null; }
+    // Whether the dash applies to this step (Game_Player.updateDashing): a click destination dashes as well.
+    dashRule() {
+      return isDashing({
+        allowed: !this.activeVehicle && !mapEntry?.data?.disableDashing && !this.encounterBusy,
+        shiftHeld: mwg.Input.isDown('dash'),
+        destination: Boolean(this.pointerRoute?.length || this.pointerAction),
+      });
+    }
+    // Opening the menu: the same conditions for the Escape/X key and the gamepad's menu button.
+    menuAllowed() {
+      return !this.dialogue && !this.eventRunning && !this.menuOpen && this.rpgExtra?.system?.menuAccess !== false && !this.mover?.isMoving;
     }
     // Breadth-first search over the cells the player can enter, with the same rules as the keyboard.
     // Returns the cells after the start up to the target, or null when there is no route.
@@ -2714,7 +2760,7 @@ export async function startMwgPlayer(canvas, project) {
           return false;
         }
         this.restoreRuntimeState(state);
-        this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
+        this.mover = new mwg.Rpg.GridMover(this.player, position.x, position.y, { tileWidth: tileSize, tileHeight: tileSize, speed: PLAYER_MOVE_SPEED, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
         this.refreshEventSprites();
         this.updateCamera();
         console.info(`MWGP loaded ${key} on map ${state.mapId} at (${pos.x}, ${pos.y})`);
@@ -2783,6 +2829,26 @@ export async function startMwgPlayer(canvas, project) {
   active = await buildScene();
   await game.start(active);
   return game;
+}
+
+// The actions the player reads beyond mwg's keyboard defaults: Shift dashes, and a gamepad drives the same actions
+// (A confirms, X dashes, Y opens the menu as 'padMenu' so the keyboard's I and Tab keys keep their behaviour, the
+// d-pad and left stick walk). Pad 0 to 3 are bound; a pad that is not connected does nothing.
+function bindPlayerInput(mwg) {
+  mwg.Input.bind('dash', ['ShiftLeft', 'ShiftRight']);
+  for (let pad = 0; pad < 4; pad++) {
+    mwg.Input.bindButton('confirm', pad, [0]);
+    mwg.Input.bindButton('dash', pad, [2]);
+    mwg.Input.bindButton('padMenu', pad, [3]);
+    mwg.Input.bindButton('up', pad, [12]);
+    mwg.Input.bindButton('down', pad, [13]);
+    mwg.Input.bindButton('left', pad, [14]);
+    mwg.Input.bindButton('right', pad, [15]);
+    mwg.Input.bindAxis('up', pad, 1, -1);
+    mwg.Input.bindAxis('down', pad, 1, 1);
+    mwg.Input.bindAxis('left', pad, 0, -1);
+    mwg.Input.bindAxis('right', pad, 0, 1);
+  }
 }
 
 function facingOf(dx, dy) {
