@@ -1,7 +1,25 @@
+
 import { AudioManager } from './audio-manager.js';
-import { runBattle, createPicker, expForLevel } from './battle.js';
+import { assetUrl } from './asset-url.js';
+import { createBattleEngine } from './battle-engine.js';
+import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
+
 import { runMenu } from './menu.js';
 import { stagePositions } from './formation.js';
+
+// Event page triggers the scene can never fire (an editor typo or a hand-edited manifest): like every
+// unknown vocabulary entry it warns loudly once per page instead of dropping the page in silence.
+const KNOWN_TRIGGERS = new Set(['action', 'touch', 'autorun', 'parallel']);
+const warnedTriggers = new Set();
+export function checkPageTriggers(mapEntry) {
+  for (const event of mapEntry?.mwgEvents || [])
+    (event.pages || []).forEach((page, index) => {
+      const key = `${mapEntry.id}:${event.id}:${index}`;
+      if (!page || KNOWN_TRIGGERS.has(page.trigger) || warnedTriggers.has(key)) return;
+      warnedTriggers.add(key);
+      console.warn(`MWGP map ${mapEntry.id} event ${event.id} page ${index} has trigger '${page.trigger}' (unknown: action/touch/autorun/parallel); this page never fires`);
+    });
+}
 
 export 
 // ---- MV's window colours and gauges ------------------------------------------------------------------------------
@@ -81,7 +99,7 @@ export function svActionMotion(actor, item, isItem, database) {
 async function applyGameFont(mwg, project, assetRoot, pixelHeight) {
   const font = project.display?.font;
   if (!font?.file || !assetRoot || !mwg.setTheme || typeof FontFace === 'undefined') return;
-  const face = new FontFace(font.family || 'GameFont', `url(${assetRoot}/fonts/${encodeURIComponent(font.file)})`);
+  const face = new FontFace(font.family || 'GameFont', `url(${assetUrl(`${assetRoot}/fonts/${encodeURIComponent(font.file)}`)})`);
   await face.load();
   document.fonts.add(face);
   const scale = pixelHeight && project.display?.height ? pixelHeight / Number(project.display.height) : 1;   // the canvas is sized to the page, the design to display.height
@@ -92,7 +110,7 @@ async function applyGameFont(mwg, project, assetRoot, pixelHeight) {
 }
 
 // MV's Window.png: a 96x96 background at (0,0) and the 96x96 frame at (96,0) with 24px corners. Composed into one
-// nine-patch texture and installed as mw_games' window theme, so every dialogue, choice and menu window takes the
+// nine-patch texture and installed as mwg' window theme, so every dialogue, choice and menu window takes the
 // engine's frame instead of the library default. White text on the frame, as in the engine's default window.
 async function applyWindowSkin(mwg, url) {
   if (!mwg.setTheme || !mwg.Texture2D || typeof document === 'undefined') return;
@@ -212,14 +230,14 @@ export async function startMwgPlayer(canvas, project) {
   await loadPluginFiles(project);
   await loadRubyData(project);
   // Loaded here rather than statically so prepareEventCommands stays importable from Node.
-  const { createRgssRuntime } = await import(`/rgss-script.js?v=${Date.now()}`);
-  const mwg = globalThis.mw_games;
-  if (!mwg?.Game || !mwg?.Scene2D || !mwg?.TileMap || !mwg?.SpriteSheet) throw new Error('mw_games 2D runtime is unavailable');
+  const { createRgssRuntime } = await (project.loadRgssRuntime?.() || import(`/rgss-script.js?v=${Date.now()}`));
+  const mwg = globalThis.mwg;
+  if (!mwg?.Game || !mwg?.Scene2D || !mwg?.TileMap || !mwg?.SpriteSheet) throw new Error('mwg 2D runtime is unavailable');
   // Construct Game before creating/loading any textures. MWG's pixelArt option
   // sets Pixi's default atlas sampling to nearest-neighbour; doing this after
   // Resources.load() leaves already-created frames with linear filtering and
   // can expose one-pixel seams at tile boundaries.
-  const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x10131b, pixelArt: true });
+  const game = new mwg.Game({ canvas, resizeTo: canvas.parentElement, background: 0x000000, pixelArt: true });
   // Set up once per page: the Game, and the audio manager (its tracks and decoded music outlive a map).
   let audioManager = null;
   // Builds the scene class for the map the URL names, with everything that belongs to that map (tileset sheets, event and
@@ -237,6 +255,7 @@ export async function startMwgPlayer(canvas, project) {
   // visit (and for a preloaded scene that is never used).
   const pristineEvents = foundEntry?.mwgEvents ?? [];
   const mapEntry = foundEntry && { ...foundEntry, mwgEvents: structuredClone(pristineEvents) };
+  checkPageTriggers(mapEntry);
   const map = mapEntry?.data;
   const tileSize = project.display?.tileSize || 48;
   const isXp = project.source?.engine === 'rpg-maker-xp';
@@ -351,7 +370,7 @@ export async function startMwgPlayer(canvas, project) {
   // Audio: BGM/BGS/ME/SE with volume, pitch and pan, format-independent (see audio-manager.js).
   // The manager is created only for decoded projects; tracks decode lazily on first use, and the
   // sounds this map's events and the engine itself use are warmed up front.
-  const audio = audioManager ??= (assetRoot && project.assets?.audio ? new AudioManager({ root: assetRoot, lib: mwg.Audio, index: project.audio?.index, cacheVersion: project.source?.convertedAt || '', soundfontUrls: [project.audio?.soundfont ? `${assetRoot}/audio/${project.audio.soundfont}` : null, '/soundfont.sf2'].filter(Boolean) }) : null);
+  const audio = audioManager ??= (assetRoot && project.assets?.audio ? new AudioManager({ root: assetRoot, lib: mwg.Audio, index: project.audio?.index, cacheVersion: `${project.source?.convertedAt || ''}:assets${project.assets?.revision || 0}`, soundfontUrls: [project.audio?.soundfont ? `${assetRoot}/audio/${project.audio.soundfont}` : null, '/soundfont.sf2'].filter(Boolean) }) : null);
   if (audio) {
     const systemTracks = project.audio?.system || {};
     audio.preload([
@@ -476,7 +495,7 @@ export async function startMwgPlayer(canvas, project) {
       this.panTween = null;
       this.facing = 'down';
       this.gameState = new mwg.Rpg.GameState();
-      // Party, inventory and gold have no home in mw_games' GameState (switches
+      // Party, inventory and gold have no home in mwg' GameState (switches
       // and variables only), so the player carries them alongside it and saves
       // them through the same transfer/save payloads below.
       this.rpgExtra = { ...freshExtraState(), party: [...(project.initialParty || [])] };
@@ -554,6 +573,7 @@ export async function startMwgPlayer(canvas, project) {
       this.player.zIndex = characterDepth(position.y, 1);
       world.addChild(this.player);
       world.addChild(this.aboveMap);
+      if (isXp && globalThis.__mwgpPlayerCharacter) Promise.resolve().then(() => this.setPlayerCharacter(globalThis.__mwgpPlayerCharacter));
       this.pictureLayer = new mwg.Container2D();
       this.stage.addChild(this.pictureLayer);
       // RPG Maker draws pictures below the message/choice windows: the window
@@ -754,13 +774,16 @@ export async function startMwgPlayer(canvas, project) {
       }
       this.parallelTimer -= dt;
       if (this.parallelTimer <= 0 && !this.eventRunning) { this.runParallelEvents(); this.parallelTimer = 0.25; }
+      // Engine Game_System#playtime counts seconds while the map runs (menu and
+      // dialogue block this update, matching Scene_Map gating in the engine).
+      this.rpgExtra.playtime = (this.rpgExtra.playtime || 0) + dt;
       this.mover.update(dt);
       // Advance the repeat timer during a step. Freezing it until the mover is
       // idle creates a visible pause between consecutive held-key steps.
       this.cooldown -= dt;
       this.renderPosition = { x: this.player.x / tileSize, y: this.player.y / tileSize };
       this.updateCamera();
-      if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.syncActiveVehicle(); this.runEventAt(x, y, 'touch'); }
+      if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1; this.syncActiveVehicle(); this.runEventAt(x, y, 'touch'); }
       if (this.mover.isMoving) return;
       if (this.cooldown <= 0) {
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
@@ -781,8 +804,37 @@ export async function startMwgPlayer(canvas, project) {
         }
       }
     }
+    // A game that gives its player a graphic at run time (`$game_player.character_name = "walk"`, often a sheet it composed and wrote
+    // itself): the player is redrawn from that XP charset (4 columns x 4 rows). MV/MZ take theirs from the manifest.
+    setPlayerCharacter(name) {
+      this.playerCharacterName = name;
+      globalThis.__mwgpPlayerCharacter = name;   // the next map's scene starts with it
+      if (!isXp || !name || !this.player) return;
+      const written = this.rgss?.imageCanvas?.(`Graphics/Characters/${name}`);
+      const url = written || !project.assets?.characters ? null : `${project.assets.root}/img/characters/${encodeURIComponent(name)}.png`;
+      const apply = (texture, width, height) => {
+        const fw = Math.floor(width / 4), fh = Math.floor(height / 4);
+        if (!(fw > 0 && fh > 0) || !this.player?.parent) return;
+        const sheet = mwg.SpriteSheet.fromTexture(texture, fw, fh);
+        const sprite = new mwg.AnimatedSprite({ texture: sheet.get(1) });
+        addXpCharacterAnimations(sprite, sheet);
+        this.playerSize = characterPixelSize({ format: 'xp', big: false, object: false, fw, fh }, tileSize);
+        sprite.width = this.playerSize.w; sprite.height = this.playerSize.h; sprite.tint = 0xffffff;
+        const previous = this.player;
+        sprite.zIndex = previous.zIndex;
+        previous.parent.addChild(sprite);
+        previous.parent.removeChild(previous);
+        previous.destroy?.();
+        this.player = sprite;
+        // The mover drives the sprite it was built with, so it is rebuilt around the new one at the same spot.
+        if (this.mover) this.mover = new mwg.Rpg.GridMover(sprite, this.mover.x, this.mover.y, { tileWidth: tileSize, tileHeight: tileSize, speed: 6, walkAnimation: direction => `walk-${direction}`, idleAnimation: direction => `idle-${direction}` });
+        this.updateCamera();
+      };
+      if (written) apply(mwg.Texture2D.from(written), written.width, written.height);
+      else if (url) loadResource(url).then(() => { const texture = mwg.Resources.texture(url); apply(texture, texture.width, texture.height); }, error => console.warn(`MWGP player graphic "${name}" could not be loaded`, error));
+    }
     updateCamera() {
-      // Screen shake has no mw_games primitive, so it is a plain jitter on the
+      // Screen shake has no mwg primitive, so it is a plain jitter on the
       // camera offset for the effect's duration: MV's power is honored, its
       // speed only roughly (one new offset per frame), not a shared implementation.
       let shakeX = 0, shakeY = 0;
@@ -948,9 +1000,10 @@ export async function startMwgPlayer(canvas, project) {
     // variables: \V variable, \N actor name, \P party member name, \G currency
     // unit, \\ literal backslash. \C[n] colors, \I[n] icons, \. \| \^ \! waits,
     // \< \> instant toggles, \{ \} font size, and \$ gold window have no
-    // MessageBox equivalent and strip to their payload (colors/icons) or
-    // nothing (timing/layout). Unknown \PLUGIN[...] codes stay literal —
-    // MV-faithful and loud, same rule as the converter's missing text keys.
+    // MessageBox equivalent: they strip to their payload (colors/icons) or
+    // nothing (timing/layout). The game's own escape chain, when its plugins loaded one, runs
+    // first; unknown \PLUGIN[...] codes with no game chain stay literal — MV-faithful and loud,
+    // same rule as the converter's missing text keys.
     resolveEscapeCodes(text) {
       if (text == null) return text;
       let resolvedText = String(text);
@@ -964,6 +1017,13 @@ export async function startMwgPlayer(canvas, project) {
         if (typeof inlined === 'string') resolvedText = inlined;
         else (this.disabledTextFilters ||= new Set()).add(filter);
       }
+      // The game's own display conversion (a plugin-replaced TextManager chain): codes the converter
+      // could only leave literal because the game computes them from live state resolve here, first,
+      // through the game's plugin code; the player's own codes then handle whatever it left.
+      // MV's own conversion works internally on the ESC character and returns it for the codes the
+      // window draw loop strips - put them back as backslashes so the stripper below still sees them.
+      const throughGame = this.rgss?.convertDisplayText?.(resolvedText, { game: this.gameState }, this.currentEvent);
+      if (throughGame != null) resolvedText = throughGame.replace(/\x1b/g, '\\');
       if (!resolvedText.includes('\\')) return resolvedText;
       const escaped = resolvedText.replace(/\\\\/g, '\0');
       const actorName = id => this.rpgExtra.actors?.[String(id)]?.name ?? project.database?.actors?.[Number(id)]?.name ?? '';
@@ -1039,7 +1099,7 @@ export async function startMwgPlayer(canvas, project) {
       const face = request.portrait?.name !== undefined ? portraitSheets.get(request.portrait.name) : null;
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(face ? 'portrait' : 'normal'), pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker, portrait: face ? face.get(request.portrait.index) : undefined }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
+        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight(face ? 'portrait' : 'normal'), pages: [{ text: this.resolveEscapeCodes(request.text), speaker: request.speaker, portrait: face ? face.get(request.portrait.index) : undefined }], choices: (request.choices || []).map(choice => ({ ...choice, text: this.resolveEscapeCodes(choice.text) })), dims: !isXp && this.messageOptions.frame === 1, anchor: this.messageAnchor(), onDone: chosen => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(chosen); } });
         this.windows.push(box);
       });
     }
@@ -1299,15 +1359,25 @@ export async function startMwgPlayer(canvas, project) {
       const battleBgm = this.rpgExtra.system?.battleBgm !== undefined ? this.rpgExtra.system.battleBgm : audioSystem.battleBgm;
       if (this.audio) { this.saveBgm(true); if (battleBgm) this.playBgm(battleBgm); }
       const stores = { 1: 'items', 2: 'weapons', 3: 'armors' };
+      // Engine Game_System#battleStart counts the battle; win/escape follow with
+      // the outcome (Game_System#battleWin / #onEscape), read back by the
+      // "Other" game-data operands.
+      this.rpgExtra.battleCount = (this.rpgExtra.battleCount || 0) + 1;
+      // A project that ships its plugin library lets the game's own engine decide what its skills cost and do (battle-engine.js).
+      const engine = project.pluginLibrary?.order?.length && this.rgss ? createBattleEngine(this.rgss, this.gameState) : null;
       let result;
       try {
         result = await runBattle({
-          database, troopId, party, records, formation: this.rpgExtra.formation || 'default', items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true,
+          database, troopId, party, records, items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true,
           present: request => { this.refreshBattleStage(); return this.presentDialogue(request); },
           variable: key => (String(key).startsWith('switch:') ? this.gameState.switch(String(key).slice(7)) : this.gameState.variable(String(key))),
           hooks: {
-            onSetup: ({ actors, enemies }) => { this.battleEnemies = enemies; this.battleHero = actors[0]; return this.buildBattleStage(enemies, actors).catch(error => console.warn('MWGP battle stage unavailable', error)); },
+            listOrder: (className, entries) => this.rgss?.listHook?.(className, entries),
+            onSetup: ({ actors, enemies }) => { engine?.begin({ troopId }); this.battleEnemies = enemies; this.battleHero = actors[0]; return this.buildBattleStage(enemies, actors).catch(error => console.warn('MWGP battle stage unavailable', error)); },
             onControls: controls => { this.battleControls = controls; },
+            skillCost: engine ? use => engine.skillCost(use) : undefined,
+            applyAction: engine ? use => engine.applyAction(use) : undefined,
+            counterRates: engine ? use => engine.counterRates(use) : undefined,
             onUse: use => this.battleUse(use),
             onVictory: () => { for (const entry of this.battleActorSprites || []) if (entry.actor.alive) { entry.hold = 'victory'; this.svMotion(entry.actor, 'victory'); entry.motion.oneShot = false; } },
             onEffect: effect => { this.battleEffect(effect); this.refreshBattleStage(); },
@@ -1317,7 +1387,9 @@ export async function startMwgPlayer(canvas, project) {
             gainItem: (kind, id, count) => { const store = this.rpgExtra[stores[kind]] ||= {}; store[String(id)] = (store[String(id)] || 0) + count; }
           }
         });
-      } finally { this.battleEnemies = null; this.battleHero = null; this.battleControls = null; this.destroyBattleStage(); }
+      } finally { engine?.end(); this.battleEnemies = null; this.battleHero = null; this.battleControls = null; this.destroyBattleStage(); }
+      if (result.outcome === 'win') this.rpgExtra.winCount = (this.rpgExtra.winCount || 0) + 1;
+      else if (result.outcome === 'escape') this.rpgExtra.escapeCount = (this.rpgExtra.escapeCount || 0) + 1;
       if (this.audio) {
         const me = result.outcome === 'win' ? (this.rpgExtra.system?.victoryMe !== undefined ? this.rpgExtra.system.victoryMe : audioSystem.victoryMe)
           : result.outcome === 'lose' ? (this.rpgExtra.system?.defeatMe !== undefined ? this.rpgExtra.system.defeatMe : audioSystem.defeatMe) : null;
@@ -1348,9 +1420,10 @@ export async function startMwgPlayer(canvas, project) {
       const actor = database.actors?.[actorId];
       const klass = database.classes?.[Number(actor?.classId)];
       const level = Math.max(1, Number(actor?.initialLevel || 1));
-      const params = [0, 1, 2, 3].map(id => klass?.params?.[id]?.[level]);   // MV stores class parameters as [paramId][level]
+      // The same rule as the battle runner (actorParamBase): XP tables, MV class curves, editor scalars/bparams.
+      const params = [0, 1, 2, 3].map(id => actorParamBase(actor, klass, id, level));
       const hero = {
-        name: actor?.name || 'Héros',
+        name: actor?.name || 'Hero',
         hp: Number(params[0] || 100),
         maxHp: Number(params[0] || 100),
         atk: Number(params[2] || 20),
@@ -1508,7 +1581,14 @@ export async function startMwgPlayer(canvas, project) {
         runner.update(dt);
         const fixed = this.routeOptions.get(key)?.directionFix === true;
         if (isPlayer) {
-          if (!mover.isMoving) { position.x = mover.x; position.y = mover.y; }
+          if (!mover.isMoving) {
+            // A route step that landed on a new tile counts as a step, like the
+            // engine's increaseSteps on every completed player move; keyboard
+            // walks count at their own landing (pendingStep) above.
+            if (route.lastLanded && (route.lastLanded.x !== mover.x || route.lastLanded.y !== mover.y)) this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1;
+            route.lastLanded = { x: mover.x, y: mover.y };
+            position.x = mover.x; position.y = mover.y;
+          }
           if (!fixed) this.facing = mover.facing;
         } else {
           mover.update(dt);
@@ -1550,7 +1630,7 @@ export async function startMwgPlayer(canvas, project) {
       const hold = scroll.text.length / speed + 2;
       return new Promise(resolve => {
         this.dialogue = true;
-        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight('scroll'), pages: [{ text: this.resolveEscapeCodes(scroll.text) }], speed, autoAdvance: hold, dims: this.messageOptions.frame === 0, anchor: this.messageAnchor(), onDone: () => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(); } });
+        const box = createDialogueBox(mwg, { width: Math.max(320, game.width - 48), height: this.messageBoxHeight('scroll'), pages: [{ text: this.resolveEscapeCodes(scroll.text) }], speed, autoAdvance: hold, dims: !isXp && this.messageOptions.frame === 1, anchor: this.messageAnchor(), onDone: () => { this.windows.pop(); this.dialogue = null; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; resolve(); } });
         this.windows.push(box);
       });
     }
@@ -1737,6 +1817,7 @@ export async function startMwgPlayer(canvas, project) {
           database, records, party, items: this.rpgExtra.items, weapons: this.rpgExtra.weapons ||= {}, armors: this.rpgExtra.armors ||= {}, gold: menuState.gold, present,
           variable: key => this.gameState.variable(String(key)),
           hooks: {
+            listOrder: (className, entries) => this.rgss?.listHook?.(className, entries),
             maxBattleMembers: this.maxBattleMembers(),
             formation: this.rpgExtra.system?.formationAccess === false ? null : { get: () => this.rpgExtra.formation || 'default', set: name => { this.rpgExtra.formation = name; } },
             save: this.rpgExtra.system?.saveAccess === false ? null : async () => { const slot = await this.pickSlot(present, { forSave: true }); if (slot) this.saveGame(slot); return Boolean(slot); },
@@ -1769,7 +1850,7 @@ export async function startMwgPlayer(canvas, project) {
           height: 126,
           pages: [{ text: 'Menu' }],
           choices: [{ text: 'Save', value: 'save' }, { text: 'Close', value: 'close' }],
-          dims: this.messageOptions.frame === 0,
+          dims: !isXp && this.messageOptions.frame === 1,
           anchor: 'center',
           onDone: chosen => {
             this.windows.pop();
@@ -1848,10 +1929,13 @@ export async function startMwgPlayer(canvas, project) {
         const actor = project.database?.actors?.[Number(id)];
         const klass = project.database?.classes?.[Number(actor?.classId)];
         const level = Math.max(1, Number(actor?.initialLevel || 1));
-        // MV stores class parameters as [paramId][level].
-        const maxHp = Math.max(1, Number(klass?.params?.[0]?.[level] || 100));
-        const maxMp = Math.max(0, Number(klass?.params?.[1]?.[level] || 0));
-        this.rpgExtra.actors[key] = { states: [], skills: [], equips: {}, profile: '', level, classId: Number(actor?.classId || 0), hp: maxHp, maxHp, mp: maxMp, maxMp };
+        // Parameters resolve through the one rule the battle uses too (battle.js actorParamBase):
+        // XP's per-actor tables, MV's class curves, a Studio scalar edit, plus the MV `bparams` bonus.
+        const maxHp = Math.max(1, actorParamBase(actor, klass, 0, level) || 100);
+        const maxMp = Math.max(0, actorParamBase(actor, klass, 1, level));
+        // The database profile is the actor's starting profile text (Game_Actor#initialize); Change
+        // Actor Text events overwrite the record, and the Status screen shows it.
+        this.rpgExtra.actors[key] = { states: [], skills: [], equips: {}, profile: String(actor?.profile || ''), level, classId: Number(actor?.classId || 0), hp: maxHp, maxHp, mp: maxMp, maxMp };
       }
       return this.rpgExtra.actors[key];
     }
@@ -1860,8 +1944,8 @@ export async function startMwgPlayer(canvas, project) {
       const classId = Number(record.classId || actor?.classId || 0);
       const klass = project.database?.classes?.[classId];
       const level = Math.max(1, Number(record.level || actor?.initialLevel || 1));
-      record.maxHp = Math.max(1, Number(klass?.params?.[0]?.[level] || record.maxHp || 100));
-      record.maxMp = Math.max(0, Number(klass?.params?.[1]?.[level] || record.maxMp || 0));
+      record.maxHp = Math.max(1, actorParamBase(actor, klass, 0, level) || record.maxHp || 100);
+      record.maxMp = Math.max(0, actorParamBase(actor, klass, 1, level) || record.maxMp || 0);
       record.hp = Math.max(0, Math.min(record.maxHp, Number(record.hp ?? record.maxHp)));
       record.mp = Math.max(0, Math.min(record.maxMp, Number(record.mp ?? record.maxMp)));
       record.dead = record.hp <= 0;
@@ -1976,7 +2060,7 @@ export async function startMwgPlayer(canvas, project) {
       return new Promise(resolve => {
         const video = document.createElement('video');
         Object.assign(video.style, { position: 'fixed', inset: '0', width: '100%', height: '100%', background: '#000', zIndex: 9999, objectFit: 'contain' });
-        video.src = url; video.autoplay = true; video.playsInline = true;
+        video.src = assetUrl(url); video.autoplay = true; video.playsInline = true;
         let finished = false;
         const done = () => { if (finished) return; finished = true; video.remove(); resolve(); };
         video.addEventListener('ended', done);
@@ -2073,7 +2157,7 @@ export async function startMwgPlayer(canvas, project) {
       }
     }
     // ---- battle effects: damage popups, hit shakes, attack steps, skill animations ---------------------------------
-    // Popups use mw_games' FloatingTextStack (stacked, rising, fading numbers). Motions are small offsets applied to
+    // Popups use mwg' FloatingTextStack (stacked, rising, fading numbers). Motions are small offsets applied to
     // a sprite's stored home position and always return to it. None of this changes the battle's outcome: the runner
     // reports what happened through hooks.onUse / hooks.onEffect and this only draws it.
     battleSpriteFor(battler) {
@@ -2442,6 +2526,10 @@ export async function startMwgPlayer(canvas, project) {
       const key = `slot-${slot}`;
       this.lastSlot = slot;
       try {
+        // Engine Game_System#saveCount: every successful save counts, and the
+        // increment rides inside the save written below (Karryn's door scene
+        // re-reads it after loading).
+        this.rpgExtra.saveCount = (this.rpgExtra.saveCount || 0) + 1;
         this.noteEngineSave();
         this.saves.save(key, this.runtimeState({ mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, facing: this.mover.facing, rpg: this.gameState.toJSON(), extra: this.rpgExtra }), { mapId: mapEntry.id, x: this.mover.x, y: this.mover.y, gold: this.rpgExtra.gold, leader: this.slotLeader() });
         console.info(`MWGP saved ${key} on map ${mapEntry.id} at (${this.mover.x}, ${this.mover.y})`);
@@ -2609,7 +2697,7 @@ function placeholderSheet() {
 
 async function buildAutotileSheet(url, slot, mwg, flags = []) {
   if (typeof document === 'undefined' || typeof Image === 'undefined') return mwg.SpriteSheet.grid(url, 48);
-  const image = await new Promise((resolve, reject) => { const value = new Image(); value.onload = () => resolve(value); value.onerror = reject; value.src = url; });
+  const image = await new Promise((resolve, reject) => { const value = new Image(); value.onload = () => resolve(value); value.onerror = reject; value.src = assetUrl(url); });
   const count = AUTOTILE_COUNTS[slot];
   const canvas = document.createElement('canvas');
   canvas.width = 16 * 48; canvas.height = Math.ceil(count / 16) * 48;
@@ -2762,12 +2850,13 @@ function collectMeNames(commands) {
 }
 
 // Party, gold and item/weapon/armor counts are player-held MWGP state, not
-// mw_games GameState (switches/variables only). No starting party is known —
+// mwg GameState (switches/variables only). No starting party is known —
 // the manifest carries no System.json party — so it starts empty and only
 // changeParty commands populate it.
 function freshExtraState() {
   return {
-    gold: 0, items: {}, weapons: {}, armors: {}, party: [], actors: {}, playerName: '', system: {}, timer: null
+    gold: 0, items: {}, weapons: {}, armors: {}, party: [], actors: {}, playerName: '', system: {}, timer: null,
+    steps: 0, playtime: 0, saveCount: 0, battleCount: 0, winCount: 0, escapeCount: 0
   };
 }
 
@@ -2793,6 +2882,8 @@ function makeBattleEnemy(enemy) {
 // battle terminates, flee offered only when the troops allow escape.
 // Exported pure-of-scene (the `present` dialogue seam is injected) so tests
 // can drive win/lose/escape deterministically. Consumes hero/enemies (hp).
+
+
 export async function runBattleFallback(setup, present) {
   const { hero, enemies, canEscape, onTurn } = setup;
   await present({ text: `Un combat commence contre ${enemies.map(enemy => enemy.name).join(', ')}.` });
@@ -2894,7 +2985,7 @@ function assertMoveRouteSupport(mwg) {
   const probe = new mwg.Rpg.GridMover({ x: 0, y: 0 }, 1, 1, { tileWidth: 1, tileHeight: 1, speed: 1e6 });
   const runner = mwg.Rpg.MoveRouteRunner ? new mwg.Rpg.MoveRouteRunner(probe, { steps: [{ step: { dx: 1, dy: 1 } }] }) : null;
   try { runner?.update(1); probe.update(1); } catch { /* reported below */ }
-  if (probe.x !== 2 || probe.y !== 2) throw new Error('This mw_games build is too old: its MoveRouteRunner lacks diagonal, forward/backward and aimed steps (needs the release after 0.22.0).');
+  if (probe.x !== 2 || probe.y !== 2) throw new Error('This mwg build is too old: its MoveRouteRunner lacks diagonal, forward/backward and aimed steps (needs the release after 0.22.0).');
 }
 
 // How far (in cells) from a transfer the player is when its destination map starts building in the background.
@@ -2985,7 +3076,8 @@ export class JumpSignal extends Error {
 
 // Game-data variable operands resolved from player-held state (no engine
 // needed): inventory counts, the player's live position, party membership,
-// and the map/gold/party-size counters.
+// and the counters the engine's "Other" game data exposes (map, gold,
+// party size, steps, playtime, timer, save/battle/win/escape count).
 // Pure so tests can pin it; the scene
 // method passes live mover/map context. Unknown kinds read as 0 with a loud
 // warning instead of aborting the event.
@@ -2999,6 +3091,13 @@ export function resolveGameDataOperand(extra, context, spec) {
     case 'mapId': return Number(context?.mapId ?? 0);
     case 'partySize': return (extra?.party || []).length;
     case 'gold': return Number(extra?.gold || 0);
+    case 'steps': return Number(extra?.steps || 0);
+    case 'playtime': return Math.floor(Number(extra?.playtime || 0));
+    case 'timer': return extra?.timer ? Math.ceil(Number(extra.timer.seconds || 0)) : 0;
+    case 'saveCount': return Number(extra?.saveCount || 0);
+    case 'battleCount': return Number(extra?.battleCount || 0);
+    case 'winCount': return Number(extra?.winCount || 0);
+    case 'escapeCount': return Number(extra?.escapeCount || 0);
     default: console.warn('MWGP game-data operand is not playable without RPG Maker and read as 0', spec); return 0;
   }
 }

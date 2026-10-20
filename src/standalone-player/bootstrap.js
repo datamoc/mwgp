@@ -2,7 +2,7 @@
 // lives in the embedded gzip stream. No service worker or local server needed.
 async function openStandaloneGame() {
   const status = document.querySelector('#unpacking');
-  if (typeof DecompressionStream !== 'function') throw new Error('Ce navigateur ne prend pas en charge la décompression gzip. Utilisez un navigateur récent.');
+  if (typeof DecompressionStream !== 'function') throw new Error('This browser does not support gzip decompression. Use a recent browser.');
   const payload = document.querySelector('#mwgp-payload');
   const lines = payload.textContent.trim().split('\n');
   payload.remove();
@@ -19,7 +19,7 @@ async function openStandaloneGame() {
     while (length > 0) {
       if (offset === current.length) {
         const next = await reader.read();
-        if (next.done) throw new Error('Le contenu du jeu est tronqué.');
+        if (next.done) throw new Error('The game content is truncated.');
         current = next.value; offset = 0;
       }
       const count = Math.min(length, current.length - offset);
@@ -29,28 +29,28 @@ async function openStandaloneGame() {
     return parts;
   }
   const headerSize = new DataView(await new Blob(await readParts(4)).arrayBuffer()).getUint32(0, true);
-  if (!headerSize || headerSize > 32 * 1024 * 1024) throw new Error('Index de jeu invalide.');
+  if (!headerSize || headerSize > 32 * 1024 * 1024) throw new Error('Invalid game index.');
   const metadata = JSON.parse(await new Blob(await readParts(headerSize)).text());
-  if (metadata.format !== 'MWGP-standalone' || metadata.version !== 1 || !Array.isArray(metadata.files)) throw new Error('Format de jeu inconnu.');
-  if (typeof metadata.playerVersion !== 'string' || !metadata.playerVersion) throw new Error('Version du player manquante.');
+  if (metadata.format !== 'MWGP-standalone' || metadata.version !== 1 || !Array.isArray(metadata.files)) throw new Error('Unknown game format.');
+  if (typeof metadata.playerVersion !== 'string' || !metadata.playerVersion) throw new Error('The player version is missing.');
   const files = new Map();
   for (const entry of metadata.files) {
-    if (typeof entry.path !== 'string' || files.has(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0) throw new Error('Entrée de jeu invalide.');
-    status.textContent = `Ouverture du jeu… ${files.size + 1}/${metadata.files.length}`;
+    if (typeof entry.path !== 'string' || files.has(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0) throw new Error('Invalid game entry.');
+    status.textContent = `Opening the game… ${files.size + 1}/${metadata.files.length}`;
     files.set(entry.path, new Blob(await readParts(entry.size)));
   }
   // Read to EOF so gzip's checksum and truncation errors cannot go unnoticed.
-  if (offset !== current.length || !(await reader.read()).done) throw new Error('Contenu inattendu après le jeu.');
-  if (!files.has('mwgp.json') || !files.has('.runtime/player.js') || !files.has('.runtime/mwg.js')) throw new Error('Player ou jeu manquant.');
+  if (offset !== current.length || !(await reader.read()).done) throw new Error('Unexpected content after the game.');
+  if (!files.has('mwgp.json') || !files.has('.runtime/player.js') || !files.has('.runtime/mwg.js')) throw new Error('The player or the game is missing.');
   globalThis.mwgpStandalone = { files, metadata, playerVersion: metadata.playerVersion };
   const licenses = document.querySelector('#standalone-licenses');
   if (licenses && files.has('.runtime/LICENCES.txt')) licenses.textContent = await files.get('.runtime/LICENCES.txt').text();
   const script = document.createElement('script');
   script.src = URL.createObjectURL(new Blob([files.get('.runtime/player.js')], { type: 'application/javascript' }));
-  await new Promise((resolve, reject) => { script.onload = resolve; script.onerror = () => reject(new Error('Le player ne peut pas démarrer.')); document.head.append(script); });
+  await new Promise((resolve, reject) => { script.onload = resolve; script.onerror = () => reject(new Error('The player cannot start.')); document.head.append(script); });
 }
 openStandaloneGame().catch(error => {
   const status = document.querySelector('#unpacking');
-  if (status) { status.textContent = `Ouverture impossible : ${error.message}`; status.setAttribute('role', 'alert'); }
+  if (status) { status.textContent = `Could not open the game: ${error.message}`; status.setAttribute('role', 'alert'); }
   console.error('MWGP standalone bootstrap failed', error);
 });

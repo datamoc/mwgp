@@ -79,6 +79,9 @@ export async function runMenu({ database, records, party, items, weapons, armors
     for (;;) {
       const usable = Object.entries(items).filter(([, count]) => count > 0).map(([id, count]) => ({ id, count, item: database.items?.[id] })).filter(entry => entry.item);
       if (!usable.length) { await say([command(4, 'Item'), '—']); return; }
+      // The order the game's own list builders give the item list (hooks.listOrder: plugins that sort or filter it).
+      const itemOrder = hooks.listOrder?.('Window_ItemList', usable.map(entry => entry.item));
+      if (itemOrder) usable.sort((a, b) => itemOrder.indexOf(a.item) - itemOrder.indexOf(b.item));
       const entry = await pick(`${command(4, 'Item')}  ${partyText()}`, usable.map(candidate => ({ ...candidate, label: `${candidate.item.name} ×${candidate.count}${[0, 2].includes(Number(candidate.item.occasion)) ? '' : '  (—)'}` })));
       if (!entry) return;
       const item = entry.item;
@@ -95,6 +98,8 @@ export async function runMenu({ database, records, party, items, weapons, armors
     if (!owner) return;
     for (;;) {
       const skills = owner.skills().filter(skill => [0, 2].includes(Number(skill.occasion)));
+      const skillOrder = skills.length ? hooks.listOrder?.('Window_SkillList', skills) : null;
+      if (skillOrder) skills.sort((a, b) => skillOrder.indexOf(a) - skillOrder.indexOf(b));
       if (!skills.length) { await say([`${owner.name}: ${command(5, 'Skill')}`, '—']); return; }
       const entry = await pick(`${owner.name}  ${basic(4)} ${owner.mp}/${owner.mmp}`, skills.map(skill => ({ skill, label: `${skill.name}${skill.mpCost ? `  ${skill.mpCost} ${basic(5)}` : ''}` })));
       if (!entry) return;
@@ -153,6 +158,8 @@ export async function runMenu({ database, records, party, items, weapons, armors
     const states = actor.states.map(state => database.states?.[state.id]?.name).filter(Boolean).join(', ') || '—';
     await say([
       `${actor.name}  ${actor.klass?.name || ''}  ${basic(1)}${actor.level}`,
+      // The database/Change Actor Text profile (MV's Game_Actor#profile): what the editor writes, shown here.
+      String(actor.record.profile || actor.source.profile || ''),
       `${basic(2)} ${actor.hp}/${actor.mhp}   ${basic(4)} ${actor.mp}/${actor.mmp}`,
       `${terms.messages?.expTotal ? format(terms.messages.expTotal, basic(8) || 'EXP') : 'EXP'} ${actor.record.exp ?? expForLevel(actor.klass, actor.level)}   ${terms.messages?.expNext ? format(terms.messages.expNext, basic(0)) : 'Next'} ${Math.max(0, next - Number(actor.record.exp ?? expForLevel(actor.klass, actor.level)))}`
     ]);

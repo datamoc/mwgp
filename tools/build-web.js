@@ -16,6 +16,7 @@ import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createProgress } from './progress.mjs';
+import { assetLockBusy } from '../src/studio-assets.js';
 import { buildRgss } from './build-rgss.mjs';
 
 const [sourceArg, outputArg] = process.argv.slice(2);
@@ -24,6 +25,12 @@ if (!sourceArg || !outputArg) {
   process.exit(1);
 }
 const source = resolve(sourceArg), output = resolve(outputArg);
+if (['.mwgp-studio.json', '.mwgp-studio-assets.json'].some(name => existsSync(join(output, name)))) {
+  throw new Error('This output contains Studio edits. Use a separate output folder for the web build, or --mwgp for reconversion.');
+}
+if (await assetLockBusy(output)) {
+  throw new Error('A Studio resource operation is live on this output; wait for it and retry the web build.');
+}
 const hostFile = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'web', 'nwjs-host.js');
 const progress = createProgress();
 let phase = progress.phase('reading the project', 2);

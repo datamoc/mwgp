@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // Browser smoke harness: boots every MWGP project in a real Chromium page and
 // asserts what the Node suite in tools/test-smoke.mjs cannot see - that the
-// manifest fetches, the mw_games runtime constructs, a scene starts, the map
+// manifest fetches, the mwg runtime constructs, a scene starts, the map
 // renders, keyboard input moves (or turns) the player, and save/load round-trip.
 //
-// Run directly:  node tools/test-browser.mjs [--only <project name>] [--maps [N]] [--soak [seconds]]
+// Run directly:  node tools/test-browser.mjs [--only <project name>] [--maps [N]] [--soak [seconds]] [--soak-actions [N]]
 //   --soak       a bot plays a new game of each project for N seconds (default 60): maps reached, dialogues opened,
 //                and any runtime/uncaught error.
+//   --soak-actions  the example-game validation: a seeded bot performs exactly N actions (default 1000) in a new
+//                game of each project. Any MWGP/uncaught error is a result divergence; a blank frame at an
+//                every-100-actions graphics checkpoint is a graphic divergence. Both fail the run.
 //   --maps       also boots every map of each project (or N evenly spread maps) and fails on maps that crash,
 //                log console errors, or draw nothing: the reachability part of "can this game be played everywhere".
 // Or via:        npm test            (runs as its last section; MWGP_BROWSER=0 or no
@@ -17,7 +20,7 @@
 // MWGP_SMOKE_BASE points at an already-running one.
 import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { filterResumedMaps, parseResumeSkips, pruneProjectLines } from './resume-log.mjs';
 // Progress log: one line per booted map, flushed synchronously so an
 // interrupted run still shows how far it got. The console output may be
@@ -29,7 +32,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
 const root = join(import.meta.dirname, '..');
-const mwgpRoot = join(root, 'MWGP_versions');
+const mwgpRoot = resolve(process.env.MWGP_ROOT || join(root, 'MWGP_versions'));
 const port = Number(process.env.RPGM_SMOKE_PORT || 4199);
 const base = process.env.MWGP_SMOKE_BASE || `http://127.0.0.1:${port}`;
 const onlyIndex = process.argv.indexOf('--only');
@@ -176,13 +179,13 @@ async function check(name) {
     if (bootError && booted === 'failed') return await fail(`bootstrap failed: ${(await page.textContent('#loading'))?.trim()}`);
     if (booted !== 'ok') return await fail(`still loading after ${BOOT_TIMEOUT_MS}ms`);
 
-    // The real mw_games player must have started. A silent fall back to the
+    // The real mwg player must have started. A silent fall back to the
     // canvas renderer is exactly the degradation this harness exists to catch.
     const ready = await page.waitForFunction(() => {
       const scene = globalThis.__MWG__?.currentScene;
       return Boolean(scene && scene.mover && scene.project);
     }, null, { timeout: 30000 }).then(() => true).catch(() => false);
-    if (!ready) return await fail('mw_games scene never reached ready state (fallback renderer? see console)');
+    if (!ready) return await fail('mwg scene never reached ready state (fallback renderer? see console)');
 
     const canvasBox = await page.evaluate(() => {
       const canvas = document.querySelector('#game');
@@ -478,7 +481,18 @@ async function sweepMaps(name, limit) {
     let navigations = 0;
     page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations++; });
     page.on('pageerror', error => errors.push(`uncaught: ${String(error?.message || error).slice(0, 140)}`));
-    page.on('console', async message => { if (process.env.MWGP_SMOKE_DEBUG && /player unavailable/.test(message.text())) { const stack = await message.args()[1]?.evaluate(error => String(error?.stack || error)).catch(() => ''); console.log(`   [map ${map.id} stack] ${String(stack).slice(0, 1200)}`); } if (process.env.MWGP_SMOKE_DEBUG && ['error', 'warning'].includes(message.type()) && !/compatibility:/.test(message.text())) console.log(`   [map ${map.id} ${message.type()}] ${message.text().slice(0, 600)}`); if (message.type() === 'error' && !resourceNoise.test(message.text())) errors.push(`console.error: ${message.text().slice(0, 140)}`); });
+    page.on('console', async message => {
+      if (process.env.MWGP_SMOKE_DEBUG && /player unavailable/.test(message.text())) {
+        const stack = await message.args()[1]?.evaluate(error => String(error?.stack || error)).catch(() => '');
+        console.log(`   [map ${map.id} stack] ${String(stack).slice(0, 1200)}`);
+      }
+      if ((process.env.MWGP_SMOKE_DEBUG || process.env.MWGP_SMOKE_STACK) && /MWGP RGSS script failed/.test(message.text())) {
+        const detail = await Promise.all(message.args().slice(1).map(arg => arg.evaluate(value => String(value?.stack || value)).catch(() => '?')));
+        console.log(`   [map ${map.id} RGSS stack] ${detail.join(' | ').slice(0, 1800)}`);
+      }
+      if (process.env.MWGP_SMOKE_DEBUG && ['error', 'warning'].includes(message.type()) && !/compatibility:/.test(message.text())) console.log(`   [map ${map.id} ${message.type()}] ${message.text().slice(0, 600)}`);
+      if (message.type() === 'error' && !resourceNoise.test(message.text())) errors.push(`console.error: ${message.text().slice(0, 140)}`);
+    });
     try {
       const x = Math.floor(map.data.width / 2), y = Math.floor(map.data.height / 2);
       await page.goto(`${base}/player.html?id=${encodeURIComponent(id)}&map=${map.id}&x=${x}&y=${y}&skipTitle=1`, { waitUntil: 'domcontentloaded' });
@@ -516,20 +530,30 @@ async function soak(name, seconds) {
   const id = Buffer.from(name, 'utf8').toString('base64url');
   const context = await browser.newContext({ viewport: { width: 900, height: 700 } });
   const page = await context.newPage();
-  const errors = [], gameErrors = [], maps = new Set(['start']);
+  const errors = [], gameErrors = [], skippedScriptCalls = new Set(), skippedScripts = new Set(), maps = new Set(['start']);
   let dialogues = 0, wasDialogue = false, navigations = 0;
   page.on('framenavigated', frame => { if (frame === page.mainFrame()) { navigations++; const map = new URL(frame.url()).searchParams.get('map'); if (map) maps.add(map); } });
-  page.on('pageerror', error => errors.push(`uncaught: ${String(error?.message || error).slice(0, 160)}`));
+  page.on('pageerror', error => {
+    errors.push(`uncaught: ${String(error?.message || error).slice(0, 160)}`);
+    if (process.env.MWGP_SMOKE_DEBUG) console.log('   [soak pageerror]', String(error?.stack || error).slice(0, 1800));
+  });
   page.on('console', async message => {
-    if (message.type() !== 'error' || resourceNoise.test(message.text())) return;
-    (message.text().startsWith('MWGP') ? errors : gameErrors).push(message.text().slice(0, 160));
+    const text = message.text();
+    if (process.env.MWGP_SMOKE_DEBUG && message.type() === 'warning' && text.startsWith('MWGP RGSS script call ')) {
+      const detail = await Promise.all(message.args().slice(1).map(arg => arg.evaluate(value => String(value?.stack || value)).catch(() => '?')));
+      if (detail.length) console.log('   [soak Ruby call]', `${text} ${detail.join(' | ')}`.slice(0, 1800));
+    }
+    if (message.type() === 'warning' && text.startsWith('MWGP RGSS script call ')) skippedScriptCalls.add(text.slice(0, 240));
+    if (message.type() === 'warning' && text.startsWith('MWGP RGSS script could not be transpiled and was skipped')) skippedScripts.add(text.slice(0, 240));
+    if (message.type() !== 'error' || resourceNoise.test(text)) return;
+    (text.startsWith('MWGP') ? errors : gameErrors).push(text.slice(0, 160));
     if (process.env.MWGP_SMOKE_DEBUG) console.log('   [soak error]', (await Promise.all(message.args().map(arg => arg.evaluate(value => value instanceof Error ? value.stack : String(value)).catch(() => '?')))).join(' | ').slice(0, 1200));
   });
   let seed = 12345;
   const random = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
   const keys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
   try {
-    await page.goto(`${base}/player.html?id=${encodeURIComponent(id)}&skipTitle=1`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${base}/player.html?id=${encodeURIComponent(id)}&skipTitle=1${process.env.MWGP_SMOKE_DEBUG ? '&debugRuby=1' : ''}`, { waitUntil: 'domcontentloaded' });
     const end = Date.now() + seconds * 1000;
     while (Date.now() < end) {
       try {
@@ -550,7 +574,62 @@ async function soak(name, seconds) {
     }
   } catch (error) { errors.push(`exception ${String(error?.message || error).slice(0, 120)}`); }
   await Promise.race([context.close().catch(() => {}), new Promise(resolve => setTimeout(resolve, 10000))]);
-  return { name, seconds, maps: maps.size, dialogues, navigations, errors, gameErrors };
+  return { name, seconds, maps: maps.size, dialogues, navigations, errors, gameErrors, skippedScriptCalls: [...skippedScriptCalls], skippedScripts: [...skippedScripts] };
+}
+
+// 1000-action validation (the example-game gate): same seeded bot as the soak,
+// but it performs an exact number of actions instead of running for a duration,
+// so every example game is stressed the same amount. Two divergence kinds fail:
+// - result: an MWGP or uncaught error, a page that stops answering, or a run
+//   that ends before the requested action count;
+// - graphic: at every 100th action the game canvas must not be blank (same
+//   screenshot judgement as the map sweep: a flat screenshot compresses to a
+//   few KB, dark scenes holding sprites are fine).
+async function soakActions(name, count) {
+  const id = Buffer.from(name, 'utf8').toString('base64url');
+  const context = await browser.newContext({ viewport: { width: 900, height: 700 } });
+  const page = await context.newPage();
+  const errors = [], gameErrors = [], skippedScriptCalls = new Set(), maps = new Set(['start']);
+  let dialogues = 0, wasDialogue = false, navigations = 0, done = 0, blankFrames = 0;
+  page.on('framenavigated', frame => { if (frame === page.mainFrame()) { navigations++; const map = new URL(frame.url()).searchParams.get('map'); if (map) maps.add(map); } });
+  page.on('pageerror', error => errors.push(`uncaught: ${String(error?.message || error).slice(0, 160)}`));
+  page.on('console', message => {
+    const text = message.text();
+    if (message.type() === 'warning' && text.startsWith('MWGP RGSS script call ')) skippedScriptCalls.add(text.slice(0, 240));
+    if (message.type() !== 'error' || resourceNoise.test(text)) return;
+    (text.startsWith('MWGP') ? errors : gameErrors).push(text.slice(0, 160));
+  });
+  let seed = 12345;
+  const random = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  const keys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+  try {
+    await page.goto(`${base}/player.html?id=${encodeURIComponent(id)}&skipTitle=1`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => Boolean(globalThis.__MWG__?.currentScene?.mover) && !document.querySelector('#loading'), null, { timeout: 60000 });
+    for (let action = 1; action <= count; action++) {
+      const dialogue = await Promise.race([
+        page.evaluate(() => Boolean(globalThis.__MWG__?.currentScene?.dialogue)).catch(() => false),
+        new Promise(resolve => setTimeout(() => resolve('hung'), 15000))
+      ]);
+      if (dialogue === 'hung') { errors.push(`result divergence: page stopped answering at action ${action}`); break; }
+      if (dialogue && !wasDialogue) dialogues++;
+      wasDialogue = dialogue;
+      if (dialogue || random() < 0.2) { await page.keyboard.press('Enter'); await page.waitForTimeout(60); }
+      else {
+        const key = keys[Math.floor(random() * keys.length)];
+        await page.keyboard.down(key); await page.waitForTimeout(140); await page.keyboard.up(key);
+        if (random() < 0.03) { await page.keyboard.press('Escape'); await page.waitForTimeout(100); await page.keyboard.press('Escape'); }
+      }
+      done = action;
+      if (action % 100 === 0) {
+        const shot = await page.locator('#game').screenshot().catch(() => null);
+        const holdsSprites = await page.evaluate(() => { const s = globalThis.__MWG__?.currentScene; return (s?.eventSprites?.length || 0) > 0 || (s?.world?.children?.length || 0) > 2; }).catch(() => false);
+        if (shot && shot.length <= 6000 && !holdsSprites) { blankFrames++; errors.push(`graphic divergence: blank frame at action ${action}`); }
+      }
+    }
+  } catch (error) { errors.push(`exception ${String(error?.message || error).slice(0, 120)}`); }
+  if (done < count && !errors.length) errors.push(`result divergence: only ${done}/${count} actions completed`);
+  await Promise.race([context.close().catch(() => {}), new Promise(resolve => setTimeout(resolve, 10000))]);
+  return { name, actions: done, requested: count, maps: maps.size, dialogues, navigations, blankFrames, errors, gameErrors, skippedScriptCalls: [...skippedScriptCalls] };
 }
 
 console.log(`Browser smoke: ${projects.length} MWGP project(s) and ${webBuilds.length} web build(s) against ${base}`);
@@ -583,8 +662,23 @@ if (soakIndex >= 0) {
   for (const project of projects) {
     const result = await soak(project, seconds);
     soaks.push(result);
-    console.log(`  ${result.errors.length ? 'FAIL' : 'PASS'}  soak of ${project}: ${result.seconds}s, ${result.maps} map(s) reached, ${result.dialogues} dialogue(s), ${result.navigations} page load(s)${result.errors.length ? `, ${result.errors.length} error(s)` : ''}`);
+    console.log(`  ${result.errors.length ? 'FAIL' : 'PASS'}  soak of ${project}: ${result.seconds}s, ${result.maps} map(s) reached, ${result.dialogues} dialogue(s), ${result.navigations} page load(s), ${result.skippedScriptCalls.length} skipped Ruby call(s), ${result.skippedScripts.length} skipped Ruby script(s)${result.errors.length ? `, ${result.errors.length} error(s)` : ''}`);
     for (const error of result.errors.slice(0, 5)) console.log(`          ! ${error}`);
+    for (const gap of [...result.skippedScriptCalls, ...result.skippedScripts].slice(0, process.env.MWGP_SMOKE_DEBUG ? 100 : 8)) console.log(`          ! ${gap}`);
+    for (const error of [...new Set(result.gameErrors)].slice(0, 3)) console.log(`          ~ game-logged error: ${error}`);
+  }
+}
+
+const actionsIndex = process.argv.indexOf('--soak-actions');
+const actionSoaks = [];
+if (actionsIndex >= 0) {
+  const count = Number(process.argv[actionsIndex + 1]) || 1000;
+  for (const project of projects) {
+    const result = await soakActions(project, count);
+    actionSoaks.push(result);
+    console.log(`  ${result.errors.length ? 'FAIL' : 'PASS'}  ${result.actions}/${result.requested} actions in ${project}: ${result.maps} map(s) reached, ${result.dialogues} dialogue(s), ${result.navigations} page load(s), ${result.blankFrames} blank frame(s), ${result.skippedScriptCalls.length} skipped Ruby call(s)${result.errors.length ? `, ${result.errors.length} divergence(s)` : ', no divergence'}`);
+    for (const error of result.errors.slice(0, 8)) console.log(`          ! ${error}`);
+    for (const gap of result.skippedScriptCalls.slice(0, 8)) console.log(`          ! ${gap}`);
     for (const error of [...new Set(result.gameErrors)].slice(0, 3)) console.log(`          ~ game-logged error: ${error}`);
   }
 }
@@ -696,7 +790,9 @@ if (projects.length) console.log(`  ${titleResult.ok ? 'PASS' : 'FAIL'}  title s
 await browser.close();
 if (startedServer) server.kill();
 
-const failed = results.filter(result => !result.ok).concat(titleResult.ok ? [] : [titleResult]).concat(mapSweeps.filter(sweep => sweep.problems.length)).concat(soaks.filter(result => result.errors.length)).concat(webResults.filter(result => !result.ok));
+const failed = results.filter(result => !result.ok).concat(titleResult.ok ? [] : [titleResult]).concat(mapSweeps.filter(sweep => sweep.problems.length)).concat(soaks.filter(result => result.errors.length)).concat(actionSoaks.filter(result => result.errors.length)).concat(webResults.filter(result => !result.ok));
 const withErrors = results.filter(result => result.ok && result.errors.length);
 console.log(`\nBrowser smoke: ${results.length - results.filter(result => !result.ok).length}/${results.length} booted, ${withErrors.length} with console errors, ${webResults.filter(result => result.ok).length}/${webResults.length} web build(s) played, ${failed.length ? `${failed.length} failed` : 'no failures'}`);
 if (failed.length || withErrors.length) process.exit(1);
+await new Promise(resolve => process.stdout.write('', resolve));
+process.exit(0);

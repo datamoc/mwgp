@@ -4,6 +4,7 @@
 // Saving keeps the edited project in memory; the deliverable is a regenerated
 // self-contained game page (same player shell, edited manifest and assets).
 import { PLAYER_VERSION } from '../standalone-player/player-version.js';
+import { t } from '../../public/i18n.js';
 
 const textExtensions = new Set(['.js', '.json', '.txt', '.csv', '.xml', '.ini', '.css', '.rb', '.md', '.fnt']);
 const isTextAsset = path => textExtensions.has(path.slice(path.lastIndexOf('.')).toLowerCase());
@@ -145,10 +146,10 @@ export function installStudioHost(runtime) {
   };
 
   async function unpack(file) {
-    if (typeof DecompressionStream !== 'function') throw new Error('Ce navigateur ne prend pas en charge la décompression gzip.');
+    if (typeof DecompressionStream !== 'function') throw new Error(t('sa_no_gzip'));
     const pageText = await file.text();
     const payload = pageText.match(/<script id="mwgp-payload" type="application\/octet-stream">([\s\S]*?)<\/script>/)?.[1];
-    if (!payload) throw new Error('Ce fichier n’est pas une page de jeu MWGP autoporteuse.');
+    if (!payload) throw new Error(t('sa_not_standalone'));
     const lines = payload.trim().split('\n');
     let line = 0;
     const compressed = new ReadableStream({ pull(controller) {
@@ -163,7 +164,7 @@ export function installStudioHost(runtime) {
       while (length > 0) {
         if (offset === current.length) {
           const next = await reader.read();
-          if (next.done) throw new Error('Le contenu du jeu est tronqué.');
+          if (next.done) throw new Error(t('sa_truncated'));
           current = next.value; offset = 0;
         }
         const count = Math.min(length, current.length - offset);
@@ -173,16 +174,16 @@ export function installStudioHost(runtime) {
       return parts;
     }
     const headerSize = new DataView(await new Blob(await readParts(4)).arrayBuffer()).getUint32(0, true);
-    if (!headerSize || headerSize > 32 * 1024 * 1024) throw new Error('Index de jeu invalide.');
+    if (!headerSize || headerSize > 32 * 1024 * 1024) throw new Error(t('sa_bad_index'));
     const metadata = JSON.parse(await new Blob(await readParts(headerSize)).text());
-    if (metadata.format !== 'MWGP-standalone' || metadata.version !== 1 || !Array.isArray(metadata.files)) throw new Error('Format de jeu inconnu.');
+    if (metadata.format !== 'MWGP-standalone' || metadata.version !== 1 || !Array.isArray(metadata.files)) throw new Error(t('sa_unknown_format'));
     const files = new Map();
     for (const entry of metadata.files) {
-      if (typeof entry.path !== 'string' || files.has(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0) throw new Error('Entrée de jeu invalide.');
+      if (typeof entry.path !== 'string' || files.has(entry.path) || !Number.isSafeInteger(entry.size) || entry.size < 0) throw new Error(t('sa_bad_entry'));
       files.set(entry.path, new Blob(await readParts(entry.size)));
     }
-    if (offset !== current.length || !(await reader.read()).done) throw new Error('Contenu inattendu après le jeu.');
-    if (!files.has('mwgp.json')) throw new Error('La page de jeu ne contient pas de manifeste MWGP.');
+    if (offset !== current.length || !(await reader.read()).done) throw new Error(t('sa_trailing'));
+    if (!files.has('mwgp.json')) throw new Error(t('sa_no_manifest'));
     return { metadata, files, pageText };
   }
 
@@ -202,7 +203,7 @@ export function installStudioHost(runtime) {
     state.outputName = (fileName || 'jeu').replace(/\.html?$/i, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') || 'jeu';
   }
   function loadNewProject(title) {
-    state.manifest = skeletonManifest(title || 'Nouveau projet');
+    state.manifest = skeletonManifest(title || t('sa_new_fallback'));
     state.base = stripStudio(structuredClone(state.manifest));
     state.files = new Map(); state.original = new Map(); state.pageText = null;
     state.id = 'standalone'; state.protectedPaths = []; state.assets = new Map(); state.revision = 0;
@@ -219,12 +220,12 @@ export function installStudioHost(runtime) {
     overlay.id = 'studio-open-overlay';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:200;background:rgba(4,8,14,.92);display:grid;place-items:center;padding:20px;';
     overlay.innerHTML = `<div style="max-width:520px;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:28px;color:#f0f6fc;font:14px system-ui;">
-      <h1 style="font-size:20px;color:#d2a35b;margin:0 0 12px;">MWGP Studio autonome</h1>
-      <p style="color:#8b949e;line-height:1.6;">Ouvrez une page de jeu autoporteuse (.html) pour l’éditer avec l’éditeur graphique complet, hors connexion. « Sauvegarder » protège vos éditions ici ; téléchargez ensuite la page de jeu régénérée pour les conserver.</p>
+      <h1 style="font-size:20px;color:#d2a35b;margin:0 0 12px;">${t('sa_title')}</h1>
+      <p style="color:#8b949e;line-height:1.6;">${t('sa_intro')}</p>
       <p id="studio-open-error" style="color:#ff9d97;min-height:20px;"></p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;">
-        <button id="studio-open-choose" style="background:#d2a35b;color:#0d1117;border:1px solid #b78343;padding:9px 16px;border-radius:6px;font-weight:700;cursor:pointer;">Ouvrir une page de jeu…</button>
-        <button id="studio-open-new" style="background:#21262d;color:#f0f6fc;border:1px solid #30363d;padding:9px 16px;border-radius:6px;font-weight:600;cursor:pointer;">Nouveau projet vierge</button>
+        <button id="studio-open-choose" style="background:#d2a35b;color:#0d1117;border:1px solid #b78343;padding:9px 16px;border-radius:6px;font-weight:700;cursor:pointer;">${t('sa_open_choose')}</button>
+        <button id="studio-open-new" style="background:#21262d;color:#f0f6fc;border:1px solid #30363d;padding:9px 16px;border-radius:6px;font-weight:600;cursor:pointer;">${t('sa_open_new')}</button>
       </div>
       <input id="studio-open-file" type="file" accept=".html,text/html" hidden>
     </div>`;
@@ -240,7 +241,7 @@ export function installStudioHost(runtime) {
       } catch (error) { overlay.querySelector('#studio-open-error').textContent = error.message; }
     };
     overlay.querySelector('#studio-open-new').onclick = () => {
-      const title = prompt('Nom du nouveau projet :', 'Mon jeu');
+      const title = prompt(t('sa_new_prompt'), t('my_game'));
       if (title === null) return;
       loadNewProject(title);
       overlay.remove(); resolveReady();
@@ -298,7 +299,7 @@ export function installStudioHost(runtime) {
     const method = (options.method || input.method || 'GET').toUpperCase();
     try {
       if (path === '/api/games' && method === 'GET') return json({ mwgp: [{ id: state.id }] });
-      if (path === '/api/studio/init' && method === 'POST') return json({ error: 'Utilisez « Nouveau projet vierge » de l’écran d’ouverture autonome.' }, 400);
+      if (path === '/api/studio/init' && method === 'POST') return json({ error: t('sa_use_new') }, 400);
       const projectMatch = /^\/api\/studio\/([A-Za-z0-9_-]+)$/.exec(path);
       if (projectMatch && method === 'GET') {
         await ensureProject();
@@ -396,8 +397,8 @@ export function installStudioHost(runtime) {
     const download = document.createElement('button');
     download.id = 'studio-download-game';
     download.className = 'btn';
-    download.textContent = '⬇ Page de jeu (.html)';
-    download.title = 'Télécharger la page de jeu autoporteuse avec vos éditions';
+    download.textContent = t('sa_download_page');
+    download.title = t('sa_download_title');
     download.onclick = async () => {
       const blob = await repackBlob();
       const anchor = document.createElement('a');

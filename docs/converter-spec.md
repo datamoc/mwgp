@@ -20,9 +20,9 @@ RPGM_versions/<game>/  --convert-auto-->  MWGP_versions/<game>/
   junctioned folders included). Detection per folder, in order: extracted RGSS
   (`Data/*.rxdata|rvdata|rvdata2`) → `convert-rgss.js`; MV/MZ
   (`www/index.html` or `index.html`) → `build-web.js` (with `--mwgp`:
-  `convert-mv.js --copy-assets`); raw archive (`Game.rgssad|Game.rgss3a`) →
-  extract to temp (plus beside-archive `Audio/`, `Fonts/`, `Game.ini`, `*.sf2`
-  sidecars), then `convert-rgss.js`; else skipped with a reason.
+  `convert-mv.js --copy-assets`); raw archive (`Game.rgssa|Game.rgssad|Game.rgss2a|Game.rgss3a`) →
+  `convert-rgss.js` extracts it to a temporary tree, including beside-archive
+  `Audio/`, `Fonts/`, `Game.ini`, and `*.sf2` sidecars; else skipped with a reason.
   `--skip-existing` leaves folders that already have `mwgp.json` or
   `mwgp-web.json`.
 - **Parallel runs**: each game converts in its own process, at most `--jobs N`
@@ -49,7 +49,7 @@ RPGM_versions/<game>/  --convert-auto-->  MWGP_versions/<game>/
 
 ## 2. Archive extraction (`extract-rgssad.js`)
 
-Unpacks `Game.rgssad`/`Game.rgss3a` into a plain tree. Follows mkxp's
+Unpacks supported `Game.rgssa`/`Game.rgssad`/`Game.rgss2a`/`Game.rgss3a` archives into a plain tree. Follows mkxp's
 `src/rgssad.cpp` (pinned tree in downloads).
 
 - Header `RGSSAD\0` + version byte: **v1** (XP/Essentials, also VX `.rgss2a`)
@@ -153,6 +153,32 @@ files. Output: `mwgp.json` + `assets/` (decoded images/audio).
   vehicles); `audio.soundfont` names the project's own `.sf2` (gitignored
   output only; shared fonts must be vetted — see the player spec).
 
+### Missing asset diagnostics (MV/MZ)
+
+`tools/asset-usage.mjs` checks explicit map, event, common-event and system
+asset references against the source files, including encrypted MV/MZ extensions.
+The manifest's `compatibility.assets` records each missing path, severity,
+reason and reference locations. This check runs independently of asset-copy flags.
+
+References only on maps labelled `test` (case-insensitive, as a separate word,
+including `tests` and `testing`) are warnings. Disabled map autoplay/battleback
+settings and vehicles without an initial map are also warnings for inactive
+references. The configured start map always counts as gameplay. Any gameplay
+reference to the same missing asset takes precedence over its test references.
+Common-event calls propagate their caller's classification, including nested
+calls; autorun/parallel events are checked independently. Uncalled common events
+remain potentially used because scripts can invoke them dynamically.
+
+This is static analysis, not proof of reachability: it does not resolve arbitrary
+script/plugin asset paths or prove that a non-test map is unreachable. Potential
+gameplay uses remain errors. A test label is a documented heuristic, not a reason
+to remove a map or supply replacement artwork.
+
+`convert:auto` retains warning lines in its JSON log and reports warning-only
+runs as `converted with warnings` (`withWarnings` in the summary), separately
+from `converted with errors`. Other existing conversion difficulties retain
+their error classification.
+
 ## 4. The MWGP event vocabulary (contract)
 
 `say ask inputName inputNumber messageOptions wait setSwitch setVariable
@@ -175,6 +201,11 @@ unsupported`
   `compareVariable`), `script: { source, js }`, player-state shapes
   (`partyMember actorSkill actorState facing eventFacing gold item weapon
   armor actorName actorClass actorWeapon actorArmor vehicle unsupported`).
+  MV/MZ Conditional Branch variable operands pass through in the shipped
+  engine's editor order — `params[4]`: 0 `eq`, 1 `gte` (emitted as the
+  `atLeast` form), 2 `lte`, 3 `gt`, 4 `lt`, 5 `neq` (verified against
+  `rpg_objects.js` v1.6.2 and `rmmz_objects.js`; the VX/RGSS order, `gte`
+  first, belongs to the RGSS converter, not here).
 - `modifyVariable` operands: `value`, `random`, `variable`, `gameData`
   (`itemCount weaponCount armorCount playerX playerY partyMember mapId
   partySize gold`), `script`.
@@ -186,7 +217,11 @@ unsupported`
 ## 5. XP/VX/Ace conversion (`convert-rgss.js` + `rgss-*.mjs`)
 
 Input: an extracted RGSS tree (`Data/*.rxdata` XP, `*.rvdata` VX,
-`*.rvdata2` Ace). Marshal decoding via `@datamoc/mw_games/rpg`
+`*.rvdata2` Ace), a project directory containing `Game.rgssa`/`Game.rgssad`/`Game.rgss2a`/
+`Game.rgss3a`, or one of those archive files directly. Raw archives are
+decrypted and unpacked into a temporary tree before conversion; `Scripts.rxdata`,
+`Scripts.rvdata`, `Scripts.rvdata2`, and `PluginScripts.rxdata` are then read,
+inflated, and transpiled into the manifest's Ruby library. Marshal decoding via `@datamoc/mwg/rpg`
 (`decodeMarshal`); `{ class, ivars }` objects, `Hash` as `{ $map }`.
 
 - **Engine gates**: `isAce` (`System.rvdata2` exists) / `isVx` (`System.rvdata`)
@@ -227,10 +262,11 @@ Input: an extracted RGSS tree (`Data/*.rxdata` XP, `*.rvdata` VX,
   `_implicitBlockYield`, so `yield` inside a block reaches the enclosing
   method's block. `npm test` transpiles 100% of event scripts on the real
   Void builds.
-- **Game data**: every `Data/*.dat` (Marshal) exported as
-  `assets/ruby-data/*.json` (`manifest.rubyData`) feeding the game's own
-  `GameData` registries; `manifest.fileIndex` + `textFiles` answer the game's
-  `File`/`Dir`/`load_data` reads case-insensitively.
+- **Game data**: Marshal files under `Data/` (`.dat`, `.rxdata`, `.rvdata`,
+  `.rvdata2`) exported as `assets/ruby-data/*.json` (`manifest.rubyData`),
+  except the Ruby script archives already transpiled by the converter. This
+  feeds the game's own `load_data` calls and `GameData` registries; `manifest.fileIndex` +
+  `textFiles` answer the game's `File`/`Dir` reads case-insensitively.
 - **Boot values**: top-level `Const.register(:id)` blocks become
   `rubyLibrary.boot` lambdas; the runtime materializes them (`new_game_value`
   or rebuilt from save) into `rpgExtra.rgss.boot`, snapshotted after every
@@ -312,3 +348,54 @@ Prints `{ valid, maps, events, commands }` or the error list.
 - **Gaps that rule leaves open**: plugin- or Ruby-drawn title screens,
   a game's own menu scenes, message windows drawn by the game's own code
   (RGSS `Window`), and plugin commands that need the MV scene/window layer.
+
+## 10. Studio bridge (`tools/mwgp-studio.mjs`)
+
+The converter → editor → player triple on real manifests. `lift <mwgp.json>
+<dir>` splits a manifest into a Studio directory (`studio.json`, `maps/`,
+`database/`) and stamps every map, event and database row with
+`studio.originHash` (hash of its converted content). Editing those files is
+the editable form of everything the player shows. `publish <dir> <out.json>`
+reassembles a plain manifest (stamps stripped) that the player and
+`validate-mwgp.js` read unchanged. `merge <dir> <fresh.json> <outDir>`
+folds a later conversion into the Studio directory: entities the editor is
+known to have modified (content no longer matching `originHash`) are kept,
+never silently overwritten; when the fresh conversion also changed one, the
+report (`merge-report.json`: preserved / updated / added / removed /
+conflicts) keeps both sides comparable. Untouched entities take the new
+conversion. `compare <a.json> <b.json>` lists entity-level differences
+between two manifests. `edit <dir> [--port N] [--publish-to <file>]` serves
+the real editor over those Studio files (map picker, every player-visible
+`say` text editable, database actor names editable, event creation; save
+writes the Studio file and the entity reads back as known-as-modified —
+editor-created entities have no converted baseline and are likewise kept by
+`merge` — publish button) — driven in Chromium against a lifted
+Elementals project. Covered by `tools/test-mwgp-studio.mjs` (synthetic)
+and verified against a real Elementals manifest (published output passes
+`validate-mwgp.js`; the merged, republished manifest was also booted by the
+real player in Chromium — the edited event text renders in the dialogue box
+with no console errors). Spec: DOC59 rev4 (MWGP Universel 2.0).
+
+
+### 10.1 Ruby scripts edited in the Studio (`src/studio-code.js`)
+
+An XP/VX/Ace event script is stored as its Ruby (`script`, or `source` in a
+conditional branch) next to the JavaScript the player runs (`js`, plus `async`
+or `error`). Only the Ruby is the edit; `js`, `async` and `error` are derived.
+`recompileScripts(edited, base)` regenerates them with the converter's own
+snippet transpiler and async lift for every script whose Ruby differs from the
+baseline's at the same path. A `js` the editor changed by hand is kept, a Ruby
+that does not transpile keeps its `error` and loses the stale `js` (loud at run
+time), and MV/MZ scripts (already JavaScript, no `js`) are untouched. Covered by
+`tools/test-studio-code.mjs`. Not covered: the transpiled library units
+(`rubyLibrary.units`), which keep no Ruby source in the manifest and can only be
+edited as generated JS; a unit edit would also have to re-run the library-wide
+async and call-kind passes.
+
+**Decision (2026-10-19): library units stay generated JS.** The transpiled units of
+`rubyLibrary.units` are edited in the Studio as JavaScript (full-manifest editor) and are
+protected against a later conversion like any other edited field; the original Ruby of a
+unit is not kept in the manifest and is not editable from the Studio. Editing the Ruby of a
+unit would need the converter to keep each unit's Ruby as an external resource and to rebuild
+the library (the async lift and the call-kind passes are library-wide); that was weighed and
+not chosen. Event scripts (`{ script, js }`) are different and are recompiled on save (above).

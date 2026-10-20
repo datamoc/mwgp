@@ -1,4 +1,5 @@
 // Resource editing is independent of the map/command inspector.
+import { t } from './i18n.js';
 export function setupAssetEditor({ projectId, notify, onSaved }) {
   const dialog = document.querySelector('#asset-dialog');
   const selector = document.querySelector('#asset-select');
@@ -17,15 +18,15 @@ export function setupAssetEditor({ projectId, notify, onSaved }) {
     document.querySelector('#asset-prefix').textContent = `assets/${prefix}`;
     document.querySelector('#asset-up').disabled = !prefix;
     document.querySelector('#asset-detail').hidden = true;
-    selector.replaceChildren(new Option('Sélectionner un dossier ou un fichier…', ''));
-    for (const entry of entries) selector.add(new Option(`${entry.directory ? '📁 ' : ''}${entry.name}${entry.protected ? ' · protégé' : ''}`, entry.path));
-    document.querySelector('#asset-status').textContent = entries.length ? '' : 'Aucune ressource copiée dans ce dossier.';
+    selector.replaceChildren(new Option(t('asset_select'), ''));
+    for (const entry of entries) selector.add(new Option(`${entry.directory ? '📁 ' : ''}${entry.name}${entry.protected ? ` · ${t('modified')}` : ''}`, entry.path));
+    document.querySelector('#asset-status').textContent = entries.length ? '' : t('asset_none');
   }
 
   async function renderPreview(host, response, url, editable, entry) {
     if (entry !== selected) return;
     host.replaceChildren();
-    if (!response.ok) { host.textContent = 'Ressource absente dans cette version.'; return; }
+    if (!response.ok) { host.textContent = t('asset_absent'); return; }
     const bytes = await response.blob();
     if (entry !== selected) return;
     if (entry.text && bytes.size <= 2 * 1024 * 1024) {
@@ -36,7 +37,7 @@ export function setupAssetEditor({ projectId, notify, onSaved }) {
       text.spellcheck = false;
       text.rows = 15;
       text.style.cssText = 'width:100%;font-family:Consolas,monospace;';
-      text.setAttribute('aria-label', editable ? 'Ressource éditée' : 'Ressource de comparaison');
+      text.setAttribute('aria-label', editable ? t('asset_edited_label') : t('asset_ref_label'));
       host.append(text);
       return;
     }
@@ -49,7 +50,7 @@ export function setupAssetEditor({ projectId, notify, onSaved }) {
     const download = document.createElement('a');
     download.href = url;
     download.download = entry.name;
-    download.textContent = `Télécharger (${bytes.size} octets)`;
+    download.textContent = t('asset_download', { size: bytes.size });
     host.append(download);
   }
 
@@ -65,8 +66,11 @@ export function setupAssetEditor({ projectId, notify, onSaved }) {
     document.querySelector('#asset-detail').hidden = false;
     document.querySelector('#asset-save-text').disabled = !document.querySelector('#asset-edited textarea');
     document.querySelector('#asset-status').textContent = selected.protected
-      ? `Édition protégée · ${selected.divergent ? 'diffère de la conversion' : 'identique à la conversion'}\nRéférence : ${selected.baseHash}\nÉdition : ${selected.editedHash}\nConversion : ${selected.freshHash ?? 'absente'}`
-      : 'Ressource convertie. Une sauvegarde conservera sa référence et protégera votre édition.';
+      ? t('asset_protected_status', {
+        state: selected.divergent ? t('asset_divergent') : t('asset_same'), base: selected.baseHash,
+        edited: selected.editedHash, fresh: selected.freshHash ?? t('asset_fresh_absent'),
+      })
+      : t('asset_unprotected');
   }
 
   async function save(bytes) {
@@ -79,7 +83,7 @@ export function setupAssetEditor({ projectId, notify, onSaved }) {
     selected = entries.find(entry => entry.path === path);
     selector.value = path;
     await showFile();
-    notify('Ressource enregistrée et protégée contre les reconversions.');
+    notify(t('asset_saved'));
   }
   const reportError = error => { document.querySelector('#asset-status').textContent = error.message; notify(error.message, true); };
   document.querySelector('#btn-assets').onclick = async () => { dialog.showModal(); try { await list(''); } catch (error) { reportError(error); } };

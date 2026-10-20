@@ -8,6 +8,7 @@ nav { display:flex; gap:18px; flex-wrap:wrap; font-family: system-ui, sans-serif
 nav a { color: var(--muted); text-decoration: none; }
 nav a:hover, nav a:focus-visible { color: var(--accent); }
 nav a[aria-current] { color: var(--accent); font-weight: 700; }
+.mwg-brand{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.mwg-powered{display:block;line-height:0}.mwg-powered svg{height:34px;width:auto;display:block}.mwg-support{display:inline-flex;align-items:center;height:34px;padding:0 12px;border:1px solid currentColor;border-radius:8px;text-decoration:none;font-size:.9rem;white-space:nowrap;color:inherit}
 main { max-width: 1020px; margin: 0 auto; padding: 40px 24px 64px; }
 h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.08; margin: 0 0 16px; font-weight: 600; }
 h2 { font-size: 24px; margin: 44px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }

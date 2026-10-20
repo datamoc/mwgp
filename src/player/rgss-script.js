@@ -93,6 +93,13 @@ function installRubyCore() {
     lastMatch = found ? { text, index: found.index, groups: [...found] } : null;
     return Boolean(found);
   });
+  // Ruby String methods with no JS counterpart that game scripts call directly.
+  define(String.prototype, 'reverse', function () { return [...String(this)].reverse().join(''); });
+  define(String.prototype, 'swapcase', function () { return [...String(this)].map(char => char === char.toUpperCase() ? char.toLowerCase() : char.toUpperCase()).join(''); });
+  define(String.prototype, 'chomp', function (suffix) { const text = String(this); return suffix === undefined ? text.replace(/\r?\n$/, '') : text.endsWith(suffix) ? text.slice(0, text.length - suffix.length) : text; });
+  define(String.prototype, 'chop', function () { return String(this).slice(0, -1); });
+  define(String.prototype, 'ord', function () { return String(this).codePointAt(0) ?? 0; });
+  define(String.prototype, 'each_char', function (block) { const chars = [...String(this)]; if (block) { chars.forEach(char => block(char)); return this; } return chars; });
   // Ruby String/Numeric conversions that Ruby2JS leaves as method calls.
   define(String.prototype, 'to_i', function (base = 10) { const value = parseInt(String(this).replace(/_/g, ''), base); return Number.isNaN(value) ? 0 : value; });
   define(String.prototype, 'to_f', function () { const value = parseFloat(String(this)); return Number.isNaN(value) ? 0 : value; });
@@ -110,7 +117,7 @@ function installRubyCore() {
     if (!Object.getOwnPropertyDescriptor(Object.prototype, name)) {
       Object.defineProperty(Object.prototype, name, {
         configurable: true, enumerable: false,
-        get() { return name === 'keys' ? Object.keys(this) : Object.values(this); },
+        get() { return callableList(name === 'keys' ? Object.keys(this) : Object.values(this)); },
         set(value) { Object.defineProperty(this, name, { value, writable: true, configurable: true, enumerable: true }); }
       });
     }
@@ -159,17 +166,46 @@ function installRubyCore() {
     return value.length ? value[0].toUpperCase() + value.slice(1).toLowerCase() : value;
   });
   const nativeReplaceAll = String.prototype.replaceAll;
-  Object.defineProperty(String.prototype, 'replaceAll', { configurable: true, writable: true, value: function (search, replacement) {
+  const rubyReplaceAll = function (search, replacement) {
     // Ruby's gsub is global even when the source regex has no `g` flag;
     // Ruby2JS commonly lowers it to JavaScript replaceAll, which otherwise
     // throws for a non-global RegExp.
     if (search instanceof RegExp && !search.global) search = new RegExp(search.source, `${search.flags}g`);
     return nativeReplaceAll.call(String(this), search, replacement);
-  } });
+  };
+  Object.defineProperty(String.prototype, 'replaceAll', { configurable: true, writable: true, value: rubyReplaceAll });
+  // Ruby libraries sometimes receive path-like values from engine-owned records
+  // whose JS representation is not a primitive string. Ruby2JS lowers gsub to
+  // replaceAll, so retain the string conversion Ruby's path helpers expect.
+  define(Object.prototype, 'replaceAll', rubyReplaceAll);
   // Module reflection used by "define only if missing" hotfix idioms.
   define(Function.prototype, 'method_defined', function (name) { return typeof this.prototype?.[name] === 'function'; });
   define(Function.prototype, 'private_method_defined', () => false);
   define(Function.prototype, 'instance_method', function (name) { return this.prototype?.[name]; });
+  // Ruby Module#const_defined? is used by libraries to probe optional engine
+  // constants before selecting an implementation. Modules are plain objects or
+  // classes in the transpiled runtime; honour own/inherited lookup accordingly.
+  define(Object.prototype, 'const_defined', function (name, inherit = true) {
+    const key = String(name).replace(/^:/, '');
+    // Top-level snippets execute with a Proxy scope whose `has` trap resolves
+    // every free identifier. Constant presence must inspect actual bindings,
+    // or every guarded constant appears to exist and remove_const then fails.
+    if (Object.prototype.hasOwnProperty.call(this, key)) return true;
+    if (!inherit) return false;
+    let parent = Object.getPrototypeOf(this);
+    while (parent && parent !== Object.prototype) {
+      if (Object.prototype.hasOwnProperty.call(parent, key)) return true;
+      parent = Object.getPrototypeOf(parent);
+    }
+    return false;
+  });
+  define(Object.prototype, 'remove_const', function (name) {
+    const key = String(name).replace(/^:/, '');
+    if (!Object.prototype.hasOwnProperty.call(this, key)) throw new ReferenceError(`constant ${key} is not defined`);
+    const value = this[key];
+    delete this[key];
+    return value;
+  });
   // Ruby2JS emits frozen Hash literals as Object.freeze({...}) and later
   // lowers Hash#each to `for ... of`. Install the iterator before freezing so
   // the resulting constant remains immutable but iterable.
@@ -189,7 +225,7 @@ function installRubyHashIterator(value) {
   // boot statements; frozen Hash literals never mutate, so both read the same.
   if (!Object.hasOwn(value, 'keys')) Object.defineProperty(value, 'keys', {
     configurable: true,
-    get() { return Object.keys(this); },
+    get() { return callableList(Object.keys(this)); },
     enumerable: false
   });
   for (const name of ['length', 'size']) {
@@ -247,10 +283,88 @@ function installMvCore() {
   define(Math, 'randomInt', max => Math.floor(max * Math.random()));
 }
 
+// The list a Hash's `keys` / `values` answers: Ruby2JS emits both `h.keys` and `h.keys()`, so it reads as the array and can also be called.
+function callableList(list) {
+  return new Proxy(() => list, {
+    get: (target, key) => key === 'call' || key === 'apply' || key === 'bind' ? Reflect.get(target, key) : typeof list[key] === 'function' ? list[key].bind(list) : list[key],
+    has: (_, key) => key in list,
+    getPrototypeOf: () => Array.prototype
+  });
+}
+
+// Ruby's Kernel#format: %[flags -+ 0#][width][.precision]type, type in s d i u f e g x X o b B c p, %% literal, and the hash forms
+// %<name>d / %{name}. Ruby rounds %d of a float down (floor), unlike JS toFixed.
+// Ruby2JS emits a `module M` nested in `class C` as a sibling `const M = (() => { ... })()` after the class, while the
+// game reaches it as `C.M` (`SpriteWindow::CompatBits`). Where the unit uses `C.M` and never assigns it, attach it.
+export function attachNestedModules(js) {
+  const classes = [...js.matchAll(/^class ([A-Z]\w*)\b/gm)].map(match => match[1]);
+  let out = js;
+  for (const [, name] of js.matchAll(/^const ([A-Z]\w*) = \(\(\) => \{/gm))
+    for (const owner of classes)
+      if (owner !== name && new RegExp(`\\b${owner}\\.${name}\\b`).test(js) && !new RegExp(`\\b${owner}\\.${name}\\s*=[^=]`).test(js)) out += `;\n${owner}.${name} = ${name};`;
+  return out;
+}
+
+export function rubyFormat(template, args) {
+  const named = args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? args[0] : null;
+  let next = 0;
+  return String(template ?? '').replace(/%(?:\{(\w+)\}|(?:<(\w+)>)?([-+ 0#]*)(\*|\d+)?(?:\.(\d+))?([sdiufeEgGxXobBcp%]))/g, (match, braced, key, flags = '', width, precision, type) => {
+    if (type === '%') return '%';
+    let value = braced !== undefined ? named?.[braced] : key !== undefined ? named?.[key] : args[next++];
+    if (braced !== undefined) return String(value ?? '');
+    let text;
+    switch (type) {
+      case 'd': case 'i': case 'u': { const number = Math.floor(Number(value ?? 0)); text = String(Math.abs(number)); if (precision) text = text.padStart(Number(precision), '0'); text = (number < 0 ? '-' : flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : '') + text; break; }
+      case 'f': { const number = Number(value ?? 0); text = Math.abs(number).toFixed(precision === undefined ? 6 : Number(precision)); text = (number < 0 ? '-' : flags.includes('+') ? '+' : '') + text; break; }
+      case 'e': case 'E': { text = Number(value ?? 0).toExponential(precision === undefined ? 6 : Number(precision)).replace(/e([+-])(\d)$/, 'e$10$2'); if (type === 'E') text = text.toUpperCase(); break; }
+      case 'g': case 'G': text = String(Number(value ?? 0)); break;
+      case 'x': text = Math.floor(Number(value ?? 0)).toString(16); if (flags.includes('#')) text = '0x' + text; break;
+      case 'X': text = Math.floor(Number(value ?? 0)).toString(16).toUpperCase(); if (flags.includes('#')) text = '0X' + text; break;
+      case 'o': text = Math.floor(Number(value ?? 0)).toString(8); break;
+      case 'b': case 'B': text = Math.floor(Number(value ?? 0)).toString(2); break;
+      case 'c': text = typeof value === 'number' ? String.fromCodePoint(value) : String(value ?? '')[0] ?? ''; break;
+      case 'p': text = JSON.stringify(value); break;
+      default: text = String(value ?? ''); if (precision !== undefined) text = text.slice(0, Number(precision));
+    }
+    const size = width === '*' ? Number(args[next++] ?? 0) : Number(width || 0);
+    if (text.length >= size) return text;
+    if (flags.includes('-')) return text.padEnd(size);
+    if (flags.includes('0') && 'diufeEgGxXobB'.includes(type)) { const sign = /^[-+ ]/.test(text) ? text[0] : ''; return sign + text.slice(sign.length).padStart(size - sign.length, '0'); }
+    return text.padStart(size);
+  });
+}
+
 export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, library = null, pluginLibrary = null, rubyData = null, fileIndex = null, textFiles = null, dialect = 'rgss' } = {}) {
+  const debugRuby = typeof location !== 'undefined' && new URLSearchParams(location.search).get('debugRuby') === '1';
   if (dialect === 'rgss') installRubyCore();
   if (dialect === 'mv') installMvCore();
   const warned = new Set();
+  const deferredMixins = [];
+  const applyMixin = (target, descriptors) => {
+    if (!target || !descriptors) return false;
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (Object.prototype.hasOwnProperty.call(target, key)) continue;
+      let descriptor = descriptors[key];
+      // A module that defines only `def x=(v)` leaves `x` readable through the including class's ancestors in Ruby; a JS accessor with
+      // just a setter would shadow the inherited getter and make every read `undefined`, so the inherited reader is carried over.
+      if (descriptor.set && !descriptor.get) {
+        for (let up = Object.getPrototypeOf(target); up; up = Object.getPrototypeOf(up)) {
+          const inherited = Object.getOwnPropertyDescriptor(up, key);
+          if (inherited) { if (inherited.get) descriptor = { ...descriptor, get: inherited.get }; break; }
+        }
+      }
+      Object.defineProperty(target, key, descriptor);
+    }
+    return true;
+  };
+  const flushDeferredMixins = () => {
+    for (let index = deferredMixins.length - 1; index >= 0; index--) {
+      const [target, resolve] = deferredMixins[index];
+      let descriptors;
+      try { descriptors = resolve(); } catch { /* the referenced Ruby module may still be loading */ }
+      if (applyMixin(target, descriptors)) deferredMixins.splice(index, 1);
+    }
+  };
   const warnOnce = (name, detail) => {
     if (warned.has(name)) return;
     warned.add(name);
@@ -270,8 +384,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     get: (_, key) => key === Symbol.toPrimitive ? () => 0 : typeof key === 'symbol' ? undefined : stub(`${path}.${key}`),
     // An unknown helper handed a block (`with_forced_z { ... }`, `each_x { ... }`) is far more often a wrapper than a
     // no-op: skipping the block would silently drop its body, so it runs once, still warning that the helper is unknown.
-    apply: (_, __, args) => { warnOnce(path); const block = args.find(argument => typeof argument === 'function'); return block ? block() : undefined; },
-    construct: () => { warnOnce(`new ${path}`); return {}; },
+    apply: (_, __, args) => { warnOnce(path, debugRuby ? new Error(`unsupported Ruby call ${path}`).stack : undefined); const block = args.find(argument => typeof argument === 'function'); return block ? block() : undefined; },
+    construct: () => { warnOnce(`new ${path}`, debugRuby ? new Error(`unsupported Ruby constructor ${path}`).stack : undefined); return {}; },
     set: () => { warnOnce(`${path}=`); return true; }
   });
 
@@ -340,9 +454,11 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // One browser frame: resolves on the next animation frame. A loop that never awaits it (an unlifted sync spin)
   // trips the counter, which only a real frame boundary resets.
   let framesSpun = 0;
+  // Graphics.frame_count: the frames the browser has shown since the page began (a script may reset it by assigning).
+  let graphicsFrames = 0, graphicsFrameOffset = 0;
   const nextFrame = who => {
     if (++framesSpun > 4000) { framesSpun = 0; throw new Error(`MWGP: this script spins on ${who} without yielding a frame (it could not be made async); skipped`); }
-    return resumeAfter(new Promise(resolve => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => { framesSpun = 0; resolve(); }) : setTimeout(() => { framesSpun = 0; resolve(); }, 16))));
+    return resumeAfter(new Promise(resolve => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => { framesSpun = 0; graphicsFrames++; resolve(); }) : setTimeout(() => { framesSpun = 0; graphicsFrames++; resolve(); }, 16))));
   };
   // Scripts that wait interleave, and `current`/`queue` are shared: a wait remembers the caller's context (taken when the
   // wait starts, while that script is the one running) and puts it back when the script resumes.
@@ -369,6 +485,9 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       get _id() { return target; }, get _map_id() { return mapId; }, get map_id() { return reader('map_id', () => mapId); },
       get _x() { return position().x; }, get _y() { return position().y; }, get _direction() { return direction(); },
       // Balloon/animation ids are how VX/Ace scripts trigger those effects.
+      // The graphic a game assigns to its player (`$game_player.character_name = "walk"`): the scene redraws the player from it.
+      get character_name() { return reader('character_name', () => isPlayer ? (scene.playerCharacterName ?? '') : (eventById(id)?.image?.name ?? '')); },
+      set character_name(value) { if (isPlayer) later('character_name=', () => scene.setPlayerCharacter?.(String(value ?? ''))); },
       set balloon_id(value) { if (value) later('balloon_id=', () => scene.showBalloon({ target, balloon: Number(value), wait: true })); },
       set animation_id(value) { if (value) later('animation_id=', () => scene.playAnimation({ target, animation: Number(value), wait: false })); }
     }, isPlayer ? 'Game_Player' : 'Game_Event');
@@ -474,7 +593,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     const lowered = fsPath(one).toLowerCase();
     return [...fsFiles, ...[...fsDirs].filter(([lower]) => lower)].filter(([lower]) => globMatch(lowered, lower)).map(([, original]) => original);
   }).sort();
-  const fsExists = path => { const lower = fsPath(path).toLowerCase(); return fsFiles.has(lower) || fsDirs.has(lower); };
+  const fsExists = path => { const lower = fsPath(path).toLowerCase(); return lower !== '' && (fsFiles.has(lower) || fsDirs.has(lower)); };
 
   // A built-in module the game also reopens (`module FileTest; def self.audio_exist?`): the built-in answers first, and
   // names it lacks come from the game's own module.
@@ -533,28 +652,85 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     return typeof target === 'function' ? target : undefined;
   };
   const decodeRuby = (value, lookup) => {
+    if (value?.$rubySubclass && typeof value.$rubySubclass === 'object') {
+      const { class: className, value: raw, ivars = {} } = value.$rubySubclass;
+      const instance = Array.isArray(raw) ? raw.map(item => decodeRuby(item, lookup)) : decodeRuby(raw, lookup);
+      const Klass = resolveClass(className, lookup);
+      if (Array.isArray(instance) && Klass?.prototype && Klass.prototype instanceof Array) Object.setPrototypeOf(instance, Klass.prototype);
+      if (instance && typeof instance === 'object') {
+        for (const [name, item] of Object.entries(ivars)) instance[String(name).replace(/^@/, '_')] = decodeRuby(item, lookup);
+        return gameInstance(instance);
+      }
+      return instance;
+    }
     if (Array.isArray(value)) return value.map(item => decodeRuby(item, lookup));
     if (!value || typeof value !== 'object') return value;
     if (Array.isArray(value.$map)) return Object.fromEntries(value.$map.map(([key, item]) => [String(key), decodeRuby(item, lookup)]));
     if (typeof value.class === 'string' && value.ivars && typeof value.ivars === 'object') {
-      const instance = Object.create(resolveClass(value.class, lookup)?.prototype ?? Object.prototype);
+      const Class = resolveClass(value.class, lookup);
+      const instance = Object.create(Class?.prototype ?? Object.prototype);
       for (const [name, item] of Object.entries(value.ivars)) instance[String(name).replace(/^@/, '_')] = decodeRuby(item, lookup);
-      return gameInstance(instance);
+      const adapted = gameInstance(instance);
+      // Core RGSS Marshal classes such as RPG::System/RPG::AudioFile are often
+      // supplied by the engine rather than the game's Ruby scripts. Their data
+      // records still have Ruby attr_reader semantics when no class body exists.
+      if (Class) return adapted;
+      return new Proxy(adapted, {
+        get: (target, key, receiver) => {
+          if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
+          if (typeof key !== 'string' || key.startsWith('_') || !Object.hasOwn(target, `_${key}`)) return undefined;
+          const item = Reflect.get(target, `_${key}`, receiver);
+          return callableMethods.has(key) ? () => item : item;
+        },
+        set: (target, key, item, receiver) => {
+          if (typeof key === 'string' && !Reflect.has(target, key) && Object.hasOwn(target, `_${key}`)) return Reflect.set(target, `_${key}`, item, receiver);
+          return Reflect.set(target, key, item, receiver);
+        }
+      });
     }
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeRuby(item, lookup)]));
   };
   const shippedData = (path, lookup) => {
-    const key = String(path).split('/').pop();
+    const key = String(path).split('/').pop().toLowerCase();
     if (shippedDecoded.has(key)) return shippedDecoded.get(key);
     if (!shippedTables.has(key)) return undefined;
-    const value = decodeRuby(shippedTables.get(key), lookup);
+    const value = adaptRubyHash(decodeRuby(shippedTables.get(key), lookup));
     shippedDecoded.set(key, value);
     return value;
   };
+  const shippedDataGlobal = name => {
+    const wanted = String(name).slice('$data_'.length).replace(/[^a-z0-9]/gi, '').toLowerCase();
+    const file = [...shippedTables.keys()].find(candidate => candidate.replace(/\.(?:rxdata|rvdata2?)$/i, '').replace(/[^a-z0-9]/gi, '').toLowerCase() === wanted);
+    return file ? shippedData(file) : undefined;
+  };
   // RGSS display objects (Sprites, Planes) are composited onto an overlay canvas; without a DOM (Node tests) there is none.
   const screen = dialect === 'rgss' && typeof document !== 'undefined' ? createRgssScreen({ width: Number(scene.project?.display?.width) || 640, height: Number(scene.project?.display?.height) || 480 }) : null;
+  // Images the game writes itself (`bitmap.save_to_png("Graphics/Characters/x.png")`, how some games compose a player sprite from parts)
+  // become files of the in-memory file system: they exist for File/Dir, load synchronously into a Bitmap, and the scene can draw them.
+  // Shared by every map's runtime of the page: a sprite the game composed once must still exist after a transfer to the next map.
+  const writtenImages = (globalThis.__mwgpWrittenImages ??= new Map());
+  const registerWritten = named => {
+    fsFiles.set(named.toLowerCase(), named);
+    const parts = named.split('/');
+    for (let length = 1; length < parts.length; length++) { const dir = parts.slice(0, length).join('/'); fsDirs.set(dir.toLowerCase(), dir); }
+  };
+  for (const canvas of writtenImages.values()) registerWritten(canvas.__named);
+  const writeImage = (path, canvas) => {
+    const normal = fsPath(path);
+    if (!normal || !canvas?.width) return false;
+    const named = /[.][a-z0-9]+$/i.test(normal) ? normal : normal + '.png';
+    const copy = typeof document !== 'undefined' ? document.createElement('canvas') : new OffscreenCanvas(canvas.width, canvas.height);
+    copy.width = canvas.width; copy.height = canvas.height;
+    copy.getContext('2d').drawImage(canvas, 0, 0);
+    copy.__named = named;
+    writtenImages.set(named.toLowerCase(), copy);
+    console.info(`MWGP wrote image ${named} (${copy.width}x${copy.height})`);
+    registerWritten(named);
+    return true;
+  };
+  const imageCanvas = name => { const base = fsPath(name).toLowerCase(); return writtenImages.get(base) ?? writtenImages.get(base + '.png') ?? null; };
   const rgssClasses = createRgssClasses({
-    screen,
+    screen, imageCanvas, writeImage,
     callableNames: callableMethods,
     rawFile: path => { const key = fsPath(path).toLowerCase(); return fsFiles.has(key) ? (fsText.get(key) ?? String.fromCharCode(0)) : undefined; },
     warnOnce, files: virtualFiles,
@@ -580,8 +756,16 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   // `this.width` reads stay plain.
   const callableAttributes = Class => typeof Class !== 'function' || !definedMethods.size ? Class : new Proxy(Class, {
     construct: (target, args, newTarget) => new Proxy(Reflect.construct(target, args, newTarget), {
-      get: (object, key) => {
-        const value = Reflect.get(object, key, object);
+      get: (object, key, receiver) => {
+        // A getter the game defines on a subclass (`get commands()` made for a `def commands` + `def commands=` pair) reads the
+        // instance's ivars, which live behind this proxy: it runs on the proxy, not on the raw object where they do not exist.
+        let value;
+        for (let owner = object; owner && owner !== target.prototype; owner = Object.getPrototypeOf(owner)) {
+          const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+          if (descriptor) { if (descriptor.get) value = descriptor.get.call(receiver); else value = Reflect.get(object, key, object); break; }
+          if (owner === Object.prototype) break;
+        }
+        if (value === undefined) value = Reflect.get(object, key, object);
         if (typeof value === 'function') return typeof key === 'string' && key !== 'constructor' ? value.bind(object) : value;
         // Never for an underscore-prefixed key: that's a plain ivar field, never a method call. `value === undefined`
         // still wraps (call-style access on a field that is genuinely unset, e.g. `sprite.bitmap()` before a bitmap is
@@ -635,13 +819,17 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       fadeout: frames => later('Graphics.fadeout', () => scene.screenFade?.({ direction: 'out', duration: Number(frames) / 60, wait: true })),
       fadein: frames => later('Graphics.fadein', () => scene.screenFade?.({ direction: 'in', duration: Number(frames) / 60, wait: true })),
       snap_to_bitmap: () => new rgssClasses.Bitmap(0, 0), screenshot() { warnOnce('Graphics.screenshot', 'needs the RGSS display layer'); }, scale: 1, resize_screen() {}, resize_window() {}, center() {},
-      get frame_count() { return reader('frame_count', () => 0); },
+      get frame_count() { return reader('frame_count', () => graphicsFrames + graphicsFrameOffset); },
+      set frame_count(value) { graphicsFrameOffset = Number(value) - graphicsFrames; },
       get frame_rate() { return reader('frame_rate', () => 60); },
       get width() { return reader('width', () => 640); },
       get height() { return reader('height', () => 480); }
     },
     Audio: rgssAudio,
     // Ruby's modulo takes the divisor's sign (the converter rewrites every `a % b` to `__mod(a, b)`).
+    // Ruby's `a |= b` / `a &= b`: union / intersection of arrays, logical or/and of booleans, bitwise on integers.
+    __bor: (left, right) => (Array.isArray(left) ? [...new Set([...left, ...(Array.isArray(right) ? right : [right])])] : typeof left === 'boolean' ? left || Boolean(right) : left == null ? right : left | right),
+    __band: (left, right) => (Array.isArray(left) ? [...new Set(left.filter(item => (Array.isArray(right) ? right : [right]).includes(item)))] : typeof left === 'boolean' ? left && Boolean(right) : left == null ? left : left & right),
     __mod: (left, right) => (typeof left === 'number' && typeof right === 'number' ? ((left % right) + right) % right : left % right),
     // Ruby's extend/include: the module's methods fill in what the class does not define itself (the converter rewrites
     // `Object.defineProperties(X, Object.getOwnPropertyDescriptors(M))` to this).
@@ -661,11 +849,36 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     },
     // Ruby's `$~` (English: `$MATCH`): the last `str =~ /re/` match.
     get $MATCH() { return lastMatch ? { pre_match: lastMatch.text.slice(0, lastMatch.index), post_match: lastMatch.text.slice(lastMatch.index + lastMatch.groups[0].length), to_a: lastMatch.groups, ...lastMatch.groups } : null; },
-    __mixin: (target, descriptors) => { for (const key of Reflect.ownKeys(descriptors)) if (!Object.prototype.hasOwnProperty.call(target, key)) Object.defineProperty(target, key, descriptors[key]); return target; },
+    __mixin: (target, descriptors) => {
+      if (typeof descriptors === 'function') {
+        let resolved;
+        try { resolved = descriptors(); } catch { /* forward reference: resolve after the unit finishes loading */ }
+        if (!applyMixin(target, resolved)) deferredMixins.push([target, descriptors]);
+      } else applyMixin(target, descriptors);
+      return target;
+    },
     // Ruby's respond_to? is total (nil, strings and numbers answer false);
     // the transpiler lowers a literal check to `"lit" in obj`, which throws
     // on a primitive, so literal checks are rewritten to this at conversion.
-    __respond_to: (obj, name) => (typeof obj === 'object' || typeof obj === 'function') && obj !== null && String(name) in Object(obj),
+    __respond_to: (obj, name) => {
+      if ((typeof obj !== 'object' && typeof obj !== 'function') || obj === null) return false;
+      const method = String(name);
+      if (method.endsWith('=')) {
+        const property = method.slice(0, -1);
+        for (let target = Object(obj); target; target = Object.getPrototypeOf(target)) {
+          if (typeof Object.getOwnPropertyDescriptor(target, property)?.set === 'function') return true;
+        }
+        return false;
+      }
+      return method in Object(obj);
+    },
+    // Ruby strings and symbols are represented as primitive JS strings.
+    // Preserve Ruby's `is_a?`/validation behavior when the transpiled code
+    // checks one against String or Symbol with `instanceof`.
+    __ruby_is_a: (value, klass) => {
+      if ((klass === String || klass === Symbol) && typeof value === 'string') return true;
+      return typeof klass === 'function' && value instanceof klass;
+    },
     // Ruby's `!x`: only nil/false are falsy (the converter rewrites `!x` to `__falsy(x)` for a bare value read).
     __falsy: value => value === null || value === undefined || value === false,
     // A values context (`DATA.each_value`, `.values.each`): plain-prototype objects are Ruby hashes even when
@@ -696,8 +909,12 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       dirname: path => { const parts = String(path ?? '').split(String.fromCharCode(92)).join('/').split('/'); parts.pop(); return parts.join('/') || '.'; },
       expand_path: path => String(path ?? '')
     }),
-    Dir: reopenedBuiltin('Dir', { glob: fsGlob, exist: path => fsDirs.has(fsPath(path).toLowerCase()), exists: path => fsDirs.has(fsPath(path).toLowerCase()), entries: dir => ['.', '..', ...fsChildren(dir)], children: fsChildren, each_child: (dir, block) => fsChildren(dir).forEach(block), pwd: () => '.' }),
+    Dir: reopenedBuiltin('Dir', { mkdir: path => { const normal = fsPath(path); if (normal) fsDirs.set(normal.toLowerCase(), normal); return 0; }, glob: fsGlob, exist: path => fsDirs.has(fsPath(path).toLowerCase()), exists: path => fsDirs.has(fsPath(path).toLowerCase()), entries: dir => ['.', '..', ...fsChildren(dir)], children: fsChildren, each_child: (dir, block) => fsChildren(dir).forEach(block), pwd: () => '.' }),
     FileTest: reopenedBuiltin('FileTest', { exist: fsExists, exists: fsExists, file: path => fsFiles.has(fsPath(path).toLowerCase()), directory: path => fsDirs.has(fsPath(path).toLowerCase()), readable: fsExists }),
+    // Kernel#sprintf / format: %[flags][width][.precision]type for s d i f x X o b e c and %%, plus %<name>s / %{name} for a hash argument.
+    sprintf: (template, ...args) => rubyFormat(template, args), format: (template, ...args) => rubyFormat(template, args),
+    // `Kernel.pbShowCommands(...)`: the game's global functions called through their module; each resolves to the game's own unit.
+    Kernel: new Proxy({}, { get: (_, key) => typeof key === 'string' ? (...args) => scope[key](...args) : undefined }),
     // Reflection used by "define only if missing" idioms at module/class top level: nothing is defined.
     method_defined: () => false, private_method_defined: () => false,
     rand: (max = 0) => max ? Math.floor(Math.random() * Number(max)) : Math.random(),
@@ -923,7 +1140,26 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   const ensureBoot = () => {
     if (bootReady) return;
     bootReady = true;
+    // A game reopens Ruby's own classes (`class Numeric; def to_s_formatted`). Ruby2JS emits those as classes of the same name, but
+    // JS numbers, strings and arrays never see them, so each method is installed on the matching JS prototype. A method the JS
+    // built-in or this shim already has is left alone: the built-in wins, as the library only fills in what Ruby adds.
+    const builtinTargets = { Numeric: Number.prototype, Integer: Number.prototype, Float: Number.prototype, String: String.prototype, Array: Array.prototype };
+    for (const [name, target] of Object.entries(builtinTargets)) {
+      try {
+        const reopened = unit(name);
+        if (typeof reopened !== 'function' || !reopened.prototype) continue;
+        for (const method of Object.getOwnPropertyNames(reopened.prototype)) {
+          if (method === 'constructor' || method in target) continue;
+          const descriptor = Object.getOwnPropertyDescriptor(reopened.prototype, method);
+          if (typeof descriptor.value === 'function') Object.defineProperty(target, method, { value: descriptor.value, writable: true, configurable: true, enumerable: false });
+        }
+      } catch (error) { console.warn(`MWGP reopened built-in ${name} could not be installed`, error); }
+    }
     const saved = (rgss().boot ||= {});
+    // Save-data constructors may query registries filled by top-level
+    // registrations (for example a Player constructor asks for the first
+    // trainer type). Populate those before creating new-game values.
+    runBootStatements();
     for (const name of bootIds) {
       const id = name.replace(/^BootValue_/, '');
       try {
@@ -934,10 +1170,9 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         // Values the runtime already stands in for with its own objects (switches, variables, map, ...) keep those.
         if (target && `$${target}` in builtins) continue;
         if (saved[id] !== undefined) record.load_value(decodeState(saved[id]));
-        else if (typeof record.new_game_value === 'function') record.load_value(record.new_game_value());
+        else if (Object.hasOwn(record, 'new_game_value') && typeof record.new_game_value === 'function') record.load_value(record.new_game_value());
       } catch (error) { console.warn(`MWGP save-data value "${id}" could not be set up: ${String(error?.message || error).slice(0, 160)}`); }
     }
-    runBootStatements();
   };
   // Registrations on handler registries (`MenuHandlers.add`, `GameData::X.register`, ...): each statement is a unit whose code
   // runs when loaded. They run in script order, once, quietly: a statement that cannot run is counted, not logged one by one.
@@ -945,7 +1180,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     if (!bootStatementNames.length || dialect !== 'rgss') return;
     let failed = 0;
     for (const name of bootStatementNames) {
-      try { compile(fixExportedGetters(units[name])).call(scope, scope); }
+      try { compile(attachNestedModules(fixExportedGetters(units[name]))).call(scope, scope); }
       catch (error) { failed++; if (failed <= 3) warnOnce(`registration ${name}`, String(error?.message || error).slice(0, 100)); }
     }
     if (failed) console.warn(`MWGP ${failed} of ${bootStatementNames.length} handler registrations could not run`);
@@ -1021,7 +1256,12 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         globalThis[file.name] = G[file.name] || globalThis[file.name] || [];
         G[file.name] ||= globalThis[file.name];
       }
+      // The engine's loader runs `DataManager.onLoad(table)` on every database file (note metadata: `<tag:value>` -> `meta`).
+      for (const file of G.DataManager?._databaseFiles || []) { try { G.DataManager?.onLoad?.(G[file.name]); } catch (error) { console.warn(`MWGP DataManager.onLoad(${file.name}) failed: ${String(error?.message || error).slice(0, 160)}`); } }
       G.DataManager?.isDatabaseLoaded?.();
+      // Plugins also finish their database setup when the engine's boot scene ends (tags, derived fields); no scene runs here, so end it on an inert one.
+      const Boot = unit('Scene_Boot');
+      if (typeof Boot === 'function') Boot.prototype.terminate?.call(Object.create(Boot.prototype));
     } catch (error) {
       console.warn(`MWGP database post-processing failed: ${String(error?.message || error).slice(0, 200)} ${describeThrow(error)}`);
     }
@@ -1106,6 +1346,14 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         parameters: name => ({ ...(pluginLibrary.parameters?.[name] || {}) }),
         registerCommand() {}, callCommand() {}
       };
+      // Stubs for critical plugins
+      pluginGlobals.Saba = {
+        Tachie: { initialize() {}, update() {}, show() {}, hide() {}, move() {}, erase() {} },
+        BattleTachie: { initialize() {}, update() {}, show() {}, hide() {} }
+      };
+      pluginGlobals.AKUNOU = { MapScrollDisable: { isDisabled: () => false } };
+      pluginGlobals.TkoolMV = { PluginCommandBook: { findCommand: () => null } };
+      pluginGlobals.TE = { CALL_MAP_EVENT: { call: () => {} } };
     }
     for (const name of pluginLibrary.order) {
       const source = pluginLibrary.sources?.[name];
@@ -1141,7 +1389,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     loading.add(name);
     try {
       // `this` is the scope so top-level reflection calls (`method_defined`) resolve to built-ins.
-      const exported = compile(fixExportedGetters(units[name]), `return typeof ${name} !== 'undefined' ? ${name} : undefined;`).call(scope, scope);
+      const exported = compile(attachNestedModules(fixExportedGetters(units[name])), `return typeof ${name} !== 'undefined' ? ${name} : undefined;`).call(scope, scope);
+      flushDeferredMixins();
       const adapted = adaptRubyHash(exported);
       // Data classes whose registry the game loads from a shipped file (`static DATA_FILENAME = "types.dat"`): fill `DATA`
       // from the exported Marshal data, rebuilt as instances of these very classes.
@@ -1192,7 +1441,11 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       }
       const safeExport = exposed && (typeof exposed === 'object' || typeof exposed === 'function')
         ? new Proxy(exposed, { get: (target, key, receiver) => {
-          if (Reflect.has(target, key)) return Reflect.get(target, key, receiver);
+          if (Reflect.has(target, key)) {
+            const value = Reflect.get(target, key, receiver);
+            if (typeof key === 'string' && !key.startsWith('_') && typeof value !== 'function' && callableMethods.has(key)) return () => value;
+            return value;
+          }
           return typeof key === 'string' && definedMethods.has(key) ? stub(`${name}.${key}`) : undefined;
         } })
         : exposed;
@@ -1211,15 +1464,36 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       // MV: the plugin/engine layer replaces some built-ins, so it must be up before any lookup.
       if (dialect === 'mv') ensurePlugins();
       if (key in dialectBuiltins()) return dialectBuiltins()[key];
+      if (typeof key === 'string' && /^\$game[A-Z]/.test(key)) {
+        const rubyName = key.replace(/^\$game([A-Z])/, (_, letter) => `$game_${letter.toLowerCase()}`).replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+        if (rubyName in dialectBuiltins()) return dialectBuiltins()[rubyName];
+      }
       if (dialect === 'mv') {
         if (key in pluginGlobals) return pluginGlobals[key];
         if (engineClasses.has(key) || engineNames.has(key)) return engineClass(key);
       }
+      if (typeof key === 'string' && key.startsWith('$data_')) {
+        const data = shippedDataGlobal(key);
+        if (data !== undefined) return data;
+      }
       const found = unit(key);
       if (found !== undefined) return found;
+      // Ruby resolves a bare constant through the enclosing classes (`Owner` inside `class Pokemon` is `Pokemon::Owner`). The output
+      // names it bare, so a capitalised name no unit answers is looked up among the classes nested in the units already loaded.
+      if (typeof key === 'string' && /^[A-Z]/.test(key)) {
+        for (const host of loaded.values()) {
+          if ((typeof host === 'function' || (host && typeof host === 'object')) && Object.hasOwn(host, key) && typeof host[key] === 'function') return host[key];
+        }
+      }
       return stub(key);
     },
-    set: (_, key, value) => { dialectBuiltins()[key] = value; return true; }
+    set: (_, key, value) => {
+      const rubyName = typeof key === 'string' && /^\$game[A-Z]/.test(key)
+        ? key.replace(/^\$game([A-Z])/, (_, letter) => `$game_${letter.toLowerCase()}`).replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)
+        : key;
+      dialectBuiltins()[rubyName] = value;
+      return true;
+    }
   });
 
   // The Interpreter a snippet runs inside: the game's class when it has one (so its
@@ -1257,6 +1531,10 @@ ${iterableLoops(js)}
   return {
     // What the shim implements, for tools/rgss-coverage.mjs: every built-in name with its own
     // member names (getters are listed, not invoked).
+    // A canvas the game wrote under this name (see writeImage), for the scene to draw.
+    imageCanvas,
+    // The display objects of the RGSS screen right now (diagnostics).
+    screenItems: () => screen?.debug?.() ?? [],
     introspect() {
       const own = value => {
         if (!value || (typeof value !== 'object' && typeof value !== 'function')) return [];
@@ -1292,9 +1570,69 @@ ${iterableLoops(js)}
         return false;
       } finally { queue = null; snapshotEngine(); snapshotBoot(); }
     },
+    // Display-text conversion: the game's own escape chain when its loaded plugins define one.
+    // Vanilla MV converts inside Window_Base (which the player does not run); whole-suite plugins instead
+    // route the conversion through TextManager.convertEscapeCharacters (standard codes, backslashes folded
+    // to the engine's ESC marker) and TextManager.convertExtraEscapeCharacters (the game's own codes,
+    // computed from live state - exactly what the converter could only leave literal). The player runs
+    // every displayed line through that chain first; null means "no game-side chain", and the caller keeps
+    // its own MV-faithful resolver. state/event are the display-time bridge context (the same one scripts
+    // run with), so $gameVariables/$gameParty inside the game's escape code see live values.
+    convertDisplayText(text, state, event) {
+      if (dialect !== 'mv') return null;
+      ensurePlugins();
+      const tm = pluginGlobals.TextManager;
+      const base = typeof tm?.convertEscapeCharacters === 'function';
+      const extra = typeof tm?.convertExtraEscapeCharacters === 'function';
+      if (!base && !extra) return null;
+      const saved = { current, queue };
+      current = { state, event }; queue = null;
+      try {
+        let out = String(text);
+        if (base) out = String(tm.convertEscapeCharacters.call(tm, out));
+        if (extra) {
+          // A chain with only the extra half still receives raw backslashes in the window pipeline;
+          // fold them the way the aliased base step does.
+          if (!base) out = out.replace(/\\\\/g, '\x1b\x1b').replace(/\\/g, '\x1b');
+          out = String(tm.convertExtraEscapeCharacters.call(tm, out));
+        }
+        return out;
+      } catch (error) {
+        if (!warned.has('TextManager escape chain')) {
+          warned.add('TextManager escape chain');
+          console.warn(`MWGP the game's TextManager escape chain failed; using the player's own codes from here on: ${String(error?.message || error).slice(0, 160)}`);
+        }
+        return null;
+      } finally { current = saved.current; queue = saved.queue; }
+    },
     // Plugin Command: MV 356 runs the game's own `Game_Interpreter#pluginCommand` chain (each plugin aliases it); MZ 357
     // (`plugin` given) runs the command that plugin registered (`PluginManager.callCommand`). Both on a real engine
     // interpreter. Returns false when nothing can run it (not MV/MZ, no engine loaded, or no plugin registered the MZ command).
+    // The game's own list builders (Window_ItemList#makeItemList and the like) run over a list the player built: plugins
+    // that re-order or filter an item, skill or equipment list do it by wrapping `makeItemList` and rewriting `_data`.
+    // No window exists here, so the call goes to a bare object: the stock builder refills `_data` from `_actor.skills()`
+    // (or the party's inventory) through `includes`, both answered with the player's entries, and the hooks then act on it.
+    // Returns the list as the game would show it (entries it hides are left out), or null when nothing can be said (no engine,
+    // no builder, a failing hook, an empty result): the caller then keeps its own order.
+    listHook(className, entries) {
+      if (dialect !== 'mv' || !Array.isArray(entries) || !entries.length) return null;
+      let Window;
+      try { Window = unit(className); } catch { return null; }
+      const build = Window?.prototype?.makeItemList;
+      if (typeof build !== 'function') return null;
+      const holder = Object.assign(Object.create(Window.prototype), { _data: entries.slice(), _actor: { skills: () => entries.slice() }, includes: item => entries.includes(item) });
+      // A game may build a different list outside battle (its own screens); the stock path is the one asked for here.
+      const party = pluginGlobals.$gameParty, wasInBattle = party?._inBattle;
+      if (party) party._inBattle = true;
+      try { build.call(holder); }
+      catch (error) {
+        const seen = (this._listWarned ||= new Set());
+        if (!seen.has(className)) { seen.add(className); console.warn(`MWGP ${className}#makeItemList hook failed; the list keeps its order: ${String(error?.message || error).slice(0, 160)}`); }
+        return null;
+      } finally { if (party) party._inBattle = wasInBattle; }
+      const out = Array.isArray(holder._data) ? holder._data.filter(entry => entries.includes(entry)) : [];
+      return out.length ? out : null;
+    },
     pluginCommand(name, args, state, event, { plugin, params } = {}) {
       if (dialect !== 'mv') return false;
       let Interpreter;
@@ -1308,6 +1646,8 @@ ${iterableLoops(js)}
       try {
         const interpreter = new Interpreter();
         interpreter._mapId = mapId; interpreter._eventId = event?.id ?? 0;
+        // The engine's interpreter holds the running command's parameters (356: the whole command line); plugins read `this._params`.
+        interpreter._params = [[String(name), ...(args || []).map(String)].join(' ')];
         if (registered) manager.callCommand(interpreter, plugin, String(name), params || {});
         else interpreter.pluginCommand(String(name), (args || []).map(String));
         snapshotEngine();

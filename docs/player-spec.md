@@ -4,7 +4,7 @@ How an MWGP manifest plays in the browser. Implementation:
 `public/player.js` (entry + title), `src/player/player-core.js` (scene),
 `battle.js`, `menu.js`, `audio-manager.js`, `rgss-script.js`,
 `rgss-classes.js`, `rgss-screen.js`, `fallback-core.js`, `compat-features.js`,
-on `@datamoc/mw_games` primitives (`Game Scene2D TileMap SpriteSheet
+on `@datamoc/mwg` primitives (`Game Scene2D TileMap SpriteSheet
 WindowStack MessageBox Rpg.GameState Rpg.EventRunner Rpg.GridMover
 Rpg.activePage SaveSystem Input Audio Resources`). Served by `src/server.js`
 with no build step — editing player files takes effect on refresh.
@@ -16,7 +16,7 @@ player below plays XP/VX/Ace conversions, and MV/MZ ones made with
 
 ## 1. Boot sequence (`public/player.js`)
 
-1. Load the `mw_games` global bundle (`/mwg.js`), fetch
+1. Load the `mwg` global bundle (`/mwg.js`), fetch
    `GET /api/mwgp/:id/index` (manifest with maps as `{id, info}` stubs).
 2. `?map=&x=&y=` overrides select the boot map; fetch it full from
    `/api/mwgp/:id/maps/:mapId` (`loadMap`, cached into `project.maps`).
@@ -82,7 +82,7 @@ Two branches, picked from `manifest.titleScreen`, the same for every engine:
 
 ## 4. Events and dialogue
 
-`prepareEventCommands` rewrites only what `mw_games`' fixed
+`prepareEventCommands` rewrites only what `mwg`' fixed
 `EventRunner.step()` cannot express into `call` closures (transfers, pictures,
 choice branches, audio routing, screen effects, inventory/party/gold, menu,
 `goto`, battle triggers, `script`, `pluginCommand`, `unsupported`, control
@@ -104,7 +104,7 @@ through it during map play. A command no loaded plugin handles, or one whose
 plugin needs the scene/window layer, fails loudly; the player carries no
 per-plugin adapters.
 
-## 5. Audio (`audio-manager.js` over `mw_games` ≥ 0.20)
+## 5. Audio (`audio-manager.js` over `mwg` ≥ 0.20)
 
 `AudioBus`: independent looping BGM/BGS streams (same-track replay only
 retunes), ME jingles suspending/resuming BGM at position, overlapping SE,

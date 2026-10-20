@@ -5,6 +5,11 @@
 //     config) land in an in-memory store persisted to IndexedDB; directory listings answer from `files.json` and
 //     `directories.json`, the build's file and directory indexes;
 //   - `require('path' | 'process' | 'os' | 'util' | 'events' | 'nw.gui')`, `process`, `nw`;
+//   - virtual reads for mod toolchains: once the index and store are ready (`window.__mwgpHostReady`), `fetch`
+//     answers from the write store first and gives paths the build never shipped a local 404 (native ENOENT
+//     semantics, no console noise), and `<img>` reads of store-written bytes resolve through blob URLs - a mod
+//     that writes caches/locks through `fs` and re-reads them over URLs (Karryn's Prison's FastCutIns) then
+//     sees one filesystem, like nw.js gives it;
 //   - any other module (child_process, worker_threads, native add-ons such as Steam bindings) is a lenient object
 //     whose members do nothing, warned once per module, instead of an exception that stops the page.
 // The build turns the game's `<script src>` tags into `data-mwgp-src` placeholders; this layer loads them, in order,
@@ -36,6 +41,7 @@
   // ---- the game's files and the persistent store --------------------------------------------------------------
   let files = [], indexedDirectories = [], fileSet = new Set(), dirSet = new Set();
   const store = new Map();           // lowercased game path -> string contents (saves, config, ...)
+  const objectUrls = new Map();      // store key -> { bytes, url } blob URL cache for <img> reads of session-written files
   const DB_NAME = `mwgp-web:${root}`;
   let db = null;
   const openDb = () => new Promise(resolve => {
@@ -142,9 +148,16 @@
   const write = (p, data) => {
     const value = bytesOf(data);
     store.set(key(p), value); persist(key(p), value); writeTimes.set(key(p), Date.now());
-    if (/\/\.fast-cut-ins(?:\.lock)?$/i.test(`/${rel(p)}`) || /(?:^|\/)img\/.*_fast(?:\/|$)/i.test(`/${rel(p)}`)) saveGeneratedCache(p, value);
+    // Transient lock files stay in the session store: the host's remove() cannot un-write a server-side
+    // file, and a lock persisted from a killed session would read as "generation in progress" forever.
+    if (/\/\.fast-cut-ins$/i.test(`/${rel(p)}`) || /(?:^|\/)img\/.*_fast(?:\/|$)/i.test(`/${rel(p)}`)) saveGeneratedCache(p, value);
   };
-  const remove = p => { store.delete(key(p)); persist(key(p), undefined); writeTimes.delete(key(p)); };
+  const remove = p => {
+    const k = key(p);
+    store.delete(k); persist(k, undefined); writeTimes.delete(k);
+    const cached = objectUrls.get(k);
+    if (cached) { try { URL.revokeObjectURL(cached.url); } catch { /* already gone */ } objectUrls.delete(k); }
+  };
   const callbackify = fn => (...args) => { const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null; let result, error = null; try { result = fn(...args); } catch (e) { error = e; } if (callback) setTimeout(() => callback(error, result)); };
   class Dirent {
     constructor(name, directory) { this.name = name; this._directory = directory; }
@@ -285,6 +298,54 @@
   window.nw = nw;
   window.global = window;
 
+  // ---- virtual reads for mod toolchains ------------------------------------------------------------------------
+  // Mod systems (Karryn's Prison's FastCutIns and friends) read files the game itself wrote through
+  // require('fs') with fetch() and <img> - cache manifests, lock files, generated sprite sheets. Under
+  // native nw.js every route hits the same filesystem; here writes live in the store, so the same routes
+  // must consult it first. A path the build never shipped and nothing wrote answers with a local 404
+  // instead of a network round trip: native semantics, and no browser "failed to load resource" noise
+  // for the probes that ask "is my cache already generated?".
+  const gameKey = raw => {
+    try {
+      const url = new URL(String(raw), location.href);
+      if (url.origin !== location.origin || !url.pathname.startsWith(root)) return undefined;
+      const key = decodeURIComponent(url.pathname.slice(root.length)).toLowerCase();
+      return key ? key : undefined;
+    } catch { return undefined; }
+  };
+  const installVirtualReads = () => {
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      const key = method === 'GET' || method === 'HEAD' ? gameKey(typeof input === 'string' ? input : input && input.url) : undefined;
+      if (key === undefined) return realFetch(input, init);
+      if (store.has(key)) return Promise.resolve(new Response(storedBytes(store.get(key)), { status: 200, headers: { 'content-type': 'application/octet-stream' } }));
+      return fileSet.has(key) ? realFetch(input, init) : Promise.resolve(new Response(null, { status: 404, statusText: 'Not Found' }));
+    };
+    // <img> (and anything resolving a URL through an element) cannot reach the store either: serve
+    // session-written bytes from a cached blob URL instead, refreshed when the file is rewritten.
+    if (window.HTMLImageElement) {
+      const desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+      Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        configurable: true, enumerable: desc.enumerable, get: desc.get,
+        set(value) {
+          const key = gameKey(value);
+          if (key !== undefined && store.has(key)) {
+            const bytes = storedBytes(store.get(key));
+            let entry = objectUrls.get(key);
+            if (!entry || entry.bytes !== bytes) {
+              if (entry) try { URL.revokeObjectURL(entry.url); } catch { /* already revoked */ }
+              entry = { bytes, url: URL.createObjectURL(new Blob([bytes])) };
+              objectUrls.set(key, entry);
+            }
+            value = entry.url;
+          }
+          desc.set.call(this, value);
+        }
+      });
+    }
+  };
+
   // ---- boot: store + file list first, then the game's own scripts in document order -----------------------------
   const lateLoadHandlers = [];
   const bootScripts = async () => {
@@ -294,6 +355,10 @@
       openDb().then(opened => { db = opened; if (!db) note('IndexedDB unavailable: saves last until the page closes'); return loadStore(); })
     ]);
     indexFiles(Array.isArray(list) ? list : [], Array.isArray(directories) ? directories : []);
+    installVirtualReads();
+    // A public readiness marker: the file index, the save store and the virtual-read patches are in
+    // effect (the harness and any page-side integration may wait for it).
+    window.__mwgpHostReady = true;
     // The window `load` event has fired by the time the game's scripts run: a handler they register for it runs as soon
     // as the scripts are in (MV's main.js sets `window.onload`; others use addEventListener).
     const addEventListener = window.addEventListener.bind(window);

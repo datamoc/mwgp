@@ -5,7 +5,7 @@ its own `.sf2` uses it automatically (the converter copies it into the game's lo
 `MWGP_versions/` output). This directory holds an optional **shared** fallback for games that ship none.
 
 **A SoundFont is a copyrighted work with its own licence, independent of any game.** This repo (and the
-`mw_games` library) may carry one, but only after it has been vetted:
+`mwg` library) may carry one, but only after it has been vetted:
 
 1. Read the licence and check who owns the samples. It must allow redistribution with a software
    project (CC0, MIT/BSD, or CC-BY with attribution kept; "personal use only" and "non-commercial"

@@ -44,11 +44,14 @@ export function createRgssScreen({ width = 640, height = 480, document: doc = ty
   const drawItem = ({ kind, store }, viewport) => {
     const source = store.bitmap?.canvas ?? store.bitmap?.__canvas;
     if (!source || source.width < 1 || source.height < 1) return;
+    const zoomX = Number(store.zoom_x ?? 1), zoomY = Number(store.zoom_y ?? 1);
+    // Ruby transitions use zero scale to hide a display object; treating it as
+    // the default scale draws the full bitmap during that transition.
+    if (!Number.isFinite(zoomX) || !Number.isFinite(zoomY) || zoomX === 0 || zoomY === 0) return;
     context.save();
     if (viewport) { context.beginPath(); context.rect(viewport.x, viewport.y, viewport.width, viewport.height); context.clip(); context.translate(viewport.x - viewport.ox, viewport.y - viewport.oy); }
     context.globalAlpha = Math.max(0, Math.min(255, Number(store.opacity ?? 255))) / 255;
     if (kind === 'plane') {
-      const zoomX = Number(store.zoom_x ?? 1) || 1, zoomY = Number(store.zoom_y ?? 1) || 1;
       const tileW = source.width * zoomX, tileH = source.height * zoomY;
       const originX = -(Number(store.ox) || 0), originY = -(Number(store.oy) || 0);
       const area = viewport || { x: 0, y: 0, width, height };
@@ -57,11 +60,14 @@ export function createRgssScreen({ width = 640, height = 480, document: doc = ty
     } else {
       const rect = store.src_rect;
       const source_rect = rect ? numbers(rect) : null;
-      const sx = source_rect && source_rect.width > 0 ? source_rect.x : 0, sy = source_rect && source_rect.width > 0 ? source_rect.y : 0;
+      // Each dimension falls back on its own: a game often narrows one axis
+      // only (src_rect.height for a vertical icon strip, .width for a
+      // horizontal one). Gating y on the width drew the sheet from the top.
+      const sx = source_rect && source_rect.width > 0 ? source_rect.x : 0, sy = source_rect && source_rect.height > 0 ? source_rect.y : 0;
       const sw = source_rect && source_rect.width > 0 ? source_rect.width : source.width, sh = source_rect && source_rect.height > 0 ? source_rect.height : source.height;
       context.translate(Number(store.x) || 0, Number(store.y) || 0);
       if (store.angle) context.rotate(-Number(store.angle) * Math.PI / 180);
-      context.scale((Number(store.zoom_x ?? 1) || 1) * (store.mirror ? -1 : 1), Number(store.zoom_y ?? 1) || 1);
+      context.scale(zoomX * (store.mirror ? -1 : 1), zoomY);
       context.drawImage(source, sx, sy, sw, sh, -(Number(store.ox) || 0), -(Number(store.oy) || 0), sw, sh);
     }
     context.restore();
@@ -97,6 +103,8 @@ export function createRgssScreen({ width = 640, height = 480, document: doc = ty
     // Display objects created since `mark` (a script that failed midway must not leave its screen behind).
     disposeSince(mark) { for (const item of [...items]) if (item.order >= mark) { item.store.__disposed = true; items.delete(item); item.store.__screenItem = null; } },
     get count() { return items.size; },
+    // What each display object looks like right now, for diagnosing a scene that draws nothing.
+    debug: () => [...items].map(({ kind, store }) => { const read = value => (typeof value === 'function' ? value() : value); const bitmap = store.bitmap; const source = bitmap?.canvas ?? bitmap?.__canvas; return { kind, bitmap: source ? `${source.width}x${source.height}` : null, visible: read(store.visible) !== false, opacity: read(store.opacity) ?? 255, z: read(store.z) ?? 0, x: read(store.x) ?? 0, y: read(store.y) ?? 0, viewport: store.viewport ? read(store.viewport.__store?.visible) !== false : null, disposed: Boolean(store.__disposed) }; }),
     destroy() { items.clear(); canvas?.remove(); canvas = null; }
   };
 }

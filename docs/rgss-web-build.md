@@ -1,6 +1,6 @@
 # RGSS web builds
 
-`npm run build:web -- <XP/VX/Ace project> <output>` now creates a static browser build. `convert:auto` uses it for RGSS projects by default. Pass `--mwgp` to keep the manifest conversion path. Raw `Game.rgssad`, `Game.rgss2a`, and `Game.rgss3a` stay inside the archive; they are not extracted for this build.
+`npm run build:web -- <XP/VX/Ace project> <output>` now creates a static browser build. `convert:auto` uses it for RGSS projects by default. Pass `--mwgp` to keep the manifest conversion path. Raw `Game.rgssa`, `Game.rgssad`, `Game.rgss2a`, and `Game.rgss3a` stay inside the archive; they are not extracted for this build.
 
 The build contains `game.mkxpz` (a ZIP64 archive with stored, uncompressed entries), `index.html` and `rgss-player.js` (our small page), Nostalgist 0.20.2, the mkxp-z libretro JavaScript and WebAssembly core, and `mwgp-web.json`. It includes the game's original files except Windows executables, DLLs, native saves and GPU caches. On first play, the page downloads the archive and core with progress into browser persistent storage. Later starts reuse those files from OPFS. Saves live there too; IDBFS in IndexedDB is the fallback where OPFS is unavailable. The page maps Enter/Space/Z to confirm, Esc/X to cancel, Shift to dash, and arrows to movement. WebAssembly initialization still takes time after downloading.
 

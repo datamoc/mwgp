@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -376,6 +376,7 @@ input:focus, textarea:focus, select:focus {
   opacity: 1;
   transform: translateY(0);
 }
+.mwg-brand{display:flex;align-items:center;gap:12px}.mwg-powered{display:block;line-height:0}.mwg-powered svg{height:30px;width:auto;display:block}.mwg-support{display:inline-flex;align-items:center;height:30px;padding:0 10px;border:1px solid currentColor;border-radius:6px;text-decoration:none;font-size:13px;white-space:nowrap;color:inherit}
 </style>
 </head>
 <body>
@@ -387,84 +388,90 @@ input:focus, textarea:focus, select:focus {
     <span id="mod-badge" class="badge ok">Non modifié</span>
   </div>
   <div class="toolbar">
-    <a href="/" class="btn">◀ Catalogue</a>
-    <button id="btn-new-project" class="btn" title="Créer un projet MWGP vierge, éditable dès maintenant">✚ Nouveau projet</button>
-    <button id="btn-play" class="btn primary">▶ Tester (Play MWGP)</button>
-    <button id="btn-save" class="btn success">💾 Sauvegarder</button>
-    <button id="btn-export" class="btn">⬇ Exporter</button>
-    <button id="btn-manifest" class="btn">Manifeste complet</button>
-    <button id="btn-assets" class="btn">Ressources</button>
-    <button id="btn-reconvert" class="btn" title="Comparer avec la dernière conversion enregistrée">Comparer la conversion</button>
-    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);" title="Version du player inscrite dans le projet et dans les pages de jeu autoporteuses créées">Player
+    <select id="lang" aria-label="Language" style="padding:6px 8px;">
+      <option value="en">English</option>
+      <option value="fr">Français</option>
+      <option value="de">Deutsch</option>
+    </select>
+    <a href="/" class="btn" data-i18n="catalogue">◀ Catalogue</a>
+    <button id="btn-new-project" class="btn" data-i18n="new_project">✚ New project</button>
+    <button id="btn-play" class="btn primary" data-i18n="play">▶ Test (Play MWGP)</button>
+    <button id="btn-save" class="btn success" data-i18n="save">💾 Save</button>
+    <button id="btn-export" class="btn" data-i18n="export">⬇ Export</button>
+    <button id="btn-manifest" class="btn" data-i18n="manifest">Full manifest</button>
+    <button id="btn-assets" class="btn" data-i18n="assets">Resources</button>
+    <button id="btn-reconvert" class="btn" data-i18n="compare">Compare conversion</button>
+    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);"><span data-i18n="player_label">Player</span>
       <input id="player-version" type="text" inputmode="numeric" placeholder="0.0.1" size="7" style="padding:6px 8px;">
     </label>
   </div>
+  <div class="mwg-brand"><a class="mwg-powered" href="https://datamoc.github.io/mwg/" target="_blank" rel="noopener noreferrer"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 196 38" width="196" height="38" role="img" aria-label="powered by mwg"><rect width="196" height="38" rx="10" fill="#0b0e14"/><text x="12" y="23.5" font-family="'JetBrains Mono','Cascadia Code',ui-monospace,Consolas,monospace" font-size="12.5" fill="#8b96a8">powered by</text><rect x="88" y="8" width="22" height="22" rx="3" fill="#0057b7"/><rect x="114" y="8" width="22" height="22" rx="3" fill="#ffd700"/><text x="166" y="26" font-family="'JetBrains Mono','Cascadia Code',ui-monospace,Consolas,monospace" font-size="26" font-weight="700" letter-spacing="0.5" fill="#eef1f6" text-anchor="middle" textLength="46" lengthAdjust="spacingAndGlyphs">mwg</text></svg></a><a class="mwg-support" href="https://buy.stripe.com/bJe8wOeUq4oZ2kXfyeaIM00" target="_blank" rel="noopener noreferrer" data-i18n="support">♥ Support the project</a></div>
 </header>
 
 <div id="workspace">
   <!-- Left panel: Maps / Database / Tools -->
   <section class="panel">
     <div class="panel-tabs">
-      <div class="panel-tab active" data-tab="maps">Cartes</div>
-      <div class="panel-tab" data-tab="database">Acteurs</div>
-      <div class="panel-tab" data-tab="tools">Outils</div>
+      <div class="panel-tab active" data-tab="maps" data-i18n="tab_maps">Maps</div>
+      <div class="panel-tab" data-tab="database" data-i18n="tab_database">Actors</div>
+      <div class="panel-tab" data-tab="tools" data-i18n="tab_tools">Tools</div>
     </div>
     
     <!-- Tab 1: Maps -->
     <div id="tab-maps" class="panel-content">
-      <input type="text" id="map-search" class="search-box" placeholder="Rechercher une carte…">
-      <button id="btn-add-map" class="btn" style="margin:6px 0; width:100%;">✚ Nouvelle carte</button>
+      <input type="text" id="map-search" class="search-box" placeholder="Search a map…">
+      <button id="btn-add-map" class="btn" style="margin:6px 0; width:100%;" data-i18n="new_map">✚ New map</button>
       <div id="map-list" class="item-list"></div>
     </div>
     
     <!-- Tab 2: Database Actors -->
     <div id="tab-database" class="panel-content" style="display:none">
-      <h3 style="font-size:13px; color:var(--accent);">Acteurs de la base</h3>
+      <h3 style="font-size:13px; color:var(--accent);" data-i18n="db_actors">Database actors</h3>
       <div id="actor-list" class="item-list"></div>
       <div id="actor-editor" style="display:none; flex-direction:column; gap:8px; margin-top:8px; border-top:1px solid var(--border); padding-top:8px;">
         <div class="form-group">
-          <label>Nom de l'acteur</label>
+          <label data-i18n="actor_name">Actor's name</label>
           <input type="text" id="act-name">
         </div>
         <div class="form-group">
-          <p>PV et autres paramètres par niveau : table « classes », champ « params », dans la base complète.</p>
+          <p data-i18n="actor_params_note">HP and other per-level parameters: "classes" table, "params" field, in the full database.</p>
         </div>
         <div class="form-group">
-          <label>Profil</label>
+          <label data-i18n="actor_profile">Profile</label>
           <textarea id="act-profile" rows="2"></textarea>
         </div>
-        <button id="btn-apply-actor" class="primary" style="margin-top:4px;">Appliquer à l'Acteur</button>
+        <button id="btn-apply-actor" class="primary" style="margin-top:4px;" data-i18n="apply_actor">Apply to the actor</button>
       </div>
     </div>
     
     <!-- Tab 3: Tools & Tiles -->
     <div id="tab-tools" class="panel-content" style="display:none">
       <div class="form-group">
-        <label>Mode de manipulation</label>
+        <label data-i18n="mode">Manipulation mode</label>
         <div class="tool-btn-group">
-          <button class="tool-btn active" data-tool="inspect">👆 Inspecter</button>
-          <button class="tool-btn" data-tool="paint">🖌️ Peindre</button>
-          <button class="tool-btn" data-tool="player">🚩 Joueur</button>
-          <button class="tool-btn" data-tool="add-event">➕ Événement</button>
+          <button class="tool-btn active" data-tool="inspect" data-i18n="tool_inspect">👆 Inspect</button>
+          <button class="tool-btn" data-tool="paint" data-i18n="tool_paint">🖌️ Paint</button>
+          <button class="tool-btn" data-tool="player" data-i18n="tool_player">🚩 Player</button>
+          <button class="tool-btn" data-tool="add-event" data-i18n="tool_event">➕ Event</button>
         </div>
       </div>
-      
+
       <div class="form-group" style="margin-top:8px;">
-        <label>Couche active</label>
+        <label data-i18n="layer">Active layer</label>
         <select id="layer-select">
-          <option value="0">Couche 0 (Sol / Terrain)</option>
-          <option value="1">Couche 1 (Éléments / Bas)</option>
-          <option value="2">Couche 2 (Détails / Haut)</option>
+          <option value="0" data-i18n="layer0">Layer 0 (Ground / Terrain)</option>
+          <option value="1" data-i18n="layer1">Layer 1 (Elements / Low)</option>
+          <option value="2" data-i18n="layer2">Layer 2 (Details / High)</option>
         </select>
       </div>
-      
+
       <div class="form-group" style="margin-top:8px;">
-        <label>Palette de tuiles</label>
+        <label data-i18n="palette">Tile palette</label>
         <div id="palette-grid" class="palette-grid"></div>
       </div>
-      
+
       <div class="form-group" style="margin-top:8px;">
-        <label>ID Tuile personnalisé</label>
+        <label data-i18n="custom_tile">Custom tile ID</label>
         <input type="number" id="custom-tile-id" value="0">
       </div>
     </div>
@@ -473,10 +480,10 @@ input:focus, textarea:focus, select:focus {
   <!-- Center panel: Map Canvas -->
   <section id="center-panel">
     <div id="canvas-bar">
-      <span id="map-header-info">Carte #1 : Chargement…</span>
+      <span id="map-header-info">Map #1: Loading…</span>
       <div style="display:flex; gap:8px; align-items:center;">
         <label style="font-size:12px; display:flex; align-items:center; gap:4px; cursor:pointer;">
-          <input type="checkbox" id="toggle-grid" checked> Grille
+          <input type="checkbox" id="toggle-grid" checked> <span data-i18n="grid">Grid</span>
         </label>
         <button id="zoom-out" style="padding:2px 8px;">-</button>
         <span id="zoom-level" style="font-size:12px; font-weight:600;">100%</span>
@@ -488,18 +495,18 @@ input:focus, textarea:focus, select:focus {
     </div>
     <div id="canvas-footer">
       <span id="cursor-pos">X: 0, Y: 0</span>
-      <span id="tool-hint">Outil actif : Inspecter. Cliquez sur un événement ou une tuile.</span>
+      <span id="tool-hint">Active tool: Inspect. Click an event or a tile.</span>
     </div>
   </section>
 
   <!-- Right panel: Event Inspector & Commands -->
   <section class="panel right">
     <div class="panel-tabs">
-      <div class="panel-tab active">Inspecteur d'Événement</div>
+      <div class="panel-tab active" data-i18n="inspector">Event Inspector</div>
     </div>
     <div class="panel-content" id="event-inspector">
-      <div id="no-event-selected" style="color:var(--text-muted); font-size:13px; text-align:center; padding:32px 0;">
-        Sélectionnez un événement sur la carte ou créez-en un avec l'outil ➕ Événement.
+      <div id="no-event-selected" style="color:var(--text-muted); font-size:13px; text-align:center; padding:32px 0;" data-i18n="no_event">
+        Select an event on the map, or create one with the ➕ Event tool.
       </div>
       
       <div id="event-editor" style="display:none; flex-direction:column; gap:10px;">
@@ -509,47 +516,47 @@ input:focus, textarea:focus, select:focus {
         </div>
         
         <div class="form-group">
-          <label>Nom de l'événement</label>
+          <label data-i18n="event_name">Event's name</label>
           <input type="text" id="evt-name">
         </div>
-        
+
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
           <div class="form-group">
-            <label>Position X</label>
+            <label data-i18n="pos_x">Position X</label>
             <input type="number" id="evt-x">
           </div>
           <div class="form-group">
-            <label>Position Y</label>
+            <label data-i18n="pos_y">Position Y</label>
             <input type="number" id="evt-y">
           </div>
         </div>
-        
+
         <div class="form-group">
-          <label>Déclencheur (Trigger)</label>
+          <label data-i18n="trigger">Trigger</label>
           <select id="evt-trigger">
-            <option value="0">Touche Action (Enter/Espace)</option>
-            <option value="1">Contact Joueur (Touch)</option>
-            <option value="2">Contact Événement</option>
-            <option value="3">Automatique (Autorun)</option>
-            <option value="4">Processus Parallèle</option>
+            <option value="0" data-i18n="trig0">Action button (Enter/Space)</option>
+            <option value="1" data-i18n="trig1">Player touch</option>
+            <option value="2" data-i18n="trig2">Event touch</option>
+            <option value="3" data-i18n="trig3">Automatic (Autorun)</option>
+            <option value="4" data-i18n="trig4">Parallel process</option>
           </select>
         </div>
-        
+
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-          <label style="font-size:12px; font-weight:700; color:var(--accent);">Flux de commandes</label>
-          <button id="btn-add-cmd" style="padding:2px 8px; font-size:11px;">➕ Commande</button>
+          <label style="font-size:12px; font-weight:700; color:var(--accent);" data-i18n="commands">Command flow</label>
+          <button id="btn-add-cmd" style="padding:2px 8px; font-size:11px;" data-i18n="add_cmd">➕ Command</button>
         </div>
-        
+
         <div id="cmd-list" style="display:flex; flex-direction:column; gap:6px;"></div>
-        
-        <button id="btn-apply-event" class="primary" style="margin-top:12px;">Appliquer à l'Événement</button>
+
+        <button id="btn-apply-event" class="primary" style="margin-top:12px;" data-i18n="apply_event">Apply to the event</button>
       </div>
       
       <!-- Reconversion simulation modal / block -->
       <div id="reconvert-box" style="display:none; flex-direction:column; gap:8px; margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
-        <h3 style="font-size:13px; color:var(--accent);">Comparaison avec la conversion</h3>
-        <p style="font-size:11px; color:var(--text-muted);">
-          Les entités marquées « modifié (protégé) » par leur empreinte originHash sont préservées lors d'une nouvelle conversion.
+        <h3 style="font-size:13px; color:var(--accent);" data-i18n="compare_h">Comparison with the conversion</h3>
+        <p style="font-size:11px; color:var(--text-muted);" data-i18n="compare_p">
+          Entities marked "modified (protected)" by their originHash fingerprint are preserved on a new conversion.
         </p>
         <div id="reconvert-report" class="cmd-box" style="max-height:160px; overflow-y:auto; font-family:Consolas, monospace; font-size:11px;"></div>
       </div>
@@ -557,31 +564,31 @@ input:focus, textarea:focus, select:focus {
   </section>
 </div>
 
-<div id="toast">Projet sauvegardé</div>
+<div id="toast">Saved</div>
 <dialog id="manifest-dialog" style="width:85vw;">
-  <h2>Manifeste complet</h2>
-  <p>Tous les champs convertis sont accessibles ici : pages, choix, images, sons, cartes, base de données et scripts. Le JSON doit respecter le format MWGP.</p>
-  <textarea id="manifest-json" aria-label="Manifeste MWGP complet" spellcheck="false" style="width:100%;height:60vh;font-family:Consolas,monospace;"></textarea>
-  <button id="btn-apply-manifest">Appliquer</button>
-  <button onclick="document.querySelector('#manifest-dialog').close()">Fermer</button>
+  <h2 data-i18n="manifest_h">Full manifest</h2>
+  <p data-i18n="manifest_p">Every converted field is accessible here: pages, choices, images, sounds, maps, database and scripts. The JSON must follow the MWGP format.</p>
+  <textarea id="manifest-json" aria-label="Full MWGP manifest" spellcheck="false" style="width:100%;height:60vh;font-family:Consolas,monospace;"></textarea>
+  <button id="btn-apply-manifest" data-i18n="apply">Apply</button>
+  <button onclick="document.querySelector('#manifest-dialog').close()" data-i18n="close">Close</button>
 </dialog>
 
 <script type="module" src="/studio.js"></script>
 <dialog id="asset-dialog" style="width:90vw;">
-  <h2>Ressources du jeu</h2>
-  <p>Modifiez les fichiers texte ou remplacez les images et sons. Les éditions sont enregistrées dans le dossier jouable et conservées après reconversion.</p>
-  <button id="asset-up">Dossier parent</button> <span id="asset-prefix"></span>
-  <select id="asset-select" aria-label="Ressource" style="width:100%;margin:12px 0;"></select>
+  <h2 data-i18n="assets_h">Game resources</h2>
+  <p data-i18n="assets_p">Edit text files, or replace images and sounds. Edits are recorded in the playable folder and kept across reconversions.</p>
+  <button id="asset-up" data-i18n="asset_up">Parent folder</button> <span id="asset-prefix"></span>
+  <select id="asset-select" aria-label="Resource" style="width:100%;margin:12px 0;"></select>
   <div id="asset-detail" hidden>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-      <section><label>Comparer avec <select id="asset-reference-version"><option value="fresh">La dernière conversion</option><option value="base">La référence avant édition</option></select></label><div id="asset-reference"></div></section>
-      <section><h3>Édition jouable</h3><div id="asset-edited"></div></section>
+      <section><label><span data-i18n="compare_with">Compare with</span> <select id="asset-reference-version"><option value="fresh" data-i18n="ref_fresh">The last conversion</option><option value="base" data-i18n="ref_base">The reference before editing</option></select></label><div id="asset-reference"></div></section>
+      <section><h3 data-i18n="edited_playable">Playable edit</h3><div id="asset-edited"></div></section>
     </div>
-    <button id="asset-save-text">Enregistrer le texte</button>
-    <label>Remplacer le fichier <input id="asset-replacement" type="file"></label>
+    <button id="asset-save-text" data-i18n="save_text">Save the text</button>
+    <label><span data-i18n="replace_file">Replace the file</span> <input id="asset-replacement" type="file"></label>
   </div>
   <pre id="asset-status" style="white-space:pre-wrap;"></pre>
-  <button id="asset-close">Fermer</button>
+  <button id="asset-close" data-i18n="close">Close</button>
 </dialog>
 </body>
 </html>

@@ -6,11 +6,51 @@ limitations**. The portable `mwgp.json` manifest is the hinge for both halves:
 faithful enough to run the original game, plain JSON enough to edit by hand.
 
 Framework proposals live in `4MWG/MWG_IMPROVEMENT_PROPOSALS.md` and
-summarized at the end of Phase 2 (item M): upstream `mw_games@0.15.0`
+summarized at the end of Phase 2 (item M): upstream `mwg@0.15.0`
 already shipped every ask, so item M is adoption work in this repo's
 player, not new upstream API.
 
 ## Open tasks (Phase 1)
+
+- [ ] **T124 - RPG Maker 2000/2003.** Foundation landed (2026-10-19): `tools/lcf.mjs`
+  reads the LCF container (BER integers, chunk streams, keyed record lists) and parses
+  `MapXXXX.lmu` (dimensions, chipset, both tile layers, event ids) and `RPG_RT.lmt`
+  (map tree), proven on synthetic fixtures by `tools/test-lcf.mjs` (`npm run test:lcf`;
+  no 2000/2003 project is installed locally). `convert:auto` now detects an `RPG_RT`
+  project and reports it as its own skipped case instead of a generic one. Still open:
+  an LDB database reader, a 2000/2003 event-command converter, and chipset rendering
+  in the player (the manifest tile model is MV-shaped), so no manifest is written yet.
+
+### Gameplay verification follow-up (2026-10-19)
+
+- [x] Make `play:all` fail on a skipped browser, failed conversion with stale output,
+  invalid manifests, logged runtime gaps and skipped Ruby calls; retain per-game logs,
+  incremental reports and input traces. Thresholds apply per map and progression category.
+- [x] Preserve RGSS Sprite/Plane zero scale during transitions. Previously `zoom_x` or
+  `zoom_y` equal to zero fell back to 1. Eight compositor regression cases reproduce
+  the failure before the fix and pass afterwards (`npm run test:rgss-screen`, also in `npm test`).
+- [ ] Verify the complete RGSS intro visually: freshly converted Void 0.1.4 has zero
+  skipped calls in the 180-step sample, but the end capture shows whole sprite sheets
+  (`reports/goal-ruby-current/Pokemon Void 0.1.4/end.png`). Source-rectangle setup and
+  asynchronous bitmap loading still need investigation; no console error proves this correct.
+  One root cause found and fixed (2026-10-19): the compositor gated `src_rect.y` on the
+  rect's *width*, so a sprite narrowed by height only (a vertical icon strip, a common
+  Essentials pattern) drew from the top of the sheet. Dimensions now fall back per axis
+  in `src/player/rgss-screen.js`, with regression cases in `tools/test-rgss-screen.mjs`
+  (`npm test`). The visual re-check itself (fresh capture vs the sheet symptom) stays open.
+- [ ] Preserve nested RGSS event labels. Fresh conversion still reports dropping labels
+  inside blocks (maps 27-29 and 47-49 in Void 0.1.4); exercise their jumps after fixing
+  conversion. Reported to the session owning `tools/convert-rgss.js`.
+- [x] Identify the HTTP 404s in the Karryn reference: its own cache loader deliberately
+  fetches optional cache files and falls back to an empty cache when absent. Preserve
+  fetch/XHR failures as network notes, while failed script/image/media/font/stylesheet
+  loads remain failures. The 180-step port sample has no runtime errors and reaches
+  maps 32/35 with matching progression coverage. Declared compatibility limits remain
+  separate notes rather than being counted as newly encountered runtime errors.
+
+The five installed games pass manifest validation, startup and two sampled maps each
+(`reports/goal-browser-validated/report.md`). These checks and the successful Elementals
+opening comparison are samples; story branches, long sessions and endings remain open.
 
 - [x] 1. Converter→player vocabulary parity. `tools/convert-mv.js` already
   emits an extended vocabulary (`changeGold`, `changeItem`, `changeWeapon`,
@@ -20,7 +60,7 @@ player, not new upstream API.
   accepts it, but `src/player/pixi-core.js` (`prepareEventCommands`) does not
   execute it yet — the four-file vocabulary contract is broken. Player must
   run every command the validator accepts, so converted games play without
-  RPGM. `mw_games` `GameState` only models switches/variables, so party,
+  RPGM. `mwg` `GameState` only models switches/variables, so party,
   inventory and gold live in player-held state that survives transfers and
   saves; `script`/`pluginCommand` have no RPGM-free execution and must
   degrade to a loud warning, never silent success.
@@ -76,7 +116,7 @@ render without the tile glitch from the Pokémon Essentials screenshot.
 - [x] I. Actor commands (`313`/`314`/`318`/`319`/`322` supported):
   `rpgExtra.actors` records (states/skills/equips/profile; HP/MP half of
   Recover All has no model and is noted).
-- [x] J. Battles spike — decision: DEFER. `mw_games battle/` is a
+- [x] J. Battles spike — decision: DEFER. `mwg battle/` is a
   creature-battle toolkit (`Species`/`TypeMatrix`/`StatStages`/`Evolution`),
   with no MV-style troop runner (turn loop, party commands, damage pipeline,
   win/lose/escape flow for `601–604`). Building one is Phase-3-scale, not an
@@ -93,7 +133,7 @@ render without the tile glitch from the Pokémon Essentials screenshot.
 - [x] L. Manual play checklist doc per game (`docs/play-checklist.md`: move,
   dialogue, choice, transfer, save/load, banner review). Browser playthrough
   itself is still to be done by hand; results go in the doc's log.
-- [x] M. `4MWG` adoption (upstream `mw_games@0.15.0` already shipped every
+- [x] M. `4MWG` adoption (upstream `mwg@0.15.0` already shipped every
   ask — verified against `dist/**/*.d.ts`, tracked in
   `4MWG/MWG_IMPROVEMENT_PROPOSALS.md`): adopt `TileMap.addAutotileLayer`
   (item 370, shipped in 0.16.0: `AutotileSet` with animation, floor/wall
@@ -105,11 +145,26 @@ render without the tile glitch from the Pokémon Essentials screenshot.
   round-trip. Diagnostics already done repo-side. No open framework API
   remains; everything left is port integration work.
 
-Non-goals: RGSS script *execution* (own plan later), plugin emulation
-(`script`/`pluginCommand` stay loud warnings), new test frameworks.
+Non-goals: reproducing native plugin APIs that the game does not ship, or
+adding a second engine implementation beside `mwg`; the converter runs shipped
+RGSS Ruby through the transpiled-library bridge and reports unresolved calls
+loudly. New test frameworks remain out of scope.
 
 ## Recent (coord-tracked)
 
+- **0.2.1 — T117 MV/MZ branch-operand parity (done for the MV half, 2026-10-19).** `convert-mv.js` read the Conditional
+  Branch variable operators in VX editor order (0 gte, 1 lte, 2 eq) while the shipped MV/MZ engines order them 0 eq,
+  1 gte, 2 lte (verified in `rpg_objects.js` v1.6.2 and `rmmz_objects.js`): 230 of the 231 corpus variable comparisons
+  silently mis-evaluated (`==` became the tautological `>= 0`-style `atLeast`, `>=`/`<=` swapped) with no `unsupported`
+  marker anywhere. Fixed with the engine-order table; the player already evaluated all six operator names, so the
+  four-file contract needed only converter + validator + smoke changes. Same pass: Control Variables "Other" operands
+  (`steps`, `playtime`, `timer`, `saveCount`, `battleCount`/`winCount`/`escapeCount`) now have an `rpgExtra` model and
+  convert; the MZ probe fixture pins the operator order and all seven operands; a page condition with `comparison 1`
+  (`<=`) warns instead of silently emitting `>=` (zero such pages in the corpus). All three MV/MZ projects reconverted:
+  manifests validate, raw-vs-manifest cross-check finds every comparison with its engine semantics, Chromium boots
+  pass with 0 console errors (Karryn, WoC, Elementals, incl. battles through the fixed branches). `LAST_OUTPUT_CHANGE`
+  moves to 0.2.1, so the pre-fix manifests (incl. both Void stamps) show "reconvert" until regenerated — the RGSS
+  converters have their own tables (XP-side audit stays with `convert-rgss.js`). Checklist row logged.
 - **0.2.0 — Engine command parity pass (done, 2026-09-28).** Compared `convertCommand` with every
   `Game_Interpreter.commandNNN` of the real MV (`rpg_objects.js`) and MZ (`rmmz_objects.js`) engines: both define the same
   112 codes plus 357. 25 of the 33 unconverted ones are now converted (134-140, 216, 217, 124 + the timer condition, 132/133/139,
@@ -146,6 +201,15 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
   two full Void reconversions to `/tmp` (111 supported ×339, 122 supported ×129, counts match the
   shipped manifests) plus `npm test` green. Shipped manifests still read partial until the next
   reconversion; the committed smoke guard waits for the tile-fix WIP in `test-smoke.mjs` to land.
+- **RGSS Ruby archive extraction and compatibility (in progress toward RC1, 2026-10-19).** The XP
+  converter extracts scripts from encrypted `Game.rgssa` inputs before indexing the library. Generic
+  Ruby2JS/runtime fixes cover implicit `super`, Marshal-backed registry hashes, receiver-aware
+  `respond_to?`, module readers, and direct singleton aliases without rewriting conditional aliases
+  as static fields. Both Void manifests now validate with every event script transpiled and 0 failed
+  or partial library units; fresh Chromium startup/save/audio checks pass. Nested labels inside event
+  blocks are still reported as dropped, and a human-paced rewalk after reconversion remains open.
+  R17 reconverted all 5 MWGP projects (0 failed); `npm test` passed 5/5 browser boots with 0 console
+  errors. Current per-project command gaps are logged in `docs/play-checklist.md`; RC1 remains open.
 - **T116 — Script/plugin depth (closed as designedly-partial).** Ruling (michel, option a): 355/356
   stay partial by nature — game JS runs in the plugin sandbox, unknown calls warn loudly, and the
   old per-family adapter plan is superseded since T143. No code change; future runtime script
@@ -179,7 +243,7 @@ Non-goals: RGSS script *execution* (own plan later), plugin emulation
   and silence checks) and probed against all 5 shipped manifests; `npm test` green, `/compat-features.js`
   served by the existing generic route (verified over HTTP), and a real Chromium Karryn boot logs the new
   banner verbatim (`Plugins: partial (356×4178, Tachie×3103, …); Event scripts: partial (355×466)`) with PASS.
-- **T156 — mw_games `_getFinalPadding` confirm-spam errors (done).** Upstream repro note added to
+- **T156 — mwg `_getFinalPadding` confirm-spam errors (done).** Upstream repro note added to
   `4MWG/` §18: ~90 rapid confirms on Elementals' "List other Controls" choice loop fills the console
   with the null-texture `_updateGpuText` TypeError (non-fatal, 0 occurrences at harness/soak pacing).
 - **T127 — Reconcile fallback-core.js with the command vocabulary (done).** Took the "route it through

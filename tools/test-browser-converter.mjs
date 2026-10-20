@@ -209,6 +209,8 @@ async function archiveFixture(source, folder, version) {
 
 try {
   const context = await browser.newContext({ offline: true, acceptDownloads: true });
+  // The pages default to English; this run checks the French strings.
+  await context.addInitScript(() => { try { localStorage.setItem('mwgp-lang', 'fr'); } catch { /* no storage */ } });
   const page = await context.newPage();
   const errors = [], network = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -371,7 +373,7 @@ try {
   try {
     await corruptPage.goto(pathToFileURL(corruptPath).href);
     await corruptPage.locator('#unpacking[role=alert]').waitFor({ timeout: 30000 });
-    assert.match(await corruptPage.locator('#unpacking').textContent(), /^Ouverture impossible/);
+    assert.match(await corruptPage.locator('#unpacking').textContent(), /^Could not open the game/);
     assert.ok(await corruptPage.evaluate(() => !globalThis.mwg), 'corrupt gzip never starts the player');
     console.log('PASS corrupted gzip: visible failure before player execution');
   } finally { await corruptPage.close(); }

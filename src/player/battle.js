@@ -50,6 +50,28 @@ export function expForLevel(klass, level) {
   return Math.round(basis * (Math.pow(level - 1, 0.9 + accA / 250)) * level * (level + 1) / (6 + Math.pow(level, 2) / 50 / accB) + (level - 1) * extra);
 }
 
+// The base value of one actor parameter, shared by the battle and the map/menu so what the editor
+// edits is what the player reads: XP keeps per-actor curve tables, MV keeps class curves; a scalar
+// `params[pid]` (a Studio edit, not a table) overrides both, and the MV actor's own bonus
+// parameters (`bparams`, Game_Actor#paramPlus) always add on top.
+export function actorParamBase(source, klass, paramId, level) {
+  if (!source || !klass || paramId === undefined || level === undefined) {
+    console.warn('MWGP actorParamBase: missing or invalid input', { source, klass, paramId, level });
+    return 0;
+  }
+  // XP-era actor tables: source.params[paramId][level]
+  const xpTable = source.params?.[paramId];
+  const xpValue = Array.isArray(xpTable) ? Number(xpTable[level] ?? 0) : 0;
+  // Class curve: klass.params[paramId][level]
+  const classValue = Number(klass.params?.[paramId]?.[level] ?? 0);
+  // Scalar Studio edit: source.params[paramId] (overrides XP and class)
+  const studioValue = typeof source.params?.[paramId] === "number" ? source.params[paramId] : 0;
+  // Base value: studioValue > xpValue > classValue
+  const base = studioValue || xpValue || classValue;
+  // MV bparams bonus
+  return base + Number(source.bparams?.[paramId] || 0);
+}
+
 class Battler {
   constructor(battle, kind, source, index) {
     this.battle = battle;
@@ -187,7 +209,7 @@ export class ActorBattler extends Battler {
     }
     return list.filter(Boolean);
   }
-  paramBase(id) { return Number((this.source.params?.[id] || this.klass?.params?.[id])?.[this.level] ?? 0); }
+  paramBase(id) { return actorParamBase(this.source, this.klass, id, this.level); }
   paramPlus(id) { return this.equipItems().reduce((sum, item) => sum + Number(item.params?.[id] || 0), 0); }
   skills() {
     const learned = new Set([...(this.klass?.learnings || []).filter(entry => entry.level <= this.level).map(entry => entry.skillId), ...(this.record.skills || []), ...this.traits(43).map(trait => trait.dataId)]);
@@ -381,6 +403,18 @@ export async function runBattle(options) {
 
   // One application of `item` by `subject` on `target` (Game_Action.apply): hit/evade, damage, effects, TP.
   const applyTo = (subject, target, item, log) => {
+    // A skill or item the game's own engine takes (hooks.applyAction, see battle-engine.js) is applied there; this shows the outcome.
+    const engine = hooks.applyAction?.({ subject, target, item, isItem: database.items?.[item.id] === item });
+    if (engine) {
+      if (engine.missed || engine.evaded) { log.push(format(message(target.isActor ? 'actorNoHit' : 'enemyNoHit'), target.name)); hooks.onEffect?.({ subject, target, item, kind: 'miss' }); return; }
+      if (engine.critical) log.push(message(target.isActor ? 'criticalToActor' : 'criticalToEnemy'));
+      const gained = engine.hpDamage < 0;
+      if (engine.hpDamage) log.push(format(message(gained ? (target.isActor ? 'actorRecovery' : 'enemyRecovery') : (target.isActor ? 'actorDamage' : 'enemyDamage')), target.name, Math.abs(engine.hpDamage), basic(2)));
+      hooks.onEffect?.({ subject, target, item, kind: 'hit', hp: -engine.hpDamage, mp: -engine.mpDamage, critical: engine.critical, animationId: Number(item.animationId) > 0 ? Number(item.animationId) : 0, died: target.dead });
+      if (target.dead && !target.hasState(DEATH_STATE)) target.addState(DEATH_STATE, 1);
+      if (target.dead) log.push(`${target.name}${target.isActor ? database.states?.[DEATH_STATE]?.message1 || ' collapses!' : database.states?.[DEATH_STATE]?.message2 || ' is defeated!'}`);
+      return;
+    }
     const hit = rng() < itemHit(subject, item);
     if (!hit || rng() < itemEva(target, item)) { log.push(format(message(target.isActor ? 'actorNoHit' : 'enemyNoHit'), target.name)); hooks.onEffect?.({ subject, target, item, kind: 'miss' }); return; }
     const before = { hp: target.hp, mp: target.mp };
@@ -425,13 +459,14 @@ export async function runBattle(options) {
       for (const target of targets) {
         if (Number(item.scope) < 7 && !target.alive) continue;
         // BattleManager.invokeAction: a counter attack, else a magic reflection, else the normal action.
-        const counter = isPhysical(item) && target.canMove ? target.cnt : 0;
+        const rates = hooks.counterRates?.({ subject, target, item, isItem: consumeItem });   // the game engine's itemCnt/itemMrf, when it takes the item
+        const counter = rates ? rates.cnt : isPhysical(item) && target.canMove ? target.cnt : 0;
         if (counter > 0 && rng() < counter) {
           log.push(format(message('counterAttack'), target.name));
           applyTo(target, subject, database.skills[attackSkillId(database)], log);
           continue;
         }
-        const reflect = isMagical(item) ? target.mrf : 0;
+        const reflect = rates ? rates.mrf : isMagical(item) ? target.mrf : 0;
         if (reflect > 0 && rng() < reflect) {
           log.push(format(message('magicReflection'), target.name));
           applyTo(subject, subject, item, log);
@@ -449,8 +484,10 @@ export async function runBattle(options) {
     await say(log);
   };
 
-  const payCost = (subject, skill) => { subject.mp -= Number(skill.mpCost || 0); subject.tp = clamp(subject.tp - Number(skill.tpCost || 0), 0, 100); };
-  const canPay = (subject, skill) => subject.mp >= Number(skill.mpCost || 0) && subject.tp >= Number(skill.tpCost || 0);
+  // What a skill costs its user: the game's own code when the plugin engine takes it (hooks.skillCost), else the database's.
+  const costOf = (subject, skill) => hooks.skillCost?.({ subject, skill }) ?? { mp: Number(skill.mpCost || 0), tp: Number(skill.tpCost || 0) };
+  const payCost = (subject, skill) => { const cost = costOf(subject, skill); subject.mp = Math.max(0, subject.mp - cost.mp); subject.tp = clamp(subject.tp - cost.tp, 0, 100); };
+  const canPay = (subject, skill) => { const cost = costOf(subject, skill); return subject.mp >= cost.mp && subject.tp >= cost.tp; };
 
   // ---- choosing actions ---------------------------------------------------------------------
   const actorCommand = async actor => {
@@ -464,7 +501,9 @@ export async function runBattle(options) {
       if (command.kind === 'guard') return { subject: actor, kind: 'guard', item: database.skills?.[guardSkillId(database)] };
       if (command.kind === 'attack') { const target = await chooseTarget(actor, database.skills[attackSkillId(database)]); if (target) return { subject: actor, kind: 'skill', item: database.skills[attackSkillId(database)], target }; continue; }
       if (command.kind === 'skill') {
-        const skill = await pick(`${actor.name}`, actor.skills().map(entry => ({ label: `${entry.name}${entry.mpCost ? ` (${entry.mpCost} ${basic(5)})` : ''}`, skill: entry })));
+        const known = actor.skills();
+        const knownOrder = known.length ? hooks.listOrder?.('Window_SkillList', known) : null;
+        const skill = await pick(`${actor.name}`, (knownOrder || known).map(entry => ({ label: `${entry.name}${entry.mpCost ? ` (${entry.mpCost} ${basic(5)})` : ''}`, skill: entry })));
         if (!skill) continue;
         if (!canPay(actor, skill.skill)) { await say(`${actor.name}: ${basic(4)}?`); continue; }
         const target = needsTarget(skill.skill) ? await chooseTarget(actor, skill.skill) : null;
@@ -531,7 +570,7 @@ export async function runBattle(options) {
     await useItem(subject, item, target, { consumeItem: action.kind === 'item' });
   };
 
-  // Force Action (command 339): the engine's Game_Battler.forceAction + BattleManager.processForcedAction.
+  // Force Action (command 339): the runner's forceAction logic.
   // The forced action skips Game_Battler.canUse (isValid is true while forcing) but startAction still pays the
   // skill cost through useItem, and only a subject affected by the death state is skipped. `target` is
   // -2 = the subject's last target, -1 = random, N = that index among the subject's opponents (or friends
@@ -541,8 +580,7 @@ export async function runBattle(options) {
     const subject = subjectKind === 'enemy' ? enemies[Number(which)] : actors.find(actor => Number(actor.actorId) === Number(which));
     const skill = database.skills?.[Number(skillId)];
     if (!subject || !skill || subject.hasState(DEATH_STATE)) return false;
-    subject.mp = Math.max(0, subject.mp - Number(skill.mpCost || 0));
-    subject.tp = clamp(subject.tp - Number(skill.tpCost || 0), 0, 100);
+    payCost(subject, skill);
     let target = null;
     if (needsTarget(skill)) {
       const pool = Number(skill.scope) === 1 ? foes(subject) : Number(skill.scope) === 9 ? friends(subject).filter(battler => battler.dead) : friends(subject);

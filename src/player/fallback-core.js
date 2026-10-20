@@ -1,4 +1,4 @@
-// Canvas fallback for environments without the mw_games 2D runtime: movement,
+// Canvas fallback for environments without the mwg 2D runtime: movement,
 // flat tile rendering and a text box, with events driven ONLY by the converted
 // MWGP vocabulary (mapEntry.mwgEvents). Raw MV command codes never appear
 // here; anything the fallback cannot execute warns loudly (T127).
@@ -8,8 +8,8 @@ export class MwgPlayer {
     this.player = { ...(project.player || { x: 0, y: 0 }), moving: false, fromX: 0, fromY: 0, toX: 0, toY: 0, moveProgress: 0 };
     this.dialogue = null; this.dialogueDone = null; this.keys = new Set(); this.tileSize = 32; this.lastTime = 0;
     this.warnedPages = new Set();
-    this.rpg = globalThis.mw_games?.Rpg || null;
-    if (!this.rpg) console.error('MWGP fallback renderer: mw_games Rpg layer missing; events disabled');
+    this.rpg = globalThis.mwg?.Rpg || null;
+    if (!this.rpg) console.error('MWGP fallback renderer: mwg Rpg layer missing; events disabled');
     this.gameState = this.rpg ? new this.rpg.GameState() : null;
     window.addEventListener('keydown', event => {
       const key = event.key.toLowerCase(); this.keys.add(key);
@@ -123,7 +123,7 @@ export class MwgPlayer {
     });
   }
   // The fallback has no scene, sound, or battle layer for pictures, audio, menus, or engine
-  // scripts, nor a move driver: EventRunner reports each command it cannot run (mw_games >= 0.22
+  // scripts, nor a move driver: EventRunner reports each command it cannot run (mwg >= 0.22
   // `onUnknownCommand`) and the fallback names it once per event instead of dropping it silently.
   newRunner(event) {
     this.currentEvent = event;

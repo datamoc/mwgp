@@ -44,8 +44,18 @@ export function featureReport(compatibility = {}) {
     if (entry.status === 'partial' || entry.status === 'unsupported') area.gaps.push(`${code}×${entry.count}`);
   }
   const pluginArea = bucket('plugins');
-  for (const [name, entry] of Object.entries(plugins)) {
+  const families = Object.entries(plugins).filter(([, entry]) => entry && entry.count > 0);
+  for (const [code, entry] of Object.entries(commands)) {
     if (!entry || !(entry.count > 0)) continue;
+    // The plugin codes (356/357) count the same uses as the per-family census, and the
+    // census is the finer report: name the gapped families, not the code above them.
+    if ((code === '356' || code === '357') && families.length) continue;
+    const area = bucket(areaOf.get(String(code)) || 'other');
+    area.uses += entry.count;
+    worse(area, entry.status);
+    if (entry.status === 'partial' || entry.status === 'unsupported') area.gaps.push(`${code}×${entry.count}`);
+  }
+  for (const [name, entry] of families) {
     pluginArea.uses += entry.count;
     worse(pluginArea, entry.status);
     if (entry.status === 'partial' || entry.status === 'unsupported') pluginArea.gaps.push(`${name}×${entry.count}`);

@@ -17,6 +17,8 @@ const clamp255 = value => Math.max(0, Math.min(255, Number(value) || 0));
 const clampTone = value => Math.max(-255, Math.min(255, Number(value) || 0));
 
 // Standard RGSS Input constants (RPG Maker XP help, "Input"), mapped to the default keyboard.
+import { assetUrl } from './asset-url.js';
+
 export const INPUT_CONSTANTS = { USE: 13, BACK: 12, ACTION: 11, JUMPUP: 14, JUMPDOWN: 15, SPECIAL: 16, AUX1: 17, AUX2: 18, DOWN: 2, LEFT: 4, RIGHT: 6, UP: 8, A: 11, B: 12, C: 13, X: 14, Y: 15, Z: 16, L: 17, R: 18, SHIFT: 21, CTRL: 22, ALT: 23, F5: 25, F6: 26, F7: 27, F8: 28, F9: 29, MOUSELEFT: 38, MOUSEMIDDLE: 39, MOUSERIGHT: 40, MOUSEX1: 41, MOUSEX2: 42 };
 const INPUT_KEYS = {
   2: ['ArrowDown'], 4: ['ArrowLeft'], 6: ['ArrowRight'], 8: ['ArrowUp'],
@@ -39,7 +41,7 @@ export function createKeyProbe(target = typeof window !== 'undefined' ? window :
   return { down: symbol => any(held, symbol), pressed: symbol => any(latched, symbol) || any(edges, symbol), update: () => { latched = new Set(edges); edges.clear(); } };
 }
 
-export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = null, reopened = () => undefined, shipped = () => undefined, imageUrl = () => null, screen = null, callableNames = null, rawFile = () => undefined }) {
+export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = null, reopened = () => undefined, shipped = () => undefined, imageUrl = () => null, imageCanvas = () => null, writeImage = () => false, screen = null, callableNames = null, rawFile = () => undefined }) {
   const loud = (owner, method) => () => { warnOnce(`${owner}.${method}`, 'needs the RGSS display layer, which the headless script runtime does not have'); };
 
   // Value objects (Color, Tone, Rect, Font) answer a name the game `def`s anywhere as a callable reader (`clr.red()`): the game
@@ -202,6 +204,15 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
       if (fromFile) { this.width = 0; this.height = 0; this.__load(widthOrFile); }
     }
     __load(name) {
+      // An image the game itself wrote (`save_to_png`) is already a canvas: it loads at once, as RGSS's synchronous load does.
+      const written = imageCanvas(name);
+      if (written) {
+        this.__canvas.width = written.width; this.__canvas.height = written.height;
+        this.__ctx = this.__canvas.getContext('2d', { willReadFrequently: true });
+        this.__ctx.drawImage(written, 0, 0);
+        this.width = written.width; this.height = written.height;
+        return;
+      }
       const url = imageUrl(name);
       if (!url || typeof Image === 'undefined') { warnOnce(`Bitmap.new(${name})`, 'has no image to load'); return; }
       const image = new Image();
@@ -212,9 +223,12 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
         this.width = image.naturalWidth; this.height = image.naturalHeight;
       };
       image.onerror = () => warnOnce(`Bitmap.new(${name})`, 'could not be loaded');
-      image.src = url;
+      image.src = assetUrl(url);
     }
     get canvas() { return this.__canvas; }
+    // mkxp-z's Bitmap#save_to_png / #to_file: the pixels become a file of the in-memory file system (see writeImage in rgss-script.js).
+    save_to_png(path) { return Boolean(this.__canvas && this.width !== 0 && writeImage(path, this.__canvas)); }
+    to_file(path) { return this.save_to_png(path); }
     dispose() { this.__disposed = true; this.__ctx = null; }
     fill_rect(...args) { const [x, y, w, h, color] = rectArgs(args, 1); if (!this.__ctx) return; this.__ctx.fillStyle = css(color); this.__ctx.fillRect(x, y, w, h); }
     clear() { this.__ctx?.clearRect(0, 0, this.__canvas.width, this.__canvas.height); }

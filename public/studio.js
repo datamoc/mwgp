@@ -1,5 +1,6 @@
 // MWGP Studio — Universal Web Editor for converted RPG Maker games (DOC59 rev4)
 import { setupAssetEditor } from './studio-assets.js';
+import { t, setupLangSelect } from './i18n.js';
 
 let projectId = new URLSearchParams(location.search).get('id');
 let project = null;
@@ -17,15 +18,15 @@ const modifiedEntities = new Set(); // Set of 'map:id', 'event:mapId:eventId', '
 
 // Tile presets for quick painting
 const TILE_PRESETS = [
-  { id: 2816, name: 'Herbe', color: '#4a8532' },
-  { id: 2048, name: 'Eau', color: '#2b6cb0' },
-  { id: 2912, name: 'Terre/Chemin', color: '#9c7a44' },
-  { id: 3328, name: 'Pierre/Pavé', color: '#718096' },
-  { id: 4352, name: 'Mur pierre', color: '#4a5568' },
-  { id: 5120, name: 'Toit rouge', color: '#9b2c2c' },
-  { id: 1536, name: 'Sable', color: '#d69e2e' },
-  { id: 6144, name: 'Parquet bois', color: '#7b341e' },
-  { id: 0,    name: 'Vide (0)', color: '#1a202c' }
+  { id: 2816, nameKey: 'tile_grass', color: '#4a8532' },
+  { id: 2048, nameKey: 'tile_water', color: '#2b6cb0' },
+  { id: 2912, nameKey: 'tile_dirt', color: '#9c7a44' },
+  { id: 3328, nameKey: 'tile_stone', color: '#718096' },
+  { id: 4352, nameKey: 'tile_wall', color: '#4a5568' },
+  { id: 5120, nameKey: 'tile_roof', color: '#9b2c2c' },
+  { id: 1536, nameKey: 'tile_sand', color: '#d69e2e' },
+  { id: 6144, nameKey: 'tile_wood', color: '#7b341e' },
+  { id: 0,    nameKey: 'tile_empty', color: '#1a202c' }
 ];
 
 // --- Hashing & DOC59 originHash tracking ---
@@ -129,13 +130,23 @@ function notify(text, isError = false) {
 // --- Initialization ---
 
 async function init() {
+  setupLangSelect(() => {
+    if (!project) return;
+    populateMapList(document.querySelector('#map-search')?.value || '');
+    populateActorList();
+    renderGenericDb();
+    setupPalette();
+    updateEventInspector();
+    updateToolHint();
+    drawCanvas();
+  });
   document.querySelector('#btn-new-project')?.addEventListener('click', async () => {
-    const name = prompt('Nom du projet (créé dans MWGP_versions, éditable sans RPG Maker) :', 'Mon jeu');
+    const name = prompt(t('new_project_prompt'), t('my_game'));
     if (!name) return;
     const response = await fetch('/api/studio/init', { method: 'POST',
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) });
     const result = await response.json();
-    if (!response.ok) { alert('Création impossible: ' + (result.error || response.status)); return; }
+    if (!response.ok) { alert(t('create_failed', { message: result.error || response.status })); return; }
     location.search = `?id=${encodeURIComponent(result.id)}`;
   });
   if (!projectId) {
@@ -146,32 +157,32 @@ async function init() {
         projectId = catalog.mwgp[0].id;
         history.replaceState(null, '', `?id=${encodeURIComponent(projectId)}`);
       } else {
-        alert('Aucun projet MWGP trouvé.');
+        alert(t('no_project'));
         return;
       }
     } catch (e) {
-      alert('Impossible de charger le catalogue: ' + e.message);
+      alert(t('catalog_error', { message: e.message }));
       return;
     }
   }
 
   try {
-    notify('Chargement du projet…');
+    notify(t('loading_project'));
     const res = await fetch(`/api/studio/${encodeURIComponent(projectId)}`);
-    if (!res.ok) throw new Error(`Erreur ${res.status} lors du chargement`);
+    if (!res.ok) throw new Error(t('load_failed', { status: res.status }));
     const loaded = await res.json();
     project = loaded.manifest;
     protectedPaths = loaded.protectedPaths;
     protectedAssets = loaded.protectedAssets;
     setupProject();
   } catch (err) {
-    notify('Erreur de chargement: ' + err.message, true);
+    notify(t('load_error', { message: err.message }), true);
     console.error(err);
   }
 }
 
 function setupProject() {
-  document.querySelector('#project-title').textContent = project.display?.title || project.title || 'Jeu sans titre';
+  document.querySelector('#project-title').textContent = project.display?.title || project.title || t('untitled');
   // The player version belongs to the project: it is saved into mwgp.json and
   // stamped into standalone game pages when they are created.
   const versionInput = document.querySelector('#player-version');
@@ -179,10 +190,10 @@ function setupProject() {
     versionInput.value = project.playerVersion || '0.0.1';
     versionInput.onchange = () => {
       const value = versionInput.value.trim();
-      if (!/^\d+\.\d+\.\d+$/.test(value)) { notify('Version du player invalide : format attendu 1.2.3', true); versionInput.value = project.playerVersion || '0.0.1'; return; }
+      if (!/^\d+\.\d+\.\d+$/.test(value)) { notify(t('version_invalid'), true); versionInput.value = project.playerVersion || '0.0.1'; return; }
       project.playerVersion = value;
       markModified(project, 'player:version');
-      notify(`Version du player du projet : ${value} (sauvegardez pour la publier)`);
+      notify(t('version_set', { version: value }));
     };
   }
   const engine = project.source?.engine || (project.tilesetFormat ? 'RPG Maker XP' : 'RPG Maker MV/MZ');
@@ -268,10 +279,10 @@ function updateZoom() {
 
 function updateToolHint() {
   const hints = {
-    'inspect': 'Outil actif : Inspecter. Cliquez sur un événement pour l\'éditer.',
-    'paint': `Outil actif : Peindre. Cliquez ou glissez sur la carte avec la tuile sélectionnée (Couche ${activeLayer}).`,
-    'player': 'Outil actif : Joueur. Cliquez sur la carte pour définir le point de départ du joueur.',
-    'add-event': 'Outil actif : Ajouter Événement. Cliquez sur une case pour créer un événement.'
+    'inspect': t('hint_inspect'),
+    'paint': t('hint_paint', { layer: activeLayer }),
+    'player': t('hint_player'),
+    'add-event': t('hint_event')
   };
   document.querySelector('#tool-hint').textContent = hints[activeTool] || '';
 }
@@ -281,7 +292,7 @@ function setupPalette() {
   grid.innerHTML = TILE_PRESETS.map((p, idx) => `
     <button class="tile-btn ${idx === 0 ? 'active' : ''}" data-tile-id="${p.id}">
       <span class="tile-swatch" style="background:${p.color}"></span>
-      <span>${p.name}</span>
+      <span>${t(p.nameKey)}</span>
     </button>
   `).join('');
 
@@ -302,10 +313,10 @@ function setupToolbar() {
   // From-scratch creation: the editor can grow a project it owns (maps and database rows),
   // then everything goes through the same protected save as any edit.
   document.querySelector('#btn-add-map')?.addEventListener('click', async () => {
-    const name = prompt('Nom de la nouvelle carte ?', `Carte ${(project.maps?.length || 0) + 1}`);
+    const name = prompt(t('map_name_prompt'), t('map_default', { count: (project.maps?.length || 0) + 1 }));
     if (name === null) return;
-    const width = Math.max(1, Number(prompt('Largeur (cases) ?', '20')) || 20);
-    const height = Math.max(1, Number(prompt('Hauteur (cases) ?', '15')) || 15);
+    const width = Math.max(1, Number(prompt(t('width_prompt'), '20')) || 20);
+    const height = Math.max(1, Number(prompt(t('height_prompt'), '15')) || 15);
     const id = Math.max(0, ...(project.maps || []).map(m => Number(m.id) || 0)) + 1;
     const tilesetId = (project.tilesets || []).findIndex(Boolean) || 1;
     // mirror of skeletonMap() in src/studio-manifest.js: same shape the converter publishes
@@ -313,7 +324,7 @@ function setupToolbar() {
       data: { width, height, tilesetId, displayName: name, events: [], data: new Array(width * height * 6).fill(0) },
       mwgEvents: [] };
     (project.maps ??= []).push(map);
-    if (await saveProject()) { populateMapList(); selectMap(id); notify(`Carte #${id} créée et protégée`); }
+    if (await saveProject()) { populateMapList(); selectMap(id); notify(t('map_created', { id })); }
   });
   setupAssetEditor({ projectId, notify, onSaved: data => {
     project.assets.revision = data.revision;
@@ -330,7 +341,7 @@ function setupToolbar() {
   // Save
   async function saveProject() {
     try {
-      notify('Sauvegarde en cours…');
+      notify(t('saving'));
       const res = await fetch('/api/studio/save', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -343,14 +354,14 @@ function setupToolbar() {
         populateMapList();
         populateActorList();
         updateEventInspector();
-        notify('✓ Projet sauvegardé avec succès !');
+        notify(t('saved'));
         updateModificationBadges();
         return true;
       } else {
-        throw new Error(data.error || 'Erreur inconnue');
+        throw new Error(data.error || t('worker_error'));
       }
     } catch (e) {
-      notify('Erreur de sauvegarde: ' + e.message, true);
+      notify(t('save_error', { message: e.message }), true);
       return false;
     }
   }
@@ -362,12 +373,12 @@ function setupToolbar() {
   document.querySelector('#btn-apply-manifest').onclick = () => {
     try {
       const next = JSON.parse(document.querySelector('#manifest-json').value);
-      if (next.format !== 'MWGP' || !Array.isArray(next.maps) || !next.maps.length) throw new Error('Manifeste MWGP avec cartes requis');
+      if (next.format !== 'MWGP' || !Array.isArray(next.maps) || !next.maps.length) throw new Error(t('manifest_required'));
       project = next;
       setupProject();
-      document.querySelector('#mod-badge').textContent = 'Modifications à sauvegarder';
+      document.querySelector('#mod-badge').textContent = t('modifications', { count: 1 });
       document.querySelector('#manifest-dialog').close();
-      notify('Manifeste appliqué. Sauvegardez pour le tester.');
+      notify(t('manifest_applied'));
     } catch (error) { notify(error.message, true); }
   };
 
@@ -381,7 +392,7 @@ function setupToolbar() {
     a.download = `${project.display?.title || 'mwgp'}.play.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-    notify('Manifeste exporté');
+    notify(t('exported'));
   };
 
   // Compare the current editor content with the last actual conversion.
@@ -396,12 +407,12 @@ function populateMapList(filter = '') {
   const container = document.querySelector('#map-list');
   const searchLower = filter.toLowerCase();
   const maps = (project.maps || []).filter(m => {
-    const name = (m.info?.name || m.name || `Carte ${m.id}`).toLowerCase();
+    const name = (m.info?.name || m.name || t('map_default', { count: m.id })).toLowerCase();
     return name.includes(searchLower) || String(m.id).includes(searchLower);
   });
 
   container.innerHTML = maps.map(m => {
-    const name = m.info?.name || m.name || `Carte ${m.id}`;
+    const name = m.info?.name || m.name || t('map_default', { count: m.id });
     const evCount = m.mwgEvents ? m.mwgEvents.length : 0;
     const { width: w, height: h } = mapDims(m);
     const mod = isMapModified(m) || (m.mwgEvents || []).some(isModified);
@@ -410,9 +421,9 @@ function populateMapList(filter = '') {
       <div class="item-row ${active ? 'active' : ''}" data-map-id="${escapeHtml(m.id)}">
         <div class="item-info">
           <span class="item-title">${escapeHtml(name)}</span>
-          <span class="item-sub">#${escapeHtml(m.id)} · ${w}×${h} · ${evCount} év.</span>
+          <span class="item-sub">#${escapeHtml(m.id)} · ${w}×${h} · ${t('ev_suffix', { count: evCount })}</span>
         </div>
-        ${mod ? '<span class="badge modified">modifié</span>' : ''}
+        ${mod ? `<span class="badge modified">${t('modified')}</span>` : ''}
       </div>
     `;
   }).join('');
@@ -436,9 +447,9 @@ function selectMap(mapId) {
   const dims = mapDims(activeMap);
 
   // Update header info
-  const name = activeMap.info?.name || activeMap.name || `Carte ${activeMap.id}`;
+  const name = activeMap.info?.name || activeMap.name || t('map_default', { count: activeMap.id });
   document.querySelector('#map-header-info').textContent =
-    `Carte #${activeMap.id} : ${name} (${dims.width}×${dims.height})`;
+    t('map_header', { id: activeMap.id, name, w: dims.width, h: dims.height });
 
   populateMapList(document.querySelector('#map-search').value);
   updateEventInspector();
@@ -567,7 +578,7 @@ canvas.addEventListener('mousemove', (e) => {
   if (x >= 0 && x < width && y >= 0 && y < height) {
     const idx = y * width + x;
     const tileVal = mapTiles(activeMap)[idx] || 0;
-    document.querySelector('#cursor-pos').textContent = `X: ${x}, Y: ${y} | Tuile: ${tileVal}`;
+    document.querySelector('#cursor-pos').textContent = t('cursor', { x, y, tile: tileVal });
   }
 });
 
@@ -611,7 +622,7 @@ function paintTile(x, y) {
   markModified(activeMap, `map:${activeMap.id}`);
   drawCanvas();
   populateMapList(document.querySelector('#map-search').value);
-  notify(`Tuile peinte en (${x}, ${y}) : ${activeBrush}`);
+  notify(t('tile_painted', { x, y, tile: activeBrush }));
 }
 
 function setPlayerPos(x, y) {
@@ -623,7 +634,7 @@ function setPlayerPos(x, y) {
   stamp(project.player);
   markModified(project.player, 'player:start');
   drawCanvas();
-  notify(`Point de départ du joueur déplacé en (${x}, ${y})`);
+  notify(t('player_moved', { x, y }));
 }
 
 function addNewEvent(x, y) {
@@ -631,13 +642,13 @@ function addNewEvent(x, y) {
   const nextId = (Math.max(0, ...activeMap.mwgEvents.map(e => e.id)) || 0) + 1;
   const newEv = {
     id: nextId,
-    name: `Événement ${nextId}`,
+    name: t('event_default_name', { id: nextId }),
     x,
     y,
     pages: [{
       trigger: 'action',
       commands: [
-        { say: 'Nouveau message créé dans MWGP Studio.' }
+        { say: t('new_message') }
       ]
     }]
   };
@@ -649,7 +660,7 @@ function addNewEvent(x, y) {
   updateEventInspector();
   drawCanvas();
   populateMapList(document.querySelector('#map-search').value);
-  notify(`Nouvel événement #${nextId} créé en (${x}, ${y})`);
+  notify(t('event_created', { id: nextId, x, y }));
 }
 
 function markModified(entity, idString) {
@@ -662,10 +673,10 @@ function updateModificationBadges() {
   const badge = document.querySelector('#mod-badge');
   if (modCount > 0) {
     badge.className = 'badge modified';
-    badge.textContent = `${modCount} modification(s)`;
+    badge.textContent = t('modifications', { count: modCount });
   } else {
     badge.className = 'badge ok';
-    badge.textContent = 'Non modifié';
+    badge.textContent = t('not_modified');
   }
 }
 
@@ -688,7 +699,7 @@ function updateEventInspector() {
   const mod = isModified(selectedEvent);
   const modBadge = document.querySelector('#evt-mod-badge');
   modBadge.className = mod ? 'badge modified' : 'badge ok';
-  modBadge.textContent = mod ? 'Modifié (protégé)' : 'Original';
+  modBadge.textContent = mod ? t('modified_protected') : t('original');
 
   document.querySelector('#evt-name').value = selectedEvent.name || '';
   document.querySelector('#evt-x').value = selectedEvent.x;
@@ -705,7 +716,7 @@ function updateEventInspector() {
   document.querySelector('#btn-add-cmd').onclick = () => {
     (selectedEvent.pages ??= [])[0] = page;
     if (!page.commands) page.commands = [];
-    page.commands.push({ say: 'Texte à afficher…' });
+    page.commands.push({ say: t('text_to_show') });
     renderCommandList(page.commands);
   };
 
@@ -732,7 +743,7 @@ function updateEventInspector() {
         page.commands[i] = { ...page.commands[i], setSwitch: swId, value: swVal };
       } else if (type === 'other' || type === 'ask') {
         try { page.commands[i] = JSON.parse(box.querySelector('.cmd-json, textarea').value); }
-        catch (err) { notify('JSON de commande invalide: ' + err.message, true); throw err; }
+        catch (err) { notify(t('invalid_cmd_json', { message: err.message }), true); throw err; }
       }
     });
 
@@ -740,14 +751,14 @@ function updateEventInspector() {
     updateEventInspector();
     drawCanvas();
     populateMapList(document.querySelector('#map-search').value);
-    notify(`Événement #${selectedEvent.id} mis à jour et protégé`);
+    notify(t('event_updated', { id: selectedEvent.id }));
   };
 }
 
 function renderCommandList(commands) {
   const container = document.querySelector('#cmd-list');
   if (!commands || commands.length === 0) {
-    container.innerHTML = '<span style="font-size:12px; color:var(--text-muted);">Aucune commande dans cette page.</span>';
+    container.innerHTML = `<span style="font-size:12px; color:var(--text-muted);">${t('no_commands')}</span>`;
     return;
   }
 
@@ -756,7 +767,7 @@ function renderCommandList(commands) {
       return `
         <div class="cmd-box" data-type="say" data-idx="${i}">
           <div class="cmd-header">
-            <span>[say] Dialogue texte</span>
+            <span>${t('cmd_say')}</span>
             <button class="btn-del-cmd" style="padding:0 4px; font-size:10px; background:transparent; border:none; color:var(--danger);">✕</button>
           </div>
           <textarea rows="2">${escapeHtml(c.say)}</textarea>
@@ -768,10 +779,10 @@ function renderCommandList(commands) {
       return `
         <div class="cmd-box" data-type="ask" data-idx="${i}">
           <div class="cmd-header">
-            <span>[ask] Choix</span>
+            <span>${t('cmd_ask')}</span>
             <button class="btn-del-cmd" style="padding:0 4px; font-size:10px; background:transparent; border:none; color:var(--danger);">✕</button>
           </div>
-          <span style="font-size:12px;">Prompt : ${escapeHtml(typeof prompt === 'string' ? prompt : JSON.stringify(prompt))}</span>
+          <span style="font-size:12px;">${t('prompt_label')} ${escapeHtml(typeof prompt === 'string' ? prompt : JSON.stringify(prompt))}</span>
           <textarea rows="3" class="cmd-json">${escapeHtml(JSON.stringify(c))}</textarea>
         </div>
       `;
@@ -781,14 +792,14 @@ function renderCommandList(commands) {
       return `
         <div class="cmd-box" data-type="setSwitch" data-idx="${i}">
           <div class="cmd-header">
-            <span>[setSwitch] Interrupteur</span>
+            <span>${t('cmd_switch')}</span>
             <button class="btn-del-cmd" style="padding:0 4px; font-size:10px; background:transparent; border:none; color:var(--danger);">✕</button>
           </div>
           <div style="display:flex; gap:6px;">
             <input type="text" class="sw-id" value="${escapeHtml(sw.id)}" style="width:100px;">
             <select class="sw-val">
-              <option value="true" ${sw.value ? 'selected' : ''}>ON (Actif)</option>
-              <option value="false" ${!sw.value ? 'selected' : ''}>OFF (Inactif)</option>
+              <option value="true" ${sw.value ? 'selected' : ''}>${t('on')}</option>
+              <option value="false" ${!sw.value ? 'selected' : ''}>${t('off')}</option>
             </select>
           </div>
         </div>
@@ -832,9 +843,9 @@ function populateActorList() {
       <div class="item-row" data-actor-id="${escapeHtml(a.id)}">
         <div class="item-info">
           <span class="item-title">${escapeHtml(a.name || 'Sans nom')}</span>
-          <span class="item-sub">ID #${escapeHtml(a.id)} · ${escapeHtml(a.profile || a.description || 'Acteur')}</span>
+          <span class="item-sub">ID #${escapeHtml(a.id)} · ${escapeHtml(a.profile || a.description || t('actor_fallback'))}</span>
         </div>
-        ${mod ? '<span class="badge modified">modifié</span>' : ''}
+        ${mod ? `<span class="badge modified">${t('modified')}</span>` : ''}
       </div>
     `;
   }).join('');
@@ -860,7 +871,7 @@ function selectActor(actorId) {
 
     markModified(actor, `db:actors:${actor.id}`);
     populateActorList();
-    notify(`Acteur #${actor.id} mis à jour et protégé`);
+    notify(t('actor_updated', { id: actor.id }));
   };
 }
 
@@ -875,9 +886,9 @@ function renderGenericDb() {
   box.id = 'generic-db';
   box.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:12px;border-top:1px solid var(--border);padding-top:8px;';
   const tables = Object.keys(project.database || {}).filter(t => Array.isArray(project.database[t]));
-  box.innerHTML = `<h3 style="font-size:13px;color:var(--accent);">Base complète (toutes tables)</h3>
+  box.innerHTML = `<h3 style="font-size:13px;color:var(--accent);">${t('db_full')}</h3>
     <select id="gdb-table">${tables.map(t => `<option>${escapeHtml(t)}</option>`).join('')}</select>
-    <button id="gdb-add-row" class="btn" style="margin:6px 0;">✚ Nouvelle ligne</button>
+    <button id="gdb-add-row" class="btn" style="margin:6px 0;">${t('new_row')}</button>
     <div id="gdb-rows" style="display:flex;flex-direction:column;gap:6px;"></div>`;
   tab.appendChild(box);
   box.querySelector('#gdb-table').onchange = renderGenericDbRows;
@@ -886,12 +897,12 @@ function renderGenericDb() {
     const table = box.querySelector('#gdb-table').value;
     if (!table) return;
     const rows = (project.database[table] ||= []);
-    const name = prompt(`Nom de la ligne (${table}) ?`, 'Nouveau');
+    const name = prompt(t('row_name_prompt', { table }), t('new_name'));
     if (name === null) return;
     const id = Math.max(0, ...rows.map((r, i) => Number(r?.id) || i)) + 1;
     while (rows.length <= id) rows.push(null);
     rows[id] = { id, name };
-    if (saveCurrentProject && await saveCurrentProject()) notify(`${table} #${id} créé et protégé`);
+    if (saveCurrentProject && await saveCurrentProject()) notify(t('row_created', { table, id }));
     renderGenericDbRows();
     populateActorList();
   };
@@ -904,9 +915,9 @@ function renderGenericDbRows() {
   if (!table || !host) return;
   const rows = (project.database[table] || []).map((r, i) => [r, i]).filter(([r]) => r && typeof r === 'object');
   host.innerHTML = rows.slice(0, 40).map(([r]) => `
-    <div class="cmd-box"><div class="cmd-header"><span>${escapeHtml(table)} #${escapeHtml(r.id ?? '')} ${escapeHtml(r.name || '')}</span>${isModified(r) ? '<span class="badge modified">modifié</span>' : ''}</div>
+    <div class="cmd-box"><div class="cmd-header"><span>${escapeHtml(table)} #${escapeHtml(r.id ?? '')} ${escapeHtml(r.name || '')}</span>${isModified(r) ? `<span class="badge modified">${t('modified')}</span>` : ''}</div>
     <textarea rows="4" class="gdb-json" data-id="${escapeHtml(r.id)}">${escapeHtml(JSON.stringify(unstamped(r)))}</textarea>
-    <button class="gdb-apply" data-id="${escapeHtml(r.id)}">Appliquer la ligne</button></div>`).join('') || '<span style="font-size:12px;">Aucune ligne objet.</span>';
+    <button class="gdb-apply" data-id="${escapeHtml(r.id)}">${t('apply_row')}</button></div>`).join('') || `<span style="font-size:12px;">${t('no_rows')}</span>`;
   host.querySelectorAll('.gdb-apply').forEach(btn => {
     btn.onclick = () => {
       const row = (project.database[table] || []).find(r => r && String(r.id) === btn.dataset.id);
@@ -919,8 +930,8 @@ function renderGenericDbRows() {
         markModified(row, `db:${table}:${row.id}`);
         renderGenericDbRows();
         populateActorList();
-        notify(`${table} #${row.id} mis à jour et protégé`);
-      } catch (err) { notify('JSON invalide: ' + err.message, true); }
+        notify(t('row_updated', { table, id: row.id }));
+      } catch (err) { notify(t('invalid_json', { message: err.message }), true); }
     };
   });
 }
@@ -931,7 +942,7 @@ function wireDeleteEvent() {
   if (!editor || document.querySelector('#btn-delete-event')) return;
   const btn = document.createElement('button');
   btn.id = 'btn-delete-event';
-  btn.textContent = "Supprimer l'événement";
+  btn.textContent = t('delete_event');
   btn.style.cssText = 'background:var(--danger);color:#fff;';
   editor.appendChild(btn);
   btn.onclick = () => {
@@ -943,7 +954,7 @@ function wireDeleteEvent() {
     updateEventInspector();
     drawCanvas();
     populateMapList(document.querySelector('#map-search').value);
-    notify('Événement supprimé (protégé contre la reconversion)');
+    notify(t('event_deleted'));
   };
 }
 
@@ -958,10 +969,10 @@ async function compareConversion() {
     const response = await fetch('/api/studio/compare', { method: 'POST',
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: projectId, manifest: project }) });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || 'Comparaison impossible');
+    if (!response.ok) throw new Error(data.error || t('compare_failed'));
     reportEl.textContent = JSON.stringify(data, null, 2);
     reportEl.style.whiteSpace = 'pre-wrap';
-    notify(`${data.protectedPaths.length} champs protégés · ${data.conflicts.length} divergences`);
+    notify(t('compare_done', { protected: data.protectedPaths.length, conflicts: data.conflicts.length }));
   } catch (error) {
     reportEl.textContent = error.message;
     notify(error.message, true);

@@ -1,5 +1,5 @@
-// RPG Maker sound and music, on top of mw_games' audio layer (`AudioBus`, `parseMidi`,
-// `renderMidiToBuffer`, `parseSoundFont`, mw_games >= 0.18; off-thread MIDI render needs >= 0.20;
+// RPG Maker sound and music, on top of mwg' audio layer (`AudioBus`, `parseMidi`,
+// `renderMidiToBuffer`, `parseSoundFont`, mwg >= 0.18; off-thread MIDI render needs >= 0.20;
 // per-kind mixer and Vorbis loop tags need >= 0.22).
 //
 // The library owns the playback semantics RPG Maker needs: BGM and BGS as independent looping
@@ -40,7 +40,7 @@ export class AudioManager {
   constructor({ root = '', index = null, lib = null, contextFactory = null, fetchImpl = null, storage = null, log = console, soundfontUrls = [], renderCache = undefined, cacheVersion = '' } = {}) {
     this.root = String(root).replace(/\/$/, '');
     this.index = index;
-    this.lib = lib || globalThis.mw_games?.Audio || null;
+    this.lib = lib || globalThis.mwg?.Audio || null;
     this.contextFactory = contextFactory || (() => (typeof AudioContext !== 'undefined' ? new AudioContext() : typeof webkitAudioContext !== 'undefined' ? new webkitAudioContext() : null));
     this.fetchImpl = fetchImpl || (typeof fetch === 'function' ? (...args) => fetch(...args) : null);
     this.storage = storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
@@ -64,7 +64,7 @@ export class AudioManager {
   // ---- environment --------------------------------------------------------------------
   ensureContext() {
     if (this.context) return this.context;
-    if (!this.lib?.AudioBus) { this.warnOnce('lib', 'MWGP audio: mw_games audio (AudioBus) is unavailable; audio disabled'); return null; }
+    if (!this.lib?.AudioBus) { this.warnOnce('lib', 'MWGP audio: mwg audio (AudioBus) is unavailable; audio disabled'); return null; }
     try { this.context = this.contextFactory(); } catch (error) { this.warnOnce('context', `MWGP audio: no AudioContext (${error?.message || error}); audio disabled`); }
     if (!this.context) return null;
     this.master = this.context.createGain();
@@ -131,7 +131,7 @@ export class AudioManager {
     // Synthesizing a MIDI track takes seconds and the page reloads on every map change, so the
     // rendered PCM is cached (keyed by file, SoundFont and conversion) and reused across reloads.
     const font = isMidi ? await this.soundfont() : null;
-    const cacheKey = isMidi ? `${url}|${this.soundfontUrl || 'synth'}|${this.cacheVersion}|lib2` : null;
+    const cacheKey = isMidi ? `${url}|${this.soundfontUrl || 'synth'}|${this.cacheVersion}:assets${this.assetsRevision}|lib2` : null;
     if (cacheKey && this.renderCache) {
       const cached = await Promise.resolve(this.renderCache.get(cacheKey)).catch(() => null);
       if (cached?.channels?.length) return { buffer: this.bufferFromFrames(context, cached.channels, cached.rate), loop: cached.loop };
@@ -151,7 +151,7 @@ export class AudioManager {
     return { buffer, loop: this.lib.loopRegionFromTags(tags, buffer.sampleRate, buffer.duration) };
   }
 
-  // MIDI bytes -> stereo PCM frames. Prefers the library's worker render (mw_games 0.20+):
+  // MIDI bytes -> stereo PCM frames. Prefers the library's worker render (mwg 0.20+):
   // synthesising a real track costs seconds and would freeze the scene's frames on the main
   // thread. Bit-identical to the sync path, so the IndexedDB render cache stays valid across
   // the switch; a worker failure (or an older library) falls back loudly to the sync render.

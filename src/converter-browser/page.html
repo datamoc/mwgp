@@ -1,68 +1,79 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Convertir un jeu RPG Maker en MWGP, directement sur votre ordinateur, sans installation.">
-  <title>Convertisseur MWGP</title>
+  <meta name="description" content="Convert an RPG Maker game to MWGP, right on your computer, with no installation.">
+  <title>MWGP Converter</title>
   <style>
     :root{color-scheme:dark;font-family:"Segoe UI",system-ui,sans-serif;background:#10131b;color:#f4f6fb;--muted:#b7c1d5;--line:#38435a;--accent:#e8b84b}
-    *{box-sizing:border-box}body{margin:0}main{max-width:960px;margin:auto;padding:48px 28px 32px}header{border-bottom:2px solid var(--accent);padding-bottom:30px;margin-bottom:32px}header p{max-width:66ch;margin:14px 0 0;color:var(--muted);line-height:1.65}h1{font-size:clamp(30px,5vw,48px);letter-spacing:-.035em;margin:0}h2{font-size:20px;margin:0 0 20px}p{line-height:1.6}.version{font-size:13px;color:var(--muted);margin:0 0 14px}section{margin:0 0 30px}fieldset{margin:0;border:0;padding:0}legend{font-weight:650;font-size:20px;margin-bottom:20px}.workspace{display:grid;grid-template-columns:1fr 1fr;gap:36px}.source{padding:22px;border:1px solid var(--line);background:#191e2a;border-radius:10px}.source p{color:var(--muted);font-size:14px;margin-bottom:0;overflow-wrap:anywhere}button,.download{font:inherit;font-weight:650;cursor:pointer;border-radius:7px;padding:12px 20px;border:1px solid var(--line);background:#29354c;color:#fff;display:inline-block;text-decoration:none}button:hover:not(:disabled),.download:hover{filter:brightness(1.15)}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #a4bbff;outline-offset:4px}#run,.download{background:var(--accent);border-color:var(--accent);color:#1c202a}#cancel{background:transparent}.output-option{display:flex;align-items:flex-start;gap:10px;margin-bottom:16px;line-height:1.5;cursor:pointer}.output-option input{margin-top:6px;accent-color:var(--accent)}.output-option small{display:block;color:var(--muted)}.actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding-top:22px;border-top:1px solid var(--line)}.hint{font-size:14px;color:var(--muted)}#status{min-height:28px;margin-bottom:12px;overflow-wrap:anywhere}#status[data-kind=error]{color:#ffb4a8}#status[data-kind=success]{color:#b6e2c0}progress{width:100%;height:14px;accent-color:var(--accent)}#progress-label{display:block;color:var(--muted);font-size:13px;margin:10px 0;overflow-wrap:anywhere}#result{margin:24px 0 0;padding:22px;border-left:3px solid var(--accent);background:#191e2a}#result p{margin-top:0;overflow-wrap:anywhere}details{border-top:1px solid var(--line);padding-top:18px;margin-top:30px}summary{cursor:pointer;color:var(--muted)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6;max-height:300px;overflow:auto;background:#191e2a;padding:16px;border-radius:7px}footer{margin-top:32px;color:var(--muted);font-size:13px;line-height:1.6}input[type=file]{display:none}[hidden]{display:none!important}@media(max-width:650px){main{padding:28px 20px}.workspace{grid-template-columns:1fr;gap:24px}header{padding-bottom:24px;margin-bottom:24px}}
-  </style>
+    *{box-sizing:border-box}body{margin:0}main{max-width:960px;margin:auto;padding:48px 28px 32px}header{border-bottom:2px solid var(--accent);padding-bottom:30px;margin-bottom:32px}header p{max-width:66ch;margin:14px 0 0;color:var(--muted);line-height:1.65}h1{font-size:clamp(30px,5vw,48px);letter-spacing:-.035em;margin:0}h2{font-size:20px;margin:0 0 20px}p{line-height:1.6}.version{font-size:13px;color:var(--muted);margin:0 0 14px}section{margin:0 0 30px}fieldset{margin:0;border:0;padding:0}legend{font-weight:650;font-size:20px;margin-bottom:20px}.workspace{display:grid;grid-template-columns:1fr 1fr;gap:36px}.source{padding:22px;border:1px solid var(--line);background:#191e2a;border-radius:10px}.source p{color:var(--muted);font-size:14px;margin-bottom:0;overflow-wrap:anywhere}button,.download{font:inherit;font-weight:650;cursor:pointer;border-radius:7px;padding:12px 20px;border:1px solid var(--line);background:#29354c;color:#fff;display:inline-block;text-decoration:none}button:hover:not(:disabled),.download:hover{filter:brightness(1.15)}button:disabled{opacity:.45;cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible,select:focus-visible{outline:3px solid #a4bbff;outline-offset:4px}#run,.download{background:var(--accent);border-color:var(--accent);color:#1c202a}#cancel{background:transparent}.output-option{display:flex;align-items:flex-start;gap:10px;margin-bottom:16px;line-height:1.5;cursor:pointer}.output-option input{margin-top:6px;accent-color:var(--accent)}.output-option small{display:block;color:var(--muted)}.actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding-top:22px;border-top:1px solid var(--line)}.hint{font-size:14px;color:var(--muted)}#status{min-height:28px;margin-bottom:12px;overflow-wrap:anywhere}#status[data-kind=error]{color:#ffb4a8}#status[data-kind=success]{color:#b6e2c0}progress{width:100%;height:14px;accent-color:var(--accent)}#progress-label{display:block;color:var(--muted);font-size:13px;margin:10px 0;overflow-wrap:anywhere}#result{margin:24px 0 0;padding:22px;border-left:3px solid var(--accent);background:#191e2a}#result p{margin-top:0;overflow-wrap:anywhere}details{border-top:1px solid var(--line);padding-top:18px;margin-top:30px}summary{cursor:pointer;color:var(--muted)}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6;max-height:300px;overflow:auto;background:#191e2a;padding:16px;border-radius:7px}footer{margin-top:32px;color:var(--muted);font-size:13px;line-height:1.6}input[type=file]{display:none}[hidden]{display:none!important}.langbar{display:flex;justify-content:flex-end;margin-bottom:18px}.langbar select{background:#191e2a;color:#f4f6fb;border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;font-size:13px}@media(max-width:650px){main{padding:28px 20px}.workspace{grid-template-columns:1fr;gap:24px}header{padding-bottom:24px;margin-bottom:24px}}
+  .mwg-brand{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.mwg-powered{display:block;line-height:0}.mwg-powered svg{height:34px;width:auto;display:block}.mwg-support{display:inline-flex;align-items:center;height:34px;padding:0 12px;border:1px solid currentColor;border-radius:8px;text-decoration:none;font-size:.9rem;white-space:nowrap;color:inherit}
+</style>
 </head>
 <body>
 <main>
+  <div class="langbar">
+    <label><span data-i18n="lang_label">Language</span>
+      <select id="lang" aria-label="Language">
+        <option value="en">English</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+      </select>
+    </label>
+  </div>
   <header>
-    <p class="version">RPGM Player / Convertisseur CONVERTER_VERSION</p>
-    <h1>Votre jeu, au format MWGP.</h1>
-    <p>Choisissez un projet RPG Maker MV, MZ, XP, VX ou VX Ace. La conversion s’effectue sur cet ordinateur, dans votre navigateur. Vos fichiers restent ici.</p>
+    <p class="version">RPGM Player / <span data-i18n="kicker">Converter</span> CONVERTER_VERSION</p>
+    <h1 data-i18n="h1">Your game, in MWGP format.</h1>
+    <p data-i18n="intro">Choose an RPG Maker MV, MZ, XP, VX or VX Ace project. Conversion happens on this computer, in your browser. Your files stay here.</p>
+    <div class="mwg-brand" style="margin-top:18px"><a class="mwg-powered" href="https://datamoc.github.io/mwg/" target="_blank" rel="noopener noreferrer"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 196 38" width="196" height="38" role="img" aria-label="powered by mwg"><rect width="196" height="38" rx="10" fill="#0b0e14"/><text x="12" y="23.5" font-family="'JetBrains Mono','Cascadia Code',ui-monospace,Consolas,monospace" font-size="12.5" fill="#8b96a8">powered by</text><rect x="88" y="8" width="22" height="22" rx="3" fill="#0057b7"/><rect x="114" y="8" width="22" height="22" rx="3" fill="#ffd700"/><text x="166" y="26" font-family="'JetBrains Mono','Cascadia Code',ui-monospace,Consolas,monospace" font-size="26" font-weight="700" letter-spacing="0.5" fill="#eef1f6" text-anchor="middle" textLength="46" lengthAdjust="spacingAndGlyphs">mwg</text></svg></a><a class="mwg-support" href="https://buy.stripe.com/bJe8wOeUq4oZ2kXfyeaIM00" target="_blank" rel="noopener noreferrer" data-i18n="support">♥ Support the project</a></div>
   </header>
   <div class="workspace">
     <section aria-labelledby="source-heading">
-      <h2 id="source-heading">1. Choisir le jeu</h2>
+      <h2 id="source-heading" data-i18n="step1">1. Choose the game</h2>
       <div class="source">
-        <button id="choose" type="button">Choisir un dossier</button>
-        <input id="source" type="file" webkitdirectory multiple aria-label="Dossier du projet RPG Maker">
-        <p id="selection">Le dossier du jeu complet, avec ses données, ses scripts et ses ressources.</p>
+        <button id="choose" type="button" data-i18n="choose_folder">Choose a folder</button>
+        <input id="source" type="file" webkitdirectory multiple aria-label="RPG Maker project folder">
+        <p id="selection" data-i18n="selection_default">The complete game folder, with its data, scripts and resources.</p>
       </div>
     </section>
     <section>
       <fieldset id="output-options">
-        <legend>2. Enregistrer le résultat</legend>
-        <label class="output-option"><input type="radio" name="output" value="html" checked><span>Page HTML jouable<small>Le player et le jeu dans un seul fichier, compressés en gzip. Ouvrez-le pour jouer hors connexion.</small></span></label>
-        <label class="output-option"><input type="radio" name="output" value="zip"><span>Archive MWGP (ZIP)<small>À extraire pour le player local ou le Studio.</small></span></label>
-        <label class="output-option"><input id="folder-option" type="radio" name="output" value="folder"><span>Écrire dans un dossier<small id="folder-hint">Un nouveau sous-dossier sera créé à l’emplacement choisi.</small></span></label>
+        <legend data-i18n="step2">2. Save the result</legend>
+        <label class="output-option"><input type="radio" name="output" value="html" checked><span><span data-i18n="out_html">Playable HTML page</span><small data-i18n="out_html_hint">The player and the game in a single file, gzip-compressed. Open it to play offline.</small></span></label>
+        <label class="output-option"><input type="radio" name="output" value="zip"><span><span data-i18n="out_zip">MWGP archive (ZIP)</span><small data-i18n="out_zip_hint">Extract it for the local player or the Studio.</small></span></label>
+        <label class="output-option"><input id="folder-option" type="radio" name="output" value="folder"><span><span data-i18n="out_folder">Write to a folder</span><small id="folder-hint" data-i18n="out_folder_hint">A new subfolder will be created at the chosen location.</small></span></label>
       </fieldset>
     </section>
   </div>
   <section aria-label="Conversion">
-    <div class="actions"><button id="run" type="button" disabled>Convertir en MWGP</button><button id="cancel" type="button" hidden>Annuler</button></div>
-    <p class="hint">Les images, sons et autres ressources sont inclus dans le résultat.</p>
-    <p id="status" role="status" aria-live="polite">Sélectionnez le dossier d’un jeu pour commencer.</p>
+    <div class="actions"><button id="run" type="button" disabled data-i18n="run">Convert to MWGP</button><button id="cancel" type="button" hidden data-i18n="cancel">Cancel</button></div>
+    <p class="hint" data-i18n="hint">Images, sounds and other resources are included in the result.</p>
+    <p id="status" role="status" aria-live="polite" data-i18n="status_start">Select a game folder to start.</p>
     <div id="progress-area" hidden>
-      <progress id="progress" max="100" value="0" aria-label="Progression de la conversion"></progress>
+      <progress id="progress" max="100" value="0" aria-label="Conversion progress"></progress>
       <span id="progress-label"></span>
     </div>
-    <div id="result" hidden><p id="result-description"></p><a id="download" class="download" hidden>Télécharger le jeu converti</a></div>
+    <div id="result" hidden><p id="result-description"></p><a id="download" class="download" hidden data-i18n="download">Download the converted game</a></div>
   </section>
   <section aria-labelledby="studio-heading">
-    <h2 id="studio-heading">3. Studio autonome : recréer le dossier éditable</h2>
-    <p>À partir d’une page de jeu autoporteuse générée ci-dessus, recréez le dossier MWGP complet (<code>mwgp.json</code>, <code>assets/</code> et la base de conversion du Studio), sans serveur. Placez ensuite ce dossier parmi vos projets convertis pour l’ouvrir dans le Studio ou le lecteur local.</p>
+    <h2 id="studio-heading" data-i18n="studio_h">3. Standalone Studio: recreate the editable folder</h2>
+    <p data-i18n="studio_p">From a self-contained game page generated above, recreate the complete MWGP folder (mwgp.json, assets/ and the Studio conversion baseline), with no server. Then place that folder among your converted projects to open it in the Studio or the local player.</p>
     <div class="source">
-      <button id="studio-choose" type="button">Choisir une page de jeu (.html)</button>
-      <input id="studio-source" type="file" accept=".html,text/html" aria-label="Page de jeu autoporteuse">
-      <p id="studio-selection">La page HTML jouable d’un jeu converti, telle que téléchargée à l’étape précédente.</p>
+      <button id="studio-choose" type="button" data-i18n="studio_choose">Choose a game page (.html)</button>
+      <input id="studio-source" type="file" accept=".html,text/html" aria-label="Self-contained game page">
+      <p id="studio-selection" data-i18n="studio_selection">The playable HTML page of a converted game, as downloaded in the previous step.</p>
     </div>
     <div class="actions">
-      <button id="studio-folder" type="button" disabled>Écrire dans un dossier</button>
-      <button id="studio-zip" type="button" disabled>Télécharger un ZIP</button>
-      <a id="studio-download" class="download" hidden>Télécharger le dossier recréé</a>
+      <button id="studio-folder" type="button" disabled data-i18n="studio_folder">Write to a folder</button>
+      <button id="studio-zip" type="button" disabled data-i18n="studio_zip">Download a ZIP</button>
+      <a id="studio-download" class="download" hidden data-i18n="studio_download">Download the recreated folder</a>
     </div>
-    <p id="studio-status" role="status" aria-live="polite">Choisissez une page de jeu autoporteuse pour recréer son dossier.</p>
+    <p id="studio-status" role="status" aria-live="polite" data-i18n="studio_status">Choose a self-contained game page to recreate its folder.</p>
   </section>
-  <details><summary>Journal de conversion <span id="log-count"></span></summary><pre id="log" aria-label="Journal de conversion">Les étapes et les éventuelles limites de compatibilité apparaîtront ici.</pre></details>
-  <footer>La page HTML embarque le player et les ressources du jeu. La sortie MWGP en ZIP ou en dossier reste disponible pour le Studio. La conversion conserve les limites de compatibilité du convertisseur en ligne de commande.<br>Cette page fonctionne hors connexion. Une annulation peut laisser un dossier partiel ; relancez la conversion dans un nouveau dossier.</footer>
-  <details><summary>Logiciels libres et licences</summary><pre>THIRD_PARTY_NOTICES</pre></details>
+  <details><summary><span data-i18n="log_h">Conversion log</span> <span id="log-count"></span></summary><pre id="log" aria-label="Conversion log" data-i18n="log_default">The steps and any compatibility limits will appear here.</pre></details>
+  <footer data-i18n="footer">The HTML page embeds the player and the game's resources. MWGP output as ZIP or folder remains available for the Studio. Conversion keeps the command-line converter's compatibility limits. This page works offline. Cancelling may leave a partial folder; run the conversion again into a new folder.</footer>
+  <details><summary data-i18n="licences">Open-source software and licences</summary><pre>THIRD_PARTY_NOTICES</pre></details>
 </main>
 <script id="worker-source" type="application/octet-stream">WORKER_BASE64</script>
 <script type="module">/* CONTROLLER */</script>

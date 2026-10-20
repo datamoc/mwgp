@@ -1,4 +1,6 @@
 import { readManifestConverterVersion, isStaleConverterVersion } from '../tools/converter-version.mjs';
+import { saveStudioManifest, compareStudioManifest, loadStudioManifest, createStudioProject } from './studio-manifest.js';
+import { listStudioAssets, readStudioAsset, saveStudioAsset, isTextAsset } from './studio-assets.js';
 import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve, sep } from 'node:path';
@@ -41,7 +43,7 @@ const assetTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/
   '.wav': 'audio/wav', '.aac': 'audio/aac', '.flac': 'audio/flac', '.opus': 'audio/ogg', '.mid': 'audio/midi', '.wma': 'audio/x-ms-wma', '.sf2': 'audio/x-soundfont', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8' };
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const gamesRoot = join(root, 'RPGM_versions');
-const mwgpRoot = join(root, 'MWGP_versions');
+const mwgpRoot = resolve(process.env.MWGP_ROOT || join(root, 'MWGP_versions'));
 const publicRoot = join(root, 'public');
 const port = Number(process.env.RPGM_PORT || 4173);
 
@@ -153,6 +155,14 @@ async function sendJson(req, res, text, cacheKey) {
   return res.end(text);
 }
 
+function resolveProject(id) {
+  if (!listMwgp().some(item => item.id === id)) return { error: 'MWGP project not found' };
+  const name = Buffer.from(id, 'base64url').toString('utf8');
+  const manifest = join(mwgpRoot, name, 'mwgp.json');
+  if (!existsSync(manifest)) return { error: 'MWGP manifest not found' };
+  return { manifest };
+}
+
 function launchGame(id) {
   const game = listGames().find(item => item.id === id);
   if (!game) return { error: 'Game not found' };
@@ -164,11 +174,54 @@ function launchGame(id) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
+    const origin = req.headers.origin, site = req.headers['sec-fetch-site'];
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
+        origin && origin !== url.origin || site && !['same-origin', 'none'].includes(site)) {
+      return json(res, 403, { error: 'This action must originate from the local application' });
+    }
+  }
   if (url.pathname.startsWith('/web/')) {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
   }
   if (url.pathname === '/api/games' && req.method === 'GET') return json(res, 200, { rpgm: listGames(), mwgp: listMwgp() });
+  const studioAssets = /^\/api\/studio\/assets\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+  if (studioAssets && ['GET', 'POST'].includes(req.method)) {
+    const resolved = resolveProject(studioAssets[1]);
+    if (resolved.error) return json(res, 404, { error: resolved.error });
+    const folder = resolve(resolved.manifest, '..'), path = url.searchParams.get('path');
+    try {
+      if (req.method === 'GET' && path === null) return json(res, 200, await listStudioAssets(folder, url.searchParams.get('prefix') || ''));
+      if (!path) return json(res, 400, { error: 'Select a resource file' });
+      if (req.method === 'GET') {
+        const bytes = await readStudioAsset(folder, path, url.searchParams.get('version') || 'edited');
+        if (bytes === null) return json(res, 404, { error: 'Resource absent in this version' });
+        res.writeHead(200, { 'content-type': isTextAsset(path) ? 'text/plain; charset=utf-8' : assetTypes[extname(path).toLowerCase()] || 'application/octet-stream',
+          'cache-control': 'no-store' });
+        return res.end(bytes);
+      }
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of req) {
+        size += chunk.length;
+        if (size > 64 * 1024 * 1024) return json(res, 413, { error: 'Resource replacement exceeds 64 MiB' });
+        chunks.push(chunk);
+      }
+      const result = await saveStudioAsset(folder, path, Buffer.concat(chunks));
+      parsedManifests.delete(resolved.manifest);
+      // Resource changes also change the manifest's audio cache revision.
+      gzipped.clear();
+      return json(res, 200, { ok: true, ...result });
+    } catch (error) { return json(res, 400, { error: error.message }); }
+  }
+  const studioProject = /^\/api\/studio\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+  if (studioProject && req.method === 'GET') {
+    const resolved = resolveProject(studioProject[1]);
+    if (resolved.error) return json(res, 404, { error: resolved.error });
+    try { return json(res, 200, await loadStudioManifest(resolve(resolved.manifest, '..'))); }
+    catch (error) { return json(res, 500, { error: error.message }); }
+  }
   if (url.pathname.startsWith('/api/mwgp/') && req.method === 'GET') {
     const rest = decodeURIComponent(url.pathname.slice('/api/mwgp/'.length));
     const assetMarker = '/assets/';
@@ -181,13 +234,6 @@ const server = createServer(async (req, res) => {
       const type = assetTypes[extname(assetFile).toLowerCase()] || 'application/octet-stream';
       return sendFile(req, res, assetFile, type);
     }
-    const resolveProject = id => {
-      if (!listMwgp().some(item => item.id === id)) return { error: 'MWGP project not found' };
-      const name = Buffer.from(id, 'base64url').toString('utf8');
-      const manifest = join(mwgpRoot, name, 'mwgp.json');
-      if (!existsSync(manifest)) return { error: 'MWGP manifest not found' };
-      return { manifest };
-    };
     // Project ids are base64url (never contain '/'), so a '/maps/' or
     // '/index' suffix unambiguously marks a lazy-loading route (T119).
     const mapMarker = '/maps/';
@@ -214,6 +260,48 @@ const server = createServer(async (req, res) => {
     for await (const chunk of req) body += chunk;
     try { return json(res, 200, launchGame(JSON.parse(body).id)); }
     catch { return json(res, 400, { error: 'Invalid request' }); }
+  }
+  if (url.pathname === '/api/studio/init' && req.method === 'POST') {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    try {
+      const { name, title } = JSON.parse(body);
+      const folderName = String(name || '').trim();
+      if (!folderName || folderName.length > 64 || /[\\/:*?"<>|]|\.\./.test(folderName) || folderName.startsWith('.')) return json(res, 400, { error: 'Nom de projet invalide' });
+      const folder = resolve(mwgpRoot, folderName);
+      if (!folder.startsWith(resolve(mwgpRoot) + sep)) return json(res, 400, { error: 'Nom de projet invalide' });
+      if (existsSync(join(folder, 'mwgp.json'))) return json(res, 409, { error: 'Ce projet existe déjà' });
+      await createStudioProject(folder, String(title || folderName));
+      return json(res, 201, { ok: true, name: folderName, id: Buffer.from(folderName).toString('base64url') });
+    } catch (error) { return json(res, 500, { error: error.message || 'Création impossible' }); }
+  }
+  if (['/api/studio/save', '/api/studio/compare'].includes(url.pathname) && req.method === 'POST') {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    try {
+      const { id, manifest } = JSON.parse(body);
+      if (!id || !manifest) return json(res, 400, { error: 'Missing id or manifest' });
+      const resolved = resolveProject(id);
+      if (resolved.error) return json(res, 404, { error: resolved.error });
+      const targetFile = resolved.manifest;
+      const folder = resolve(targetFile, '..');
+      const name = basename(folder);
+      if (manifest.format !== 'MWGP' || !Array.isArray(manifest.maps)) {
+        return json(res, 400, { error: 'Invalid MWGP manifest' });
+      }
+      if (url.pathname === '/api/studio/compare') {
+        return json(res, 200, await compareStudioManifest(folder, manifest));
+      }
+      const protection = await saveStudioManifest(folder, manifest);
+      parsedManifests.delete(targetFile);
+      for (const key of gzipped.keys()) {
+        if (key.startsWith(targetFile)) gzipped.delete(key);
+      }
+      return json(res, 200, { ok: true, name, maps: manifest.maps.length, ...protection });
+    } catch (err) {
+      console.error('[studio save] error:', err);
+      return json(res, 500, { error: err.message || 'Could not save manifest' });
+    }
   }
   const webCache = /^\/api\/web-cache\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
   if (webCache && req.method === 'POST') {
@@ -318,7 +406,7 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/mwg.js') {
     res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
-    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'node_modules', '@datamoc', 'mw_games', 'dist', 'mw_games.global.js'))));
+    return res.end(await import('node:fs/promises').then(fs => fs.readFile(join(root, 'node_modules', '@datamoc', 'mwg', 'dist', 'mwg.global.js'))));
   }
   // Browsers request a favicon even when the page does not declare one.
   // Return an explicit empty response so console diagnostics contain only
