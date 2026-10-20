@@ -6,26 +6,27 @@ const MIME = {
   js: 'application/javascript', json: 'application/json', txt: 'text/plain',
 };
 
+// Base64 data URL of a file's byte parts, built when mwg first asks for it.
+// Pixi picks an image's parser from the data URL's type, which a blob: URL
+// does not carry. Building these up front held the whole image set as text
+// (about a gigabyte for a large game) and the browser refused the reads.
+function dataUrl(parts, type) {
+  let text = '';
+  for (const part of parts) for (let offset = 0; offset < part.length; offset += 0x8000) text += String.fromCharCode(...part.subarray(offset, offset + 0x8000));
+  return `data:${type};base64,${btoa(text)}`;
+}
+
 // A local host for the normal player's API and MWG compiled-resource map.
-// MWG/Pixi's compiled texture loader expects typed data URLs; other resources
-// use Blob URLs. The original bytes remain available to the local fetch host.
+// The files are the byte parts the page unpacked; images become data URLs and
+// other files typed Blob URLs, each made on first use. The original bytes
+// remain available to the local fetch host.
 export async function createStandaloneHost(files, metadata) {
   const nativeFetch = globalThis.fetch.bind(globalThis);
-  const lookup = new Map([...files].map(([name, blob]) => [name.toLowerCase(), blob]));
+  const lookup = new Map([...files].map(([name, parts]) => [name.toLowerCase(), parts]));
   const urls = new Map();
-  for (const [name, blob] of lookup) {
-    const type = MIME[name.split('.').pop()];
-    if (!type?.startsWith('image/')) continue;
-    const uri = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error);
-      reader.readAsDataURL(new Blob([blob], { type }));
-    });
-    urls.set(name, uri);
-  }
+  const blobOf = (parts, type) => new Blob(parts, type ? { type } : {});
   const id = metadata.id, apiRoot = `/api/mwgp/${id}`;
-  const manifest = JSON.parse(await files.get('mwgp.json').text());
+  const manifest = JSON.parse(await blobOf(files.get('mwgp.json')).text());
   // Keep saves stable across re-export, and separate from other games and the
   // server player (RGSS's normal output directory may be called just "output").
   manifest.source.projectName = id;
@@ -43,12 +44,11 @@ export async function createStandaloneHost(files, metadata) {
     } catch { return null; }
   }
   function fileUrl(name) {
-    const key = name.toLowerCase(), blob = lookup.get(key);
-    if (!blob) return undefined;
+    const key = name.toLowerCase(), parts = lookup.get(key);
+    if (!parts) return undefined;
     if (!urls.has(key)) {
-      const extension = name.split('.').pop().toLowerCase();
-      const typed = new Blob([blob], { type: MIME[extension] || 'application/octet-stream' });
-      urls.set(key, URL.createObjectURL(typed));
+      const type = MIME[name.split('.').pop().toLowerCase()] || 'application/octet-stream';
+      urls.set(key, type.startsWith('image/') ? dataUrl(parts, type) : URL.createObjectURL(blobOf(parts, type)));
     }
     return urls.get(key);
   }
@@ -70,8 +70,8 @@ export async function createStandaloneHost(files, metadata) {
       const map = manifest.maps.find(map => Number(map.id) === Number(path.split('/').pop()));
       return map ? Response.json(map) : new Response(null, { status: 404 });
     }
-    const name = fileName(url), blob = name && lookup.get(name.toLowerCase());
-    if (blob) return new Response(method === 'HEAD' ? null : blob, { headers: { 'Content-Type': MIME[name.split('.').pop().toLowerCase()] || 'application/octet-stream' } });
+    const name = fileName(url), parts = name && lookup.get(name.toLowerCase());
+    if (parts) return new Response(method === 'HEAD' ? null : blobOf(parts), { headers: { 'Content-Type': MIME[name.split('.').pop().toLowerCase()] || 'application/octet-stream' } });
     // Missing optional files (including the server's shared SoundFont) are
     // answered locally. A standalone game never contacts a remote server.
     return new Response(null, { status: 404, statusText: 'Not in standalone game' });

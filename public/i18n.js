@@ -142,7 +142,7 @@ Object.assign(T.en, {
   sa_open_choose: 'Open a game page…', sa_open_new: 'New blank project', sa_use_new: 'Use “New blank project” on the standalone opening screen.',
   sa_new_prompt: 'Name of the new project:', sa_new_fallback: 'New project', sa_download_page: '⬇ Game page (.html)',
   sa_download_title: 'Download the self-contained game page with your edits', sa_no_gzip: 'This browser does not support gzip decompression.',
-  sa_not_standalone: 'This file is not a self-contained MWGP game page.', sa_truncated: 'The game content is truncated.',
+  sa_not_standalone: 'This file is not a self-contained MWGP game page.', sa_truncated: 'The game content is truncated.', sa_too_large: 'This page is too large to open here. Use the standalone player to play it.',
   sa_bad_index: 'Invalid game index.', sa_unknown_format: 'Unknown game format.', sa_bad_entry: 'Invalid game entry.',
   sa_trailing: 'Unexpected content after the game.', sa_no_manifest: 'The game page contains no MWGP manifest.',
 });
@@ -152,7 +152,7 @@ Object.assign(T.fr, {
   sa_open_choose: 'Ouvrir une page de jeu…', sa_open_new: 'Nouveau projet vierge', sa_use_new: 'Utilisez « Nouveau projet vierge » de l’écran d’ouverture autonome.',
   sa_new_prompt: 'Nom du nouveau projet :', sa_new_fallback: 'Nouveau projet', sa_download_page: '⬇ Page de jeu (.html)',
   sa_download_title: 'Télécharger la page de jeu autoporteuse avec vos éditions', sa_no_gzip: 'Ce navigateur ne prend pas en charge la décompression gzip.',
-  sa_not_standalone: 'Ce fichier n’est pas une page de jeu MWGP autoporteuse.', sa_truncated: 'Le contenu du jeu est tronqué.',
+  sa_not_standalone: 'Ce fichier n’est pas une page de jeu MWGP autoporteuse.', sa_truncated: 'Le contenu du jeu est tronqué.', sa_too_large: 'Cette page est trop volumineuse pour être ouverte ici. Utilisez le lecteur autonome pour y jouer.',
   sa_bad_index: 'Index de jeu invalide.', sa_unknown_format: 'Format de jeu inconnu.', sa_bad_entry: 'Entrée de jeu invalide.',
   sa_trailing: 'Contenu inattendu après le jeu.', sa_no_manifest: 'La page de jeu ne contient pas de manifeste MWGP.',
 });
@@ -162,7 +162,7 @@ Object.assign(T.de, {
   sa_open_choose: 'Spielseite öffnen…', sa_open_new: 'Neues leeres Projekt', sa_use_new: 'Verwenden Sie „Neues leeres Projekt“ auf dem Startbildschirm des eigenständigen Studios.',
   sa_new_prompt: 'Name des neuen Projekts:', sa_new_fallback: 'Neues Projekt', sa_download_page: '⬇ Spielseite (.html)',
   sa_download_title: 'Eigenständige Spielseite mit Ihren Änderungen herunterladen', sa_no_gzip: 'Dieser Browser unterstützt keine gzip-Dekompression.',
-  sa_not_standalone: 'Diese Datei ist keine eigenständige MWGP-Spielseite.', sa_truncated: 'Der Spielinhalt ist abgeschnitten.',
+  sa_not_standalone: 'Diese Datei ist keine eigenständige MWGP-Spielseite.', sa_truncated: 'Der Spielinhalt ist abgeschnitten.', sa_too_large: 'Diese Seite ist zu groß, um sie hier zu öffnen. Nutzen Sie den eigenständigen Player zum Spielen.',
   sa_bad_index: 'Ungültiger Spielindex.', sa_unknown_format: 'Unbekanntes Spielformat.', sa_bad_entry: 'Ungültiger Spieleintrag.',
   sa_trailing: 'Unerwarteter Inhalt nach dem Spiel.', sa_no_manifest: 'Die Spielseite enthält kein MWGP-Manifest.',
 });

@@ -9,7 +9,12 @@ function base64(bytes) {
   return btoa(text);
 }
 
-export async function standaloneOutput(entries, name, project, engine, progress) {
+// V8 cannot hold a string longer than about 512M characters, and a larger
+// <script> text reads back empty in the browser. The payload is therefore
+// written as several <script data-mwgp-payload> elements, each capped here.
+const PAYLOAD_PART_CHARS = 64 * 1024 * 1024;
+
+export async function standaloneOutput(entries, name, project, engine, progress, payloadPartChars = PAYLOAD_PART_CHARS) {
   const files = runtimeFiles.map(([path, text]) => ({ path, blob: new Blob([text]) }));
   for (const [path, entry] of entries) {
     const relative = path.slice(outputRoot.length + 1);
@@ -39,11 +44,17 @@ export async function standaloneOutput(entries, name, project, engine, progress)
   const versionedBefore = before
     .replace(/<meta name="mwgp-player-version" content="[^"]*">/, `<meta name="mwgp-player-version" content="${playerVersion}">`)
     .replace(/(id="player-version"[^>]*>Player MWGP )[^<]*/, `$1${playerVersion}`);
-  const parts = [versionedBefore, '<script id="mwgp-payload" type="application/octet-stream">\n'];
+  const parts = [versionedBefore];
+  let partChars = 0;
+  const openPart = () => { parts.push('<script data-mwgp-payload type="application/octet-stream">\n'); partChars = 0; };
+  openPart();
   let compressedBytes = 0;
+  // Each gzip chunk is its own padded base64 line, so a new element starts only between lines.
   const gzip = new Gzip({ level: 6, mtime: 0 }, chunk => {
     compressedBytes += chunk.length;
-    parts.push(base64(chunk), '\n');
+    const line = base64(chunk);
+    if (partChars > 0 && partChars + line.length > payloadPartChars) { parts.push('</script>\n'); openPart(); }
+    parts.push(line, '\n'); partChars += line.length + 1;
   });
   gzip.push(size); gzip.push(header);
   let done = 0, lastProgress = 0;
