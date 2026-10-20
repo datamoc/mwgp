@@ -966,8 +966,12 @@ export async function convertRgss(extractedArg, outputArg, flags = []) {
     const mapInfo = isVxLike
       ? { name: String(field(unwrap(mapInfoHash.get(id)), 'name', '') || '') }
       : unwrap(mapInfoHash.get(id)) || null;
+    // XP draws a troop uniformly from encounter_list (an array of troop ids); the MV shape gives every entry the same weight.
+    const xpEncounters = field(sourceMap, 'encounter_list', []);
+    const encounterList = (Array.isArray(xpEncounters) ? xpEncounters : []).map(troopId => ({ troopId: Number(troopId), weight: 10, regionSet: [] })).filter(entry => entry.troopId > 0);
     maps.push({ id, info: mapInfo, data: {
       width, height, data: layers.flat(), tilesetId: isVx ? 0 : Number(field(sourceMap, 'tileset_id', 0)),
+      encounterList, encounterStep: Number(field(sourceMap, 'encounter_step', 30)) || 30,
       autoplayBgm: Boolean(field(sourceMap, 'autoplay_bgm', false)),
       bgm: bgm ? { name: field(bgm, 'name', ''), volume: Number(field(bgm, 'volume', 100)), pitch: Number(field(bgm, 'pitch', 100)) } : null,
       autoplayBgs: Boolean(field(sourceMap, 'autoplay_bgs', false)),

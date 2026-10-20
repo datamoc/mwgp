@@ -2221,6 +2221,7 @@ try {
       '@data': O('Table', { '@raw': tableBytes(6, 5, 3, i => (i < 30 ? 2816 : (i === 30 ? 20 : (i === 61 ? 1 : 0)))) }),
       '@events': new Map([[1, O('RPG::Event', { '@id': 1, '@name': 'Greeter', '@x': 2, '@y': 3,
         '@pages': [pageOf(list, O('RPG::Event::Page::Graphic', { '@character_name': 'Hero', '@character_index': 0, '@direction': 2, '@pattern': 1 }))] })]]),
+      '@encounter_list': [3, 5], '@encounter_step': 20,
       '@bgm': audioFile('Town1'), '@autoplay_bgm': true, '@bgs': audioFile(''), '@autoplay_bgs': false
     };
     if (isAce) mapIv['@tileset_id'] = 1;
@@ -2357,6 +2358,7 @@ try {
       strongly(one(c => c.messageOptions) !== undefined, 'XP 104 keeps message options');
       strongly(one(c => c.scroll?.text === 'scroll line') !== undefined, 'XP 105 scrolls with 405 lines');
       strongly(one(c => c.battle?.troopId === 7) !== undefined, 'XP 301 keeps its troop');
+      strongly(m.maps[0].data.encounterStep === 20 && JSON.stringify(m.maps[0].data.encounterList) === JSON.stringify([{ troopId: 3, weight: 10, regionSet: [] }, { troopId: 5, weight: 10, regionSet: [] }]), 'XP encounter_list and encounter_step reach the map data');
       strongly(one(c => c.modifyVariable?.operand?.gameData?.kind === 'partySize') !== undefined, 'XP 122-kind7 index 1 reads the stock party size');
       strongly(m.maps[0].mwgEvents[0].pages[0].commands[2]?.then?.[0]?.changeItem?.id === 5, 'XP 126 changes items like stock XP');
       strongly(one(c => c.changeParty?.actorId === 2 && c.changeParty.add === true) !== undefined, 'XP 129 changes the party');
