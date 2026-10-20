@@ -1,0 +1,49 @@
+name: Publish to npm (staged)
+
+# Manual publication only. The workflow uploads a *staged* version; a
+# maintainer then approves it on npmjs.com with MFA before it goes live.
+# First publication of the package stays manual (npm publish, with OTP).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish; must match package.json exactly"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Use a staged-publishing capable npm
+        run: npm install -g npm@latest
+      - name: Confirm the requested version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "${{ inputs.version }}" ]; then
+            echo "Version mismatch: package.json is $PKG_VERSION, requested ${{ inputs.version }}" >&2
+            exit 1
+          fi
+          echo "Publishing staged version $PKG_VERSION"
+      - run: npm ci
+      - name: Regenerate the single-file browser versions shipped in the package
+        run: |
+          npm run export:converter
+          npm run export:studio
+      - name: Upload the staged version (goes live only after MFA approval on npmjs.com)
+        run: npm publish --stage --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Next step
+        run: echo "Staged mwgp@${{ inputs.version }}. Approve it on https://www.npmjs.com/package/mwgp (Staged versions) with MFA to publish it."
