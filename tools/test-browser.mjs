@@ -23,6 +23,7 @@ import os from 'node:os';
 import { join, resolve } from 'node:path';
 import { filterResumedMaps, parseResumeSkips, pruneProjectLines } from './resume-log.mjs';
 import { requireConvertedGames } from './test-games.mjs';
+import { checkMapFeatures } from './map-feature-checks.mjs';
 // Progress log: one line per booted map, flushed synchronously so an
 // interrupted run still shows how far it got. The console output may be
 // piped through tail (invisible until the end); this file is the live view.
@@ -789,10 +790,18 @@ for (const name of webBuilds) {
 const titleResult = projects.length ? await checkTitleScreen(projects[0]) : { ok: true, reason: 'no MWGP project' };
 if (projects.length) console.log(`  ${titleResult.ok ? 'PASS' : 'FAIL'}  title screen (${projects[0]})${titleResult.reason ? ` - ${titleResult.reason}` : ''}`);
 
+// Map features (random encounters, dash, gamepad, followers, the map name band, weather) on a made-up project served
+// by a second server; MWGP_SMOKE_MAPFEATURES=0 skips them, and then the summary says so.
+const mapFeatures = process.env.MWGP_SMOKE_MAPFEATURES === '0'
+  ? { ok: true, results: [], notRun: 'MWGP_SMOKE_MAPFEATURES=0' }
+  : await checkMapFeatures(browser, { port: port + 1 });
+if (mapFeatures.notRun) console.log(`  NOT RUN (loud): map features - ${mapFeatures.notRun}`);
+for (const result of mapFeatures.results) console.log(`  ${result.ok ? 'PASS' : 'FAIL'}  map feature: ${result.name}${result.detail ? ` - ${result.detail}` : ''}`);
+
 await browser.close();
 if (startedServer) server.kill();
 
-const failed = results.filter(result => !result.ok).concat(titleResult.ok ? [] : [titleResult]).concat(mapSweeps.filter(sweep => sweep.problems.length)).concat(soaks.filter(result => result.errors.length)).concat(actionSoaks.filter(result => result.errors.length)).concat(webResults.filter(result => !result.ok));
+const failed = results.filter(result => !result.ok).concat(titleResult.ok ? [] : [titleResult]).concat(mapFeatures.ok ? [] : [mapFeatures]).concat(mapSweeps.filter(sweep => sweep.problems.length)).concat(soaks.filter(result => result.errors.length)).concat(actionSoaks.filter(result => result.errors.length)).concat(webResults.filter(result => !result.ok));
 const withErrors = results.filter(result => result.ok && result.errors.length);
 console.log(`\nBrowser smoke: ${results.length - results.filter(result => !result.ok).length}/${results.length} booted, ${withErrors.length} with console errors, ${webResults.filter(result => result.ok).length}/${webResults.length} web build(s) played, ${failed.length ? `${failed.length} failed` : 'no failures'}`);
 if (failed.length || withErrors.length) process.exit(1);
