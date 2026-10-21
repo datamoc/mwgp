@@ -45,6 +45,7 @@ npm run validate:mwgp -- "MWGP_versions\<project>\mwgp.json"
 npm run plugins:coverage -- "RPGM_versions\<project>" [--md|--json]   # which plugins hook layers the player runs itself, and what mwg offers there (docs/plugin-coverage.md)
 npm run rgss:api -- "RPGM_versions/<project>/Game.exe" --out docs/rgss-api-xp.json        # RGSS class/method surface, from strings only
 npm run rgss:coverage -- "MWGP_versions/<project>/mwgp.json" --out docs/rgss-shim-coverage.md  # what the Ruby uses vs what the shim has
+npm run migrate:manifest -- "MWGP_versions/<project>/mwgp.json" "RPGM_versions/<project>"   # XP encounter fields into an old manifest, no reconversion
 ```
 
 `rgss:api` reads the plain-text strings of a runtime binary (no disassembly). Pokemon Void's `RGSS104E.dll` is
@@ -502,8 +503,23 @@ from `encounter_list`/`encounter_step` (XP, `convert-rgss.js`, equal weights).
   `encounterProgressValue` is among them, the sandbox runs the game's own method on a bare player; any failure warns once
   and the stock rule runs. `makeEncounterCount` and `makeEncounterTroopId` are detected but not delegated yet, and
   dashing and followers stay native. Manifests converted before this have no `mapHooks`: reconvert to use them.
-- **Not done**: the party's encounter-ability traits (no encounters, half encounters) are not read; preemptive and
-  surprise battles are not modelled (`runBattle` has no such rule); the left stick uses mwg's default axis threshold.
+- **Encounter abilities and first strikes**: `partyAbilities` (`battle.js`) reads the party's trait code 64 (no
+  encounters, half encounters, cancel surprise, raise preemptive) on fresh battlers, never writing a record. A random
+  encounter rolls its first strike as `BattleManager.onEncounter` does (`rollFirstStrike`, `map-rules.js`): a preemptive
+  turn lets only the party act and the escape succeeds, a surprise turn lets only the troop act. Event battles are not
+  affected.
+- **Gamepad stick**: mwg reads every axis against a fixed 0.5 threshold, the same as the engine's; it is not
+  configurable. The player binds only axes 0 and 1 (the left stick).
+- **Not done**: the gold and item doubling of trait 64 (ids 4 and 5) is not applied; the MZ turn-based battles ignore the
+  first strike, as the engine does.
+
+Older manifests: the list of overridden methods is read again from the plugin sources when a manifest has no `mapHooks`
+(`map-hooks.js`). XP encounter fields of an existing manifest are filled by `npm run migrate:manifest -- <mwgp.json>
+<game folder>` (refuses Studio projects; keeps the stamps). A manifest that predates the encounter overrides still misses
+the plugins no event reached: reconvert that game to pick them up.
+
+Browser checks: `tools/map-feature-checks.mjs` runs on a made-up project (`tools/synthetic-mv-project.mjs`) served from a
+temporary root by a second server, inside `tools/test-browser.mjs`. `MWGP_SMOKE_MAPFEATURES=0` skips it.
 
 ### Event scripts (Ruby in XP/VX/Ace events, JavaScript in MV/MZ events)
 
