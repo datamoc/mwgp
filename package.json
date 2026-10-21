@@ -1,6 +1,6 @@
 {
   "name": "mwgp",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "description": "Play and edit RPG Maker games (MV, MZ, XP, VX, VX Ace) in any browser: converter, player and graphical Studio, with Node or as single self-contained HTML files.",
   "homepage": "https://datamoc.github.io/mwgp/",
