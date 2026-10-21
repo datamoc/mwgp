@@ -142,6 +142,18 @@ function base64(bytes) {
   return btoa(text);
 }
 
+// The size gate (gate.js) reads its data from the head: a page over its limit stops before its payload. A regenerated page
+// carries the current payload size (the limit it was made with is kept), and a page that has no gate gets the gate's
+// element in front of its payload.
+const LARGE_PAGE_LIMIT = 100 * 1024 * 1024;
+function withSizeData(head, bytes, id, gate) {
+  const limit = head.match(/<meta name="mwgp-payload-limit" content="(\d+)"/)?.[1] ?? String(LARGE_PAGE_LIMIT);
+  let result = head.replace(/<meta name="mwgp-payload-(?:bytes|limit|id)" content="[^"]*">/g, '');
+  result = result.replace('</head>', () => `<meta name="mwgp-payload-bytes" content="${bytes}"><meta name="mwgp-payload-limit" content="${limit}"><meta name="mwgp-payload-id" content="${id}"></head>`);
+  if (gate && !result.includes('<script id="mwgp-gate">')) result += gate;
+  return result;
+}
+
 export function installStudioHost(runtime) {
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const nativeOpen = globalThis.open.bind(globalThis);
@@ -194,6 +206,24 @@ export function installStudioHost(runtime) {
     return { metadata, files, pageText };
   }
 
+  // An unpacked game folder: the index file the unpacking wrote, and the game's files next to it.
+  async function unpackFolder(root) {
+    const header = await root.getFileHandle('.mwgp-standalone.json').catch(() => null);
+    if (!header) throw new Error(t('sa_not_standalone'));
+    const metadata = JSON.parse(await (await header.getFile()).text());
+    if (metadata.format !== 'MWGP-standalone' || metadata.version !== 1) throw new Error(t('sa_unknown_format'));
+    const files = new Map();
+    async function walk(directory, prefix) {
+      for await (const [name, handle] of directory.entries()) {
+        const path = prefix + name;
+        if (handle.kind === 'directory') await walk(handle, `${path}/`);
+        else if (path !== '.mwgp-standalone.json') files.set(path, await handle.getFile());
+      }
+    }
+    await walk(root, '');
+    if (!files.has('mwgp.json')) throw new Error(t('sa_no_manifest'));
+    return { metadata, files, pageText: null };
+  }
   async function loadProject(game, fileName) {
     state.files = new Map(game.files);
     state.original = new Map(game.files);
@@ -232,6 +262,7 @@ export function installStudioHost(runtime) {
       <p id="studio-open-error" style="color:#ff9d97;min-height:20px;"></p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;">
         <button id="studio-open-choose" style="background:#d2a35b;color:#0d1117;border:1px solid #b78343;padding:9px 16px;border-radius:6px;font-weight:700;cursor:pointer;">${t('sa_open_choose')}</button>
+        ${typeof window.showDirectoryPicker === 'function' ? `<button id="studio-open-folder" style="background:#21262d;color:#f0f6fc;border:1px solid #30363d;padding:9px 16px;border-radius:6px;font-weight:600;cursor:pointer;">${t('sa_open_folder')}</button>` : ''}
         <button id="studio-open-new" style="background:#21262d;color:#f0f6fc;border:1px solid #30363d;padding:9px 16px;border-radius:6px;font-weight:600;cursor:pointer;">${t('sa_open_new')}</button>
       </div>
       <input id="studio-open-file" type="file" accept=".html,text/html" hidden>
@@ -247,6 +278,14 @@ export function installStudioHost(runtime) {
         overlay.remove(); resolveReady();
       } catch (error) { overlay.querySelector('#studio-open-error').textContent = error.message; }
     };
+    // A game folder unpacked by a large page (gate.js): the folder itself is the game.
+    overlay.querySelector('#studio-open-folder')?.addEventListener('click', async () => {
+      try {
+        const root = await window.showDirectoryPicker({ mode: 'read' });
+        await loadProject(await unpackFolder(root), root.name);
+        overlay.remove(); resolveReady();
+      } catch (error) { overlay.querySelector('#studio-open-error').textContent = error.message; }
+    });
     overlay.querySelector('#studio-open-new').onclick = () => {
       const title = prompt(t('sa_new_prompt'), t('my_game'));
       if (title === null) return;
@@ -282,12 +321,12 @@ export function installStudioHost(runtime) {
     // string limit (see standalone.js). Only the page's head and tail are
     // strings; the payload is spliced in as Blob parts, never as one string.
     const elements = [];
-    let lines = [], lineChars = 0;
+    let lines = [], lineChars = 0, payloadChars = 0;
     const closeElement = () => { elements.push(`<script data-mwgp-payload type="application/octet-stream">\n${lines.join('')}</script>\n`); lines = []; lineChars = 0; };
     for (let offset = 0; offset < bytes.length; offset += 512 * 1024) {
       const line = base64(bytes.subarray(offset, offset + 512 * 1024)) + '\n';
       if (lineChars > 0 && lineChars + line.length > PAYLOAD_PART_CHARS) closeElement();
-      lines.push(line); lineChars += line.length;
+      lines.push(line); lineChars += line.length; payloadChars += line.length;
     }
     closeElement();
     let head, tail;
@@ -305,7 +344,8 @@ export function installStudioHost(runtime) {
     // line, both before the payload): restamp it so the page agrees with its payload.
     head = head.replace(/<meta name="mwgp-player-version" content="[^"]*">/, `<meta name="mwgp-player-version" content="${playerVersion}">`)
       .replace(/(id="player-version"[^>]*>Player MWGP )[^<]*/, `$1${playerVersion}`);
-    return new Blob([head, ...elements, tail], { type: 'text/html;charset=utf-8' });
+    const gate = runtime.shell.match(/<script id="mwgp-gate">[\s\S]*?<\/script>/)?.[0] || '';
+    return new Blob([withSizeData(head, payloadChars, state.id, gate), ...elements, tail], { type: 'text/html;charset=utf-8' });
   }
 
   const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });

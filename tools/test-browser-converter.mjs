@@ -167,6 +167,109 @@ async function checkLargePage(browser, playablePath, playableHtml, engine) {
   }
 }
 
+// The standalone Studio opens a large page (directly, or the folder a large page unpacked) and regenerates it: the
+// regenerated page declares its payload size, keeps the limit and the id, and carries the size gate, so it stops like the
+// page it came from and starts with ?force=1. The folder is opened through a picker, which the test stands in for with
+// the browser's private storage (where the game page unpacked it).
+async function checkLargeStudio(browser, { work, studioHtml }) {
+  const playable = join(work, 'mv-play.html');
+  const playableHtml = await readFile(playable, 'utf8');
+  const large = playableHtml.replace(/(<meta name="mwgp-payload-limit" content=")\d+"/, '$11000"');
+  const largePath = join(work, 'mv-large-source.html');
+  await writeFile(largePath, large, 'utf8');
+  const pages = { '/large.html': large, '/studio.html': await readFile(studioHtml, 'utf8') };
+  const server = createServer((request, response) => {
+    const body = pages[new URL(request.url, 'http://127.0.0.1').pathname];
+    if (body === undefined) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(body);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const context = await browser.newContext({ acceptDownloads: true });
+  await context.addInitScript(() => { try { localStorage.setItem('mwgp-lang', 'fr'); } catch { /* no storage */ } });
+  await context.addInitScript(() => {
+    if (location.pathname === '/studio.html') window.showDirectoryPicker = () => navigator.storage.getDirectory();
+    else delete window.showDirectoryPicker;
+  });
+  const errors = [];
+  const regenerate = async (studio, dialogue) => {
+    await studio.locator('#map-canvas').click({ position: { x: 16, y: 16 } });
+    const sayBox = studio.locator('.cmd-box[data-type="say"] textarea');
+    await sayBox.waitFor({ timeout: 30000 });
+    await sayBox.fill(dialogue);
+    await studio.locator('#btn-apply-event').click();
+    await studio.locator('#btn-save').click();
+    await studio.waitForFunction(() => document.querySelector('#toast').textContent.includes('sauvegardé'), null, { timeout: 30000 });
+    const download = studio.waitForEvent('download');
+    await studio.locator('#studio-download-game').click();
+    const saved = await download;
+    const path = join(work, `regenerated-${Date.now()}.html`);
+    await saved.saveAs(path);
+    return path;
+  };
+  // The regenerated page: its declared size is its payload, the limit and id are right, it carries the gate, and it runs
+  // its edit. A page still over its limit stops first and starts with ?force=1; a page under it starts directly.
+  const assertRegenerated = async (path, dialogue, label, { limit, overLimit }) => {
+    const html = await readFile(path, 'utf8');
+    const packed = unpackStandalone(html);
+    const declared = Number(html.match(/<meta name="mwgp-payload-bytes" content="(\d+)"/)?.[1]);
+    const payloadLength = [...html.matchAll(/<script data-mwgp-payload type="application\/octet-stream">\n([\s\S]*?)<\/script>/g)].reduce((sum, match) => sum + match[1].length, 0);
+    assert.equal(declared, payloadLength, `${label}: the regenerated page declares its payload size`);
+    assert.equal(html.match(/<meta name="mwgp-payload-limit" content="(\d+)"/)?.[1], String(limit), `${label}: the limit is kept`);
+    assert.equal(html.match(/<meta name="mwgp-payload-id" content="([^"]+)"/)?.[1], packed.metadata.id, `${label}: the id matches the payload`);
+    assert.ok(html.includes('<script id="mwgp-gate">'), `${label}: the regenerated page carries the size gate`);
+    const say = JSON.parse(packed.files.get('mwgp.json')).maps[0].mwgEvents[0].pages[0].commands.find(command => typeof command.say === 'string');
+    assert.equal(say.say, dialogue, `${label}: the edit is inside`);
+    const opened = await context.newPage();
+    opened.on('pageerror', error => errors.push(error.message));
+    await opened.goto(pathToFileURL(path).href, { waitUntil: 'commit' });
+    if (overLimit) {
+      await opened.waitForFunction(() => document.body?.textContent.includes('This game page is'), null, { timeout: 60000 });
+      await opened.goto(`${pathToFileURL(path).href}?force=1`);
+    }
+    await opened.getByRole('button', { name: 'New Game', exact: true }).click({ timeout: 90000 });
+    await opened.waitForFunction(() => Boolean(globalThis.__MWG__?.currentScene?.mover), null, { timeout: 90000 });
+    assert.deepEqual(errors, [], `${label}: no page errors`);
+    await opened.close();
+  };
+  try {
+    // 1. The Studio opens the large page itself.
+    const direct = await context.newPage();
+    direct.on('pageerror', error => errors.push(error.message));
+    await direct.goto(pathToFileURL(studioHtml).href);
+    await direct.locator('#studio-open-file').setInputFiles(largePath);
+    await direct.waitForFunction(() => document.querySelectorAll('#map-list .item-row').length > 0, null, { timeout: 90000 });
+    const directPath = await regenerate(direct, 'Dialogue depuis une grosse page.');
+    await assertRegenerated(directPath, 'Dialogue depuis une grosse page.', 'large page', { limit: 1000, overLimit: true });
+    console.log('PASS standalone Studio: a large page opens, is edited, and regenerates with the size gate');
+    await direct.close();
+
+    // 2. The game page unpacks the game into private storage; the Studio opens that folder and regenerates it.
+    const unpacking = await context.newPage();
+    await unpacking.goto(`${base}/large.html`, { waitUntil: 'commit' });
+    await unpacking.waitForFunction(() => document.body?.textContent.includes('This game page is'), null, { timeout: 60000 });
+    await unpacking.locator('#gate-panel button', { hasText: 'Unpack this game' }).click();
+    await unpacking.waitForFunction(() => document.querySelector('#gate-status')?.textContent.includes('Now select'), null, { timeout: 30000 });
+    await unpacking.locator('#gate-status button').click();
+    await unpacking.locator('#gate-panel input[type=file]').setInputFiles(playable);
+    await unpacking.waitForFunction(() => Boolean(globalThis.mwgpStandalone), null, { timeout: 180000 });
+    await unpacking.close();
+    const studio = await context.newPage();
+    studio.on('pageerror', error => errors.push(error.message));
+    await studio.goto(`${base}/studio.html`);
+    await studio.locator('#studio-open-folder').click();
+    await studio.waitForFunction(() => document.querySelectorAll('#map-list .item-row').length > 0, null, { timeout: 90000 });
+    const folderPath = await regenerate(studio, 'Dialogue depuis un dossier décompressé.');
+    await assertRegenerated(folderPath, 'Dialogue depuis un dossier décompressé.', 'unpacked folder', { limit: 104857600, overLimit: false });
+    console.log('PASS standalone Studio: an unpacked game folder opens, is edited, and regenerates with the size gate');
+    await studio.close();
+  } finally {
+    await context.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 function unpackStandalone(html) {
   const payloads = [...html.matchAll(PAYLOAD_ELEMENT)];
   assert.ok(payloads.length, 'standalone contains a compressed payload');
@@ -564,5 +667,6 @@ try {
     assert.deepEqual(studioErrors, [], 'standalone studio has no page errors');
     console.log('PASS standalone Studio: full editor offline, dialogue edited, saved, game page regenerated and booted');
   } finally { await studioPage.close(); }
+  await checkLargeStudio(browser, { work, studioHtml });
   console.log(`PASS errors, cancellation/retry, mobile layout, zero network requests. Evidence: ${work}`);
 } finally { await browser.close(); }

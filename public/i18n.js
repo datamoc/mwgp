@@ -139,7 +139,7 @@ Object.assign(T.de, { event_default_name: 'Ereignis {id}', actor_fallback: 'Akte
 Object.assign(T.en, {
   page_title: 'MWGP Studio — universal editor', asset_fresh_absent: 'absent', sa_title: 'Standalone MWGP Studio',
   sa_intro: 'Open a self-contained game page (.html) to edit it with the full graphical editor, offline. “Save” keeps your edits here; then download the regenerated game page to keep them.',
-  sa_open_choose: 'Open a game page…', sa_open_new: 'New blank project', sa_use_new: 'Use “New blank project” on the standalone opening screen.',
+  sa_open_choose: 'Open a game page…', sa_open_folder: 'Open an unpacked game folder…', sa_open_new: 'New blank project', sa_use_new: 'Use “New blank project” on the standalone opening screen.',
   sa_new_prompt: 'Name of the new project:', sa_new_fallback: 'New project', sa_download_page: '⬇ Game page (.html)',
   sa_download_title: 'Download the self-contained game page with your edits', sa_no_gzip: 'This browser does not support gzip decompression.',
   sa_not_standalone: 'This file is not a self-contained MWGP game page.', sa_truncated: 'The game content is truncated.', sa_too_large: 'This page is too large to open here. Use the standalone player to play it.',
@@ -149,7 +149,7 @@ Object.assign(T.en, {
 Object.assign(T.fr, {
   page_title: 'MWGP Studio — Éditeur universel', asset_fresh_absent: 'absente', sa_title: 'MWGP Studio autonome',
   sa_intro: 'Ouvrez une page de jeu autoporteuse (.html) pour l’éditer avec l’éditeur graphique complet, hors connexion. « Sauvegarder » protège vos éditions ici ; téléchargez ensuite la page de jeu régénérée pour les conserver.',
-  sa_open_choose: 'Ouvrir une page de jeu…', sa_open_new: 'Nouveau projet vierge', sa_use_new: 'Utilisez « Nouveau projet vierge » de l’écran d’ouverture autonome.',
+  sa_open_choose: 'Ouvrir une page de jeu…', sa_open_folder: 'Ouvrir un dossier de jeu décompressé…', sa_open_new: 'Nouveau projet vierge', sa_use_new: 'Utilisez « Nouveau projet vierge » de l’écran d’ouverture autonome.',
   sa_new_prompt: 'Nom du nouveau projet :', sa_new_fallback: 'Nouveau projet', sa_download_page: '⬇ Page de jeu (.html)',
   sa_download_title: 'Télécharger la page de jeu autoporteuse avec vos éditions', sa_no_gzip: 'Ce navigateur ne prend pas en charge la décompression gzip.',
   sa_not_standalone: 'Ce fichier n’est pas une page de jeu MWGP autoporteuse.', sa_truncated: 'Le contenu du jeu est tronqué.', sa_too_large: 'Cette page est trop volumineuse pour être ouverte ici. Utilisez le lecteur autonome pour y jouer.',
@@ -159,7 +159,7 @@ Object.assign(T.fr, {
 Object.assign(T.de, {
   page_title: 'MWGP Studio — universeller Editor', asset_fresh_absent: 'fehlt', sa_title: 'Eigenständiges MWGP Studio',
   sa_intro: 'Öffnen Sie eine eigenständige Spielseite (.html), um sie mit dem vollständigen grafischen Editor offline zu bearbeiten. „Speichern“ sichert Ihre Änderungen hier; laden Sie danach die neu erzeugte Spielseite herunter, um sie zu behalten.',
-  sa_open_choose: 'Spielseite öffnen…', sa_open_new: 'Neues leeres Projekt', sa_use_new: 'Verwenden Sie „Neues leeres Projekt“ auf dem Startbildschirm des eigenständigen Studios.',
+  sa_open_choose: 'Spielseite öffnen…', sa_open_folder: 'Entpackten Spielordner öffnen…', sa_open_new: 'Neues leeres Projekt', sa_use_new: 'Verwenden Sie „Neues leeres Projekt“ auf dem Startbildschirm des eigenständigen Studios.',
   sa_new_prompt: 'Name des neuen Projekts:', sa_new_fallback: 'Neues Projekt', sa_download_page: '⬇ Spielseite (.html)',
   sa_download_title: 'Eigenständige Spielseite mit Ihren Änderungen herunterladen', sa_no_gzip: 'Dieser Browser unterstützt keine gzip-Dekompression.',
   sa_not_standalone: 'Diese Datei ist keine eigenständige MWGP-Spielseite.', sa_truncated: 'Der Spielinhalt ist abgeschnitten.', sa_too_large: 'Diese Seite ist zu groß, um sie hier zu öffnen. Nutzen Sie den eigenständigen Player zum Spielen.',
