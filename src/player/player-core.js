@@ -1077,7 +1077,7 @@ export async function startMwgPlayer(canvas, project) {
     // The game's own map rules, when a plugin overrides one (map-engine.js); built on first use, null without an engine.
     gameMapRules() {
       if (this.mapRules === undefined) {
-        this.mapRules = project.pluginLibrary?.order?.length && this.rgss ? createMapEngine(this.rgss, this.gameState, { mapHooks: project.pluginLibrary.mapHooks || [] }) : null;
+        this.mapRules = project.pluginLibrary?.order?.length && this.rgss ? createMapEngine(this.rgss, this.gameState, { mapHooks: project.pluginLibrary.mapHooks, sources: project.pluginLibrary.sources }) : null;
       }
       return this.mapRules;
     }

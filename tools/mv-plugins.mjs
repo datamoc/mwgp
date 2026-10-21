@@ -26,6 +26,7 @@ import { readdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { dispatchReach } from './plugin-reach.mjs';
+import { HOOKS_MAP_PATTERN, mapHookNames } from '../src/player/map-hooks.js';
 
 const IDENT = /[A-Za-z_$][\w$]*/g;
 const MIN_MEMBER_LENGTH = 5;
@@ -67,13 +68,7 @@ const HOOKS_TITLE = /\bScene_Title\.prototype\.\w+\s*=(?!=)/;
 // those hooks over its own menu and battle lists (rgss-script.js `listHook`), so such a plugin ships even when no event
 // reaches it.
 const HOOKS_LISTS = /\bWindow_(?:Item|Skill)List\.prototype\.makeItemList\s*=(?!=)/;
-// Game_Player methods the map's encounter rules may ask the game for (map-engine.js): a plugin that overrides one
-// ships even when no event reaches it, and the library records which methods it overrides (`mapHooks`).
-const MAP_HOOK_METHODS = ['canEncounter', 'encounterProgressValue', 'makeEncounterCount', 'makeEncounterTroopId'];
-const HOOKS_MAP = new RegExp(`\\.prototype\\.(?:${MAP_HOOK_METHODS.join('|')})\\s*=(?!=)`);
-export function mapHookNames(source) {
-  return MAP_HOOK_METHODS.filter(name => new RegExp(`\\.prototype\\.${name}\\s*=(?!=)`).test(source));
-}
+// A plugin that overrides one of the map's encounter rules ships even when no event reaches it (map-hooks.js lists them).
 const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const mentionsWord = (source, word) => new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(word)}(?![A-Za-z0-9_$])`, 'i').test(source);
 
@@ -106,7 +101,7 @@ export async function buildPluginLibrary(gameRoot, pluginsText, scriptSources, {
   for (const plugin of plugins) {
     if ([...plugin.top].some(name => referenced.has(name)) || [...plugin.members].some(name => referenced.has(name))) selected.add(plugin.name);
     if (namedPlugins.has(plugin.name)) selected.add(plugin.name);
-    if (HOOKS_TITLE.test(plugin.source) || HOOKS_LISTS.test(plugin.source) || HOOKS_MAP.test(plugin.source)) selected.add(plugin.name);
+    if (HOOKS_TITLE.test(plugin.source) || HOOKS_LISTS.test(plugin.source) || HOOKS_MAP_PATTERN.test(plugin.source)) selected.add(plugin.name);
     if (!words.size || !HOOKS_COMMANDS.test(plugin.source)) continue;
     const handled = [...words].filter(word => mentionsWord(plugin.source, word));
     if (handled.length) { selected.add(plugin.name); handles.set(plugin.name, handled); }

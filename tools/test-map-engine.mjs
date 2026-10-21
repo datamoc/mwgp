@@ -2,7 +2,7 @@
 // (mapHookNames in tools/mv-plugins.mjs). The sandbox is a fake: only the contract is checked here.
 import assert from 'node:assert/strict';
 import { createMapEngine } from '../src/player/map-engine.js';
-import { mapHookNames } from './mv-plugins.mjs';
+import { mapHookNames } from '../src/player/map-hooks.js';
 
 const state = { x: 3, y: 4, vehicle: 'walk', disabled: false };
 const fakeRgss = result => {
@@ -57,6 +57,14 @@ const fakeRgss = result => {
   const engine = createMapEngine(fakeRgss({ value: 1 }), {}, { mapHooks: ['makeEncounterCount', 'encounterProgressValue'] });
   assert.equal(engine.overrides('makeEncounterCount'), false);
   assert.equal(engine.overrides('encounterProgressValue'), true);
+}
+
+// An older manifest has no mapHooks: the overrides are read from the loaded plugin sources instead.
+{
+  const alias = { 'Alias.js': 'var _GP = Game_Player; _GP.prototype.canEncounter = function() { return true; };' };
+  assert.equal(createMapEngine(fakeRgss({ value: true }), {}, { sources: alias }).overrides('canEncounter'), true, 'derived from the sources');
+  assert.equal(createMapEngine(fakeRgss({ value: true }), {}, { mapHooks: [], sources: alias }).overrides('canEncounter'), false, 'an explicit list wins');
+  assert.equal(createMapEngine(fakeRgss({ value: true }), {}).overrides('canEncounter'), false, 'no sources, no overrides');
 }
 
 // Detection: a plugin that assigns one of the methods through any alias of the class is found.

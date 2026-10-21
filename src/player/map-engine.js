@@ -7,12 +7,17 @@
 // type, warns once and returns null, and the caller uses the stock rule. Nothing here names a game, a framework
 // or a plugin.
 
+import { mapHookNames } from './map-hooks.js';
+
 const OVERRIDABLE = ['canEncounter', 'encounterProgressValue'];
 
 // `state`: { x, y, vehicle, disabled } where vehicle is 'walk', 'boat', 'ship' or 'airship' (Game_Player's _vehicleType)
 // and disabled is true while command 136 has switched encounters off.
-export function createMapEngine(rgss, game, { mapHooks = [] } = {}) {
-  const overridden = new Set(mapHooks.filter(name => OVERRIDABLE.includes(name)));
+// `mapHooks` is the library's list; a manifest converted before that list existed has none, so the overrides are read
+// again from the plugin sources the player has loaded (`sources`). An explicit list, even an empty one, is taken as is.
+export function createMapEngine(rgss, game, { mapHooks, sources = {} } = {}) {
+  const names = mapHooks ?? Object.values(sources).flatMap(source => mapHookNames(String(source)));
+  const overridden = new Set(names.filter(name => OVERRIDABLE.includes(name)));
   const warned = new Set();
   const warnOnce = (name, message) => {
     if (warned.has(name)) return;

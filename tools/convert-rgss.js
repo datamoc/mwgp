@@ -5,6 +5,8 @@ import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, sta
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { extractRgssArchive } from './rgss-archive.mjs';
+import { xpEncounterFields } from './rgss-encounters.mjs';
+import { CONVERTER_VERSION } from './converter-version.mjs';
 import { decodeMarshal as decodeMwgMarshal } from '@datamoc/mwg/rpg';
 import { decodeRgssMarshal } from './rgss-marshal.mjs';
 import { transpileSnippet, setInterpreterMethods } from './rgss-snippet.mjs';
@@ -966,12 +968,10 @@ export async function convertRgss(extractedArg, outputArg, flags = []) {
     const mapInfo = isVxLike
       ? { name: String(field(unwrap(mapInfoHash.get(id)), 'name', '') || '') }
       : unwrap(mapInfoHash.get(id)) || null;
-    // XP draws a troop uniformly from encounter_list (an array of troop ids); the MV shape gives every entry the same weight.
-    const xpEncounters = field(sourceMap, 'encounter_list', []);
-    const encounterList = (Array.isArray(xpEncounters) ? xpEncounters : []).map(troopId => ({ troopId: Number(troopId), weight: 10, regionSet: [] })).filter(entry => entry.troopId > 0);
+    const encounters = xpEncounterFields(sourceMap);
     maps.push({ id, info: mapInfo, data: {
       width, height, data: layers.flat(), tilesetId: isVx ? 0 : Number(field(sourceMap, 'tileset_id', 0)),
-      encounterList, encounterStep: Number(field(sourceMap, 'encounter_step', 30)) || 30,
+      ...encounters,
       autoplayBgm: Boolean(field(sourceMap, 'autoplay_bgm', false)),
       bgm: bgm ? { name: field(bgm, 'name', ''), volume: Number(field(bgm, 'volume', 100)), pitch: Number(field(bgm, 'pitch', 100)) } : null,
       autoplayBgs: Boolean(field(sourceMap, 'autoplay_bgs', false)),
@@ -1176,7 +1176,7 @@ export async function convertRgss(extractedArg, outputArg, flags = []) {
   phase = progress.phase('writing the manifest', 5);
   const screenSize = scriptScreenSize();
   const manifest = {
-    format: 'MWGP', version: 1,
+    format: 'MWGP', version: 1, converter: { version: CONVERTER_VERSION },   // early in the file: readManifestConverterVersion reads only the first bytes
     source: { engine: isAce ? ENGINE_ACE : isVx ? ENGINE_VX : 'rpg-maker-xp', projectName: destination.split(/[\\/]/).pop(), convertedAt: new Date().toISOString() },
     display: { title: gameTitle(), width: screenSize.width, height: screenSize.height, tileSize: VX_TILE_SIZE },
     initialMapId: initialMap?.id || null,
