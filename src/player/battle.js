@@ -26,6 +26,7 @@
 // / `hooks.gainItem` receive rewards.
 
 import { layoutFormation, rowModifiers } from './formation.js';
+import { groupAgility, ratePreemptive, rateSurprise, rollFirstStrike } from './map-rules.js';
 
 const SAFE_FORMULA = /^[\w\s.+\-*/%()<>=!&|?:,[\]$]*$/;
 const FORBIDDEN_FORMULA = /\b(?:function|constructor|prototype|__proto__|eval|window|globalThis|document|import|require|process|this|new|class|return|while|for|Function)\b|=>|\$(?!gameVariables)/;
@@ -328,8 +329,22 @@ export function createPicker(present, terms = {}) {
   };
 }
 
+// The encounter abilities of the party (trait code 64, the data ids of Game_Party.ABILITY_*): 0 half encounters,
+// 1 no encounters, 2 cancel surprise, 3 raise preemptive. The actors' own traits are read on fresh battlers, so the
+// records are never written: a step on the map must not create actor records.
+export function partyAbilities(database, records, partyIds) {
+  const battle = { database, rng: Math.random, variable: () => 0, terms: {}, items: {} };
+  const abilities = new Set();
+  (partyIds || []).forEach((id, index) => {
+    const stored = records?.[id] || {};
+    const actor = new ActorBattler(battle, id, { ...stored, level: stored.level || database.actors?.[id]?.initialLevel || 1, classId: stored.classId ?? database.actors?.[id]?.classId }, index);
+    for (const ability of [0, 1, 2, 3]) if (actor.traits(64, ability).length) abilities.add(ability);
+  });
+  return abilities;
+}
+
 export async function runBattle(options) {
-  const { database, troopId, party: partyIds, records, items = {}, present, rng = Math.random, tpRandom = Math.random, formation = 'default', variable = () => 0, canEscape = true, canLose = false, hooks = {} } = options;
+  const { database, troopId, party: partyIds, records, items = {}, present, rng = Math.random, tpRandom = Math.random, formation = 'default', variable = () => 0, canEscape = true, canLose = false, encounter = false, hooks = {} } = options;
   const { terms, message, basic } = battleText(database);
   const battle = { database, rng, variable, terms, items };
   const troop = database.troops?.[troopId];
@@ -665,22 +680,30 @@ export async function runBattle(options) {
   hooks.onControls?.({ forceAction, abort: () => { aborted = true; } });
   await hooks.onStart?.({ actors, enemies });
   await say(format(message('emerge'), visibleEnemies[0].name + (visibleEnemies.length > 1 ? ` +${visibleEnemies.length - 1}` : '')));
+  // A random encounter may open with a first strike (BattleManager.onEncounter): the party acts first, or the troop does.
+  const abilities = encounter ? partyAbilities(database, records, partyIds) : new Set();
+  const partyAgi = groupAgility(actors.map(actor => actor.agi)), troopAgi = groupAgility(enemies.map(enemy => enemy.agi));
+  const strike = encounter ? rollFirstStrike({ preemptive: ratePreemptive(partyAgi, troopAgi, abilities.has(3)), surprise: rateSurprise(partyAgi, troopAgi, abilities.has(2)) }, rng) : null;
+  if (strike) await say(format(message(strike), actors[0]?.name || ''));
   let escapeRatio = 0.5 * (actors.reduce((sum, actor) => sum + actor.agi, 0) / actors.length) / Math.max(1, enemies.reduce((sum, enemy) => sum + enemy.agi, 0) / enemies.length);
   let outcome = null;
   for (let safety = 0; safety < 200 && !outcome; safety++) {
     if (aborted) { outcome = 'escape'; break; }
     turn++;
+    // On the turn of a first strike the surprised party gets no command, and the preemptive party's turn comes first.
+    const partyActs = !(turn === 1 && strike === 'surprise');
+    const troopActs = !(turn === 1 && strike === 'preemptive');
     // party command
-    const fight = await pick(`${statusText(null)}`, [{ label: terms.commands?.[0] || 'Fight', kind: 'fight' }, ...(canEscape ? [{ label: terms.commands?.[1] || 'Escape', kind: 'escape' }] : [])], { back: false });
+    const fight = partyActs ? await pick(`${statusText(null)}`, [{ label: terms.commands?.[0] || 'Fight', kind: 'fight' }, ...(canEscape ? [{ label: terms.commands?.[1] || 'Escape', kind: 'escape' }] : [])], { back: false }) : { kind: 'fight' };
     if (fight?.kind === 'escape') {
       await say(format(message('escapeStart'), partyName()));
-      if (rng() < escapeRatio) { outcome = 'escape'; break; }
+      if ((turn === 1 && strike === 'preemptive') || rng() < escapeRatio) { outcome = 'escape'; break; }
       escapeRatio += 0.1;
       await say(message('escapeFailure'));
     } else {
       const queue = [];
-      for (const actor of actors) if (actor.canMove) queue.push(actor.restriction > 0 && actor.restriction < 4 ? { subject: actor, kind: 'skill', item: database.skills[attackSkillId(database)] } : await actorCommand(actor));
-      for (const enemy of enemies) if (enemy.alive && enemy.canMove) queue.push(enemyAction(enemy));
+      if (partyActs) for (const actor of actors) if (actor.canMove) queue.push(actor.restriction > 0 && actor.restriction < 4 ? { subject: actor, kind: 'skill', item: database.skills[attackSkillId(database)] } : await actorCommand(actor));
+      if (troopActs) for (const enemy of enemies) if (enemy.alive && enemy.canMove) queue.push(enemyAction(enemy));
       queue.sort((left, right) => (right.kind === 'guard') - (left.kind === 'guard') || speedOf(right) - speedOf(left));
       for (const action of queue) {
         if (partyDown() || troopDown() || aborted) break;
@@ -707,7 +730,7 @@ export async function runBattle(options) {
 }
 
 const DEFAULT_MESSAGES = {
-  emerge: '%1 emerged!', victory: '%1 was victorious!', defeat: '%1 was defeated.', escapeStart: '%1 has started to escape!', escapeFailure: 'However, it was unable to escape!',
+  emerge: '%1 emerged!', preemptive: '%1 got the upper hand!', surprise: '%1 was surprised!', victory: '%1 was victorious!', defeat: '%1 was defeated.', escapeStart: '%1 has started to escape!', escapeFailure: 'However, it was unable to escape!',
   obtainExp: '%1 %2 received!', obtainGold: '%1\\G found!', obtainItem: '%1 found!', obtainSkill: '%1 learned!', levelUp: '%1 is now %2 %3!', partyName: '%1’s Party',
   counterAttack: '%1 counterattacked!', magicReflection: '%1 reflected the magic!', substitute: '%1 protected %2!',
   actionFailure: 'There was no effect on %1!', criticalToEnemy: 'An excellent hit!!', criticalToActor: 'A painful blow!!',

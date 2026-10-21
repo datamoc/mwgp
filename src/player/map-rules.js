@@ -49,6 +49,33 @@ export function moveSpeedFor(baseSpeed, dashing) {
   return dashing ? baseSpeed * 2 : baseSpeed;
 }
 
+// Game_Unit.agility: the average agility of a group, never below 1 (an empty group counts as 1).
+export function groupAgility(agilities) {
+  if (!agilities.length) return 1;
+  return Math.max(1, agilities.reduce((sum, agi) => sum + agi, 0) / agilities.length);
+}
+
+// BattleManager.ratePreemptive: the party gets the first strike more often when it is quicker, and four times as often
+// with "raise preemptive".
+export function ratePreemptive(partyAgi, troopAgi, raisePreemptive) {
+  const rate = partyAgi >= troopAgi ? 0.05 : 0.03;
+  return raisePreemptive ? rate * 4 : rate;
+}
+
+// BattleManager.rateSurprise: the troop strikes first, less often when it is slower; never with "cancel surprise".
+export function rateSurprise(partyAgi, troopAgi, cancelSurprise) {
+  if (cancelSurprise) return 0;
+  return partyAgi >= troopAgi ? 0.03 : 0.05;
+}
+
+// BattleManager.onEncounter: both rolls are made, in this order, and a surprise is never counted with a preemptive one.
+export function rollFirstStrike({ preemptive, surprise }, random) {
+  const first = random() < preemptive;
+  const second = random() < surprise && !first;
+  if (first) return 'preemptive';
+  return second ? 'surprise' : null;
+}
+
 // Game_Follower.chaseCharacter on the grid: one cell toward the target, along x first, or null when already on it.
 export function followerStep(own, target) {
   const dx = target.x - own.x, dy = target.y - own.y;

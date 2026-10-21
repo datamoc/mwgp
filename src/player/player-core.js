@@ -5,7 +5,7 @@ import { createBattleEngine } from './battle-engine.js';
 import { canEncounter, encounterProgress, encounterStepCount, followerStep, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
 import { WeatherLayer } from './weather.js';
 import { createMapEngine } from './map-engine.js';
-import { runBattle, createPicker, expForLevel, actorParamBase } from './battle.js';
+import { runBattle, createPicker, expForLevel, actorParamBase, partyAbilities } from './battle.js';
 
 import { runMenu } from './menu.js';
 import { stagePositions } from './formation.js';
@@ -1067,9 +1067,11 @@ export async function startMwgPlayer(canvas, project) {
       const engine = this.gameMapRules();
       const state = { x, y, vehicle: this.activeVehicle || 'walk', disabled };
       // A plugin that overrides the rule runs the game's own method; otherwise, or when that fails, the stock rule.
-      const enabled = engine?.canEncounter(state) ?? canEncounter({ disabled, inAirship: this.activeVehicle === 'airship' });
+      // The party's encounter abilities (no encounters, half encounters), read from the battle members' traits.
+      const abilities = partyAbilities(project.database || {}, this.rpgExtra.actors || {}, (this.rpgExtra.party || []).slice(0, this.maxBattleMembers()));
+      const enabled = engine?.canEncounter(state) ?? canEncounter({ disabled, noEncounters: abilities.has(1), inAirship: this.activeVehicle === 'airship' });
       if (!enabled) return;
-      const progress = engine?.encounterProgressValue(state) ?? encounterProgress({ bush: this.tileFlagAt(x, y, 0x40, [0, 1, 2, 3]), inShip: this.activeVehicle === 'ship' });
+      const progress = engine?.encounterProgressValue(state) ?? encounterProgress({ bush: this.tileFlagAt(x, y, 0x40, [0, 1, 2, 3]), halfRate: abilities.has(0), inShip: this.activeVehicle === 'ship' });
       this.encounterCount -= progress;
     }
     // The game's own map rules, when a plugin overrides one (map-engine.js); built on first use, null without an engine.
@@ -1086,7 +1088,7 @@ export async function startMwgPlayer(canvas, project) {
       // No battle to start: the count is re-armed anyway, as the engine does.
       if (!troopId || !project.database?.troops?.[troopId]) { this.rearmEncounter(); return; }
       this.encounterBusy = true;
-      this.startBattle({ troopId, canEscape: true, canLose: false })
+      this.startBattle({ troopId, canEscape: true, canLose: false, encounter: true })
         .catch(error => console.warn('MWGP random encounter failed', error))
         .finally(() => { this.encounterBusy = false; });
     }
@@ -1606,7 +1608,7 @@ export async function startMwgPlayer(canvas, project) {
       let result;
       try {
         result = await runBattle({
-          database, troopId, party, records, items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true,
+          database, troopId, party, records, items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true, encounter: spec.encounter === true,
           present: request => { this.refreshBattleStage(); return this.presentDialogue(request); },
           variable: key => (String(key).startsWith('switch:') ? this.gameState.switch(String(key).slice(7)) : this.gameState.variable(String(key))),
           hooks: {
