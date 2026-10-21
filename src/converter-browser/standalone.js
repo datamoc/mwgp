@@ -13,8 +13,11 @@ function base64(bytes) {
 // <script> text reads back empty in the browser. The payload is therefore
 // written as several <script data-mwgp-payload> elements, each capped here.
 const PAYLOAD_PART_CHARS = 64 * 1024 * 1024;
+// A page this large can time out while the browser loads it: the page is then stopped before the payload (gate.js) and
+// offers to unpack the game into a local folder instead.
+const LARGE_PAGE_BYTES = 100 * 1024 * 1024;
 
-export async function standaloneOutput(entries, name, project, engine, progress, payloadPartChars = PAYLOAD_PART_CHARS) {
+export async function standaloneOutput(entries, name, project, engine, progress, payloadPartChars = PAYLOAD_PART_CHARS, payloadLimit = LARGE_PAGE_BYTES) {
   const files = runtimeFiles.map(([path, text]) => ({ path, blob: new Blob([text]) }));
   for (const [path, entry] of entries) {
     const relative = path.slice(outputRoot.length + 1);
@@ -44,8 +47,8 @@ export async function standaloneOutput(entries, name, project, engine, progress,
   const versionedBefore = before
     .replace(/<meta name="mwgp-player-version" content="[^"]*">/, `<meta name="mwgp-player-version" content="${playerVersion}">`)
     .replace(/(id="player-version"[^>]*>Player MWGP )[^<]*/, `$1${playerVersion}`);
-  const parts = [versionedBefore];
-  let partChars = 0;
+  const parts = [];
+  let partChars = 0, payloadChars = 0;
   const openPart = () => { parts.push('<script data-mwgp-payload type="application/octet-stream">\n'); partChars = 0; };
   openPart();
   let compressedBytes = 0;
@@ -54,7 +57,7 @@ export async function standaloneOutput(entries, name, project, engine, progress,
     compressedBytes += chunk.length;
     const line = base64(chunk);
     if (partChars > 0 && partChars + line.length > payloadPartChars) { parts.push('</script>\n'); openPart(); }
-    parts.push(line, '\n'); partChars += line.length + 1;
+    parts.push(line, '\n'); partChars += line.length + 1; payloadChars += line.length + 1;
   });
   gzip.push(size); gzip.push(header);
   let done = 0, lastProgress = 0;
@@ -67,6 +70,10 @@ export async function standaloneOutput(entries, name, project, engine, progress,
     }
   }
   gzip.push(new Uint8Array(), true);
+  // The size data is in the head, so it is known before the gate (in the body, before the payload) runs.
+  const pageId = 'standalone-' + identity;
+  const head = versionedBefore.replace('</head>', () => `<meta name="mwgp-payload-bytes" content="${payloadChars}"><meta name="mwgp-payload-limit" content="${payloadLimit}"><meta name="mwgp-payload-id" content="${pageId}"></head>`);
+  parts.unshift(head);
   parts.push('</script>\n<script>', bootstrap, '</script>\n', after);
   progress({ done: total, total, label: 'Page HTML prête', packaging: true });
   return { blob: new Blob(parts, { type: 'text/html;charset=utf-8' }), name: `${name}.html`,

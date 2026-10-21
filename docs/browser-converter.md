@@ -42,6 +42,24 @@ files (`.mwgp-conversion.json`, `.mwgp-merge-report.json`) and the empty resourc
 so the editable MWGP directory can be recreated from the game page alone (see below). The
 `.runtime/` files (player, MWG, licences) are part of the page, not of the recreated directory.
 
+### Large game pages (over 100 MB)
+
+A page over 100 MB (`LARGE_PAGE_BYTES`, the payload size in the `mwgp-payload-bytes` meta) can time out while the browser
+loads and parses it. Its size is written in the head, and a size gate (`src/standalone-player/gate.js`, in the body right
+before the payload) stops the page before the payload is parsed. The page then offers, in its own markup:
+
+- **Unpack this game…**: the browser opens a folder picker (Chrome and Edge) where the user chooses a folder; where there
+  is no picker, the game goes to the browser's private storage (OPFS). The user then selects this same HTML file, the
+  payload is read and written as files, and the game starts in the same page. The folder (or storage entry) is remembered
+  for this game.
+- **Open the unpacked copy**: shown on the next visit to the page; it asks for access to the folder once more when the
+  browser requires it, then plays from the files.
+- **Open the page anyway** reloads with `?force=1`; **Stop** leaves the panel.
+
+Limits: the folder picker and the private storage need a secure origin or the picker (a page opened from `file://` in
+Firefox or Safari cannot unpack); a page above 500 MB cannot be read as text for unpacking. The size gate covers the
+game pages, not the standalone Studio.
+
 ## Standalone Studio (full graphical editor)
 
 `npm run export:studio` generates `public/studio-standalone.html`: the complete graphical Studio

@@ -128,6 +128,45 @@ async function mvFixture(folder, mz) {
 
 // The payload is one or more <script> elements, read back in order (standalone.js).
 const PAYLOAD_ELEMENT = /<script (?:data-mwgp-payload|id="mwgp-payload") type="application\/octet-stream">([\s\S]*?)<\/script>/g;
+// A page over the payload limit (gate.js) stops before the payload is read and offers to unpack the game. The folder
+// picker is not used here (it needs a person), so the unpacking goes to the browser's private storage; a small limit in a
+// copy of the page stands in for the 100 MB one. The unpacked copy must start the game, and reopening the page must
+// offer it again.
+async function checkLargePage(browser, playablePath, playableHtml, engine) {
+  const large = join(work, `${engine}-large.html`);
+  await writeFile(large, playableHtml.replace(/(<meta name="mwgp-payload-limit" content=")\d+"/, '$11000"'), 'utf8');
+  // Served over http: private storage (the fallback without a folder picker) is not available to file:// pages.
+  const body = await readFile(large);
+  const server = createServer((request, response) => { response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); response.end(body); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/large.html`;
+  const context = await browser.newContext();
+  await context.addInitScript(() => { delete window.showDirectoryPicker; });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(String(error?.message || error)));
+  try {
+    await page.goto(url, { waitUntil: 'commit' });
+    await page.waitForFunction(() => document.body?.textContent.includes('This game page is'), null, { timeout: 60000 });
+    assert.ok(await page.locator('#gate-panel button', { hasText: 'Unpack this game' }).isVisible(), `${engine}: the large page offers to unpack the game`);
+    await page.locator('#gate-panel button', { hasText: 'Unpack this game' }).click();
+    await page.waitForFunction(() => document.querySelector('#gate-status')?.textContent.includes('Now select'), null, { timeout: 30000 });
+    await page.locator('#gate-status button').click();
+    await page.locator('#gate-panel input[type=file]').setInputFiles(playablePath);
+    // The unpacked game opens on its title screen, like the playable page: start a new game to reach a map.
+    await page.getByRole('button', { name: 'New Game', exact: true }).click({ timeout: 120000 });
+    await page.waitForFunction(() => Boolean(globalThis.__MWG__?.currentScene?.mover), null, { timeout: 180000 });
+    assert.equal(errors.length, 0, `${engine}: the unpacked game starts without page errors: ${errors.slice(0, 2).join(' | ')}`);
+    await page.goto(url, { waitUntil: 'commit' });
+    await page.waitForFunction(() => document.body?.textContent.includes('This game page is'), null, { timeout: 60000 });
+    assert.equal(await page.locator('#gate-panel button', { hasText: 'Open the unpacked copy' }).count(), 1, `${engine}: the unpacked copy is offered again`);
+    console.log(`PASS ${engine}: large page stops, unpacks to private storage, starts the game, and offers the copy again`);
+  } finally {
+    await context.close();
+    server.close();
+  }
+}
+
 function unpackStandalone(html) {
   const payloads = [...html.matchAll(PAYLOAD_ELEMENT)];
   assert.ok(payloads.length, 'standalone contains a compressed payload');
@@ -280,6 +319,7 @@ try {
     assert.match(playableHtml, new RegExp(`<meta name="mwgp-player-version" content="${PLAYER_VERSION.replaceAll('.', '\\.')}"`), 'standalone page declares the player version in its head');
     assert.match(playableHtml, new RegExp(`id="player-version"[^>]*>Player MWGP ${PLAYER_VERSION.replaceAll('.', '\\.')}<`), 'standalone page shows the player version');
     assert.ok(packed.files.has('.runtime/mwg.js') && packed.files.has('.runtime/player.js'));
+    await checkLargePage(browser, playable, playableHtml, engine);
     assert.deepEqual(normalManifest(JSON.parse(packed.files.get('mwgp.json'))), normalManifest(manifest));
     for (const name of nodeFiles.filter(name => name.startsWith('assets/'))) assert.deepEqual(packed.files.get(name), await readFile(join(output, name)), `${engine}: gzip asset ${name}`);
     // The standalone Studio recreates the editable directory from the game

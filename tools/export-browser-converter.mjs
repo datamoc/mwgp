@@ -39,12 +39,18 @@ export async function standaloneRuntime(notices) {
   const code = `;(async () => {\n${player.outputFiles[0].text}\n})().catch(error => { console.error('MWGP standalone player failed', error); const status = document.querySelector('#unpacking') || document.querySelector('#title'); if (status) status.textContent = 'Could not open the game: ' + error.message; });`;
   const runtime = await readFile(join(root, 'node_modules/@datamoc/mwg/dist/mwg.global.js'), 'utf8');
   let shell = await readFile(join(root, 'public/player.html'), 'utf8');
+  // The size gate and the archive reader: in the body, before the payload (see src/standalone-player/gate.js).
+  const gate = await readFile(join(root, 'src/standalone-player/gate.js'), 'utf8');
+  if (/<\/script|<!--/.test(gate)) throw new Error('gate.js must not contain a closing script tag or a comment opener: it is inlined in the page head');
   shell = shell.replace('<script type="module" src="/player.js"></script>', '')
     .replace('</head>', `<meta name="mwgp-player-version" content="${PLAYER_VERSION}"></head>`)
     .replace('<p>Arrow keys / WASD to move. Enter or Space advances dialogue.</p>', `<p>Arrow keys / WASD to move. Enter or Space advances dialogue.</p><p id="player-version" style="color:#8998aa;font-size:11px;margin:4px 0 0">Player MWGP ${PLAYER_VERSION}</p>`)
     .replace('<div id="stage">', '<p id="unpacking" role="status" class="mwgp-loading">Opening the game…</p><div id="stage">')
     .replace('</main>', '<details style="margin-top:16px"><summary>Open-source software and licences</summary><pre id="standalone-licenses" style="white-space:pre-wrap;max-height:300px;overflow:auto"></pre></details></main>')
-    .replace('</body>', '<!-- GAME_PAYLOAD --></body>');
+    // The size gate sits in the body, after the shell's markup and before the payload: when it runs, the markup is there
+    // (the panel and the player need it) and the payload is not parsed yet. Placed with a function: the gate's source
+    // contains replacement-pattern characters.
+    .replace('</body>', () => `<script id="mwgp-gate">${gate}</script><!-- GAME_PAYLOAD --></body>`);
   const bootstrap = await readFile(join(root, 'src/standalone-player/bootstrap.js'), 'utf8');
   return { files: [['.runtime/mwg.js', runtime], ['.runtime/player.js', code], ['.runtime/LICENCES.txt', notices]], shell, bootstrap };
 }
