@@ -1,5 +1,18 @@
 import { assetUrl, loadAssetUrl } from '/asset-url.js';
 
+// Plugins that refuse to run on an engine older than they need print a link to a RPG Maker forum thread. MWGP is not
+// the editor's project folder, so there are no core files to copy: the console points to the explanation in this repo.
+const FORUM_LINK = /https?:\/\/forums\.rpgmakerweb\.com\/[^\s'")]*/g;
+const ENGINE_NOTES = 'https://github.com/datamoc/mwgp/blob/master/docs/mv-engine-versions.md';
+const FORUM_NOTES = { 66712: 'mv-131', 71400: 'mv-134', 79677: 'mv-150' };
+function rewriteForumLinks(text) {
+  return typeof text === 'string' ? text.replace(FORUM_LINK, url => { const note = FORUM_NOTES[url.match(/\d{5}/)?.[0]]; return note ? `${ENGINE_NOTES}#${note}` : ENGINE_NOTES; }) : text;
+}
+function consoleWithoutForumLinks(base) {
+  return new Proxy(base, { get: (target, key) => typeof target[key] === 'function' && ['log', 'info', 'warn', 'error'].includes(key) ? (...args) => target[key](...args.map(rewriteForumLinks)) : target[key] });
+}
+globalThis.console = consoleWithoutForumLinks(globalThis.console);
+
 const playerHost = globalThis.mwgpPlayerHost;
 const id = playerHost?.id || new URLSearchParams(location.search).get('id');
 const canvas = document.querySelector('#game');
@@ -166,6 +179,7 @@ async function capturePluginTitleLayers(project, savesExist) {
     // One shared deep-inert: any property read or call on it yields itself,
     // so a plugin touching an engine service we do not model fails soft
     // (falsy checks on plain objects below still behave).
+    const isMz = /mz/.test(String(project.source?.engine || ''));
     const inertObj = (() => {
       const self = new Proxy(function () {}, {
         get: (t, p) => (p === Symbol.toPrimitive ? () => '' : p === 'then' ? undefined : self),
@@ -186,8 +200,12 @@ async function capturePluginTitleLayers(project, savesExist) {
       TextManager: new Proxy({}, { get: (t, p) => (typeof p === 'string' && p.startsWith('is') ? false : inertObj) }),
       $gameSwitches: { value: () => false }, $gameVariables: { value: () => 0 }, $gameActors: inertObj, $gameParty: inertObj, $gamePlayer: inertObj, $gameMap: inertObj, $gameTroop: inertObj, $gameSystem: inertObj, $gameTemp: inertObj, $gameScreen: inertObj, ConfigManager: {},
       $plugins: (project.plugins || []).map(name => ({ name, status: true, description: (lib.descriptions || {})[name] || '', parameters: (lib.parameters || {})[name] || {} })),
-      Utils: { isNwjs: () => false, isMobileDevice: () => false, isOptionValid: () => false, canReadGameFiles: () => false, rgbToCssColor: (r, g, b) => `rgb(${r},${g},${b})`, extractFileName: p => String(p).split('/').pop().replace(/\.[^.]*$/, '') },
-      require: () => ({}), Logger: null,
+      // The engine's own version constants: plugins check them at load and refuse to run below their minimum.
+      Utils: { RPGMAKER_NAME: isMz ? 'MZ' : 'MV', RPGMAKER_VERSION: project.source?.engineVersion || (isMz ? '1.8.0' : '1.6.2'), isNwjs: () => false, isMobileDevice: () => false, isOptionValid: () => false, canReadGameFiles: () => false, rgbToCssColor: (r, g, b) => `rgb(${r},${g},${b})`, extractFileName: p => String(p).split('/').pop().replace(/\.[^.]*$/, '') },
+      // nw.gui: a plugin that bails out calls require('nw.gui').Window.get().showDevTools(); the inert object lets that end quietly.
+      require: name => name === 'nw.gui' ? inertObj : {}, Logger: null,
+      // The classes plugins extend or instantiate at load time; anything else under PIXI answers the inert object.
+      PIXI: new Proxy({ Point: class { constructor(x = 0, y = 0) { this.x = x; this.y = y; } }, Container: class {} }, { get: (target, key) => key in target ? target[key] : inertObj }),
       TouchInput: { isTriggered: () => false, isPressed: () => false, x: 0, y: 0 },
       Input: { isTriggered: () => false, isPressed: () => false, dir4: 0, dir8: 0 },
       DataManager: inertObj, SceneManager: inertObj,
@@ -204,6 +222,7 @@ async function capturePluginTitleLayers(project, savesExist) {
     for (const name of lib.engine || []) if (!(name in win)) { try { win[name] = class {}; } catch { /* a non-identifier name */ } }
     if (!('Scene_Base' in win)) win.Scene_Base = SceneBase;
     win.Logger = inertObj;
+    try { Object.defineProperty(win, 'console', { value: consoleWithoutForumLinks(win.console), configurable: true }); } catch { /* the iframe keeps its own console */ }
     win.Math.randomInt = max => Math.floor(Math.random() * max);
     // Real <script> tags, not eval: a plugin's top-level const/let must stay
     // visible to the plugins loaded after it, exactly as in the engine, and

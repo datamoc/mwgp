@@ -15,6 +15,11 @@ export function auditMvAssetUsage({ gameRoot, maps, system, database, commonEven
   const commonScopes = new Map();
   const referencedCommonEvents = new Set();
   const queue = [];
+  // A map's own battle background only matters where a battle can start: random encounters, a Battle Processing command
+  // (301) on the map or in a common event it calls, or a script naming BattleManager/Scene_Battle. Plugin commands that
+  // start battles are not resolved (the audit is static).
+  const battleMaps = new Set();
+  const mapBattlebacks = [];
   let nextCommon = 0;
 
   function reference(folder, name, context, unused = false) {
@@ -27,6 +32,18 @@ export function auditMvAssetUsage({ gameRoot, maps, system, database, commonEven
     if (existence.get(asset)) return;
     if (!missing.has(asset)) missing.set(asset, []);
     missing.get(asset).push({ ...context, ...(unused ? { usage: 'unused' } : {}) });
+  }
+
+  // Whether a common event (or one it calls) starts a battle, memoised; a call cycle counts as no battle.
+  const battleCommon = new Map();
+  function startsBattle(id) {
+    if (battleCommon.has(id)) return battleCommon.get(id);
+    battleCommon.set(id, false);
+    const result = (commonEvents[id]?.list || []).some(command => command.code === 301
+      || ((command.code === 355 || command.code === 655) && /BattleManager|Scene_Battle/.test(String(command.parameters?.[0])))
+      || (command.code === 117 && startsBattle(Number(command.parameters?.[0]))));
+    battleCommon.set(id, result);
+    return result;
   }
 
   function common(id, context) {
@@ -43,7 +60,9 @@ export function auditMvAssetUsage({ gameRoot, maps, system, database, commonEven
       const p = command.parameters || [];
       switch (command.code) {
         case 101: reference('img/faces', p[0], context); break;
-        case 117: common(Number(p[0]), context); break;
+        case 117: common(Number(p[0]), context); if (context.mapId != null && startsBattle(Number(p[0]))) battleMaps.add(context.mapId); break;
+        case 301: if (context.mapId != null) battleMaps.add(context.mapId); break;
+        case 355: case 655: if (context.mapId != null && /BattleManager|Scene_Battle/.test(String(p[0]))) battleMaps.add(context.mapId); break;
         case 129: actor(database.actors?.[p[0]], context); break;
         case 205:
           for (const move of p[1]?.list || []) {
@@ -118,8 +137,8 @@ export function auditMvAssetUsage({ gameRoot, maps, system, database, commonEven
     for (const layer of [data.settings?.foreground, data.settings?.foregroundB]) reference('img/parallaxes', layer?.name, context);
     reference('audio/bgm', data.bgm?.name, context, !data.autoplayBgm);
     reference('audio/bgs', data.bgs?.name, context, !data.autoplayBgs);
-    reference('img/battlebacks1', data.battleback1Name, context, !data.specifyBattleback);
-    reference('img/battlebacks2', data.battleback2Name, context, !data.specifyBattleback);
+    if (data.battleback1Name || data.battleback2Name) mapBattlebacks.push({ map, context, data });
+    if ((data.encounterList || []).length) battleMaps.add(map.id);
     for (const event of data.events || []) {
       if (!event) continue;
       for (const [index, page] of (event.pages || []).entries()) {
@@ -137,6 +156,11 @@ export function auditMvAssetUsage({ gameRoot, maps, system, database, commonEven
     if (event.trigger > 0) common(event.id, { location: `CommonEvents.json event ${event.id}`, usage: TEST_NAME.test(event.name || '') ? 'test' : 'gameplay' });
   }
   drainCommonEvents();
+  for (const { map, context, data } of mapBattlebacks) {
+    const unused = !data.specifyBattleback || !battleMaps.has(map.id);
+    reference('img/battlebacks1', data.battleback1Name, context, unused);
+    reference('img/battlebacks2', data.battleback2Name, context, unused);
+  }
   // No static caller does not prove that a plugin never invokes this event.
   // Keep uncalled events as unknown (potential defects), rather than claiming
   // that arbitrary JavaScript has been proven dead.

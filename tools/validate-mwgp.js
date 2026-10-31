@@ -56,7 +56,7 @@ const allowed = new Set([
   'setTransparent', 'routeThrough', 'routeImage', 'routeOption', 'eraseEvent', 'screenTint', 'screenShake', 'playBgm', 'fadeoutBgm', 'playBgs', 'fadeoutBgs',
   'stopSound', 'script', 'pluginCommand', 'unsupported',
   'systemFlag', 'gatherFollowers', 'changeActorStat', 'changeActorText', 'changeActorImages', 'timer', 'vehicleBoard', 'playMovie', 'forceAction', 'returnToTitle',
-  'changeTileset', 'changeParallax', 'enemyRecoverAll', 'abortBattle', 'selectItem', 'rotatePicture', 'locationInfo'
+  'changeTileset', 'changeParallax', 'enemyRecoverAll', 'enemyAnimation', 'haltMovement', 'abortBattle', 'selectItem', 'rotatePicture', 'locationInfo'
 ]);
 // Frame geometry the converter measured from the original character sheets
 // ($-prefix grid rule + PNG dimensions). Optional for older manifests; when

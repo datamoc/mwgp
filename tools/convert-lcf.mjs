@@ -174,7 +174,10 @@ function convertCommandList(list, context = {}) {
       }
       case CODE.inputNumber: out.push({ inputNumber: { variable: String(p[1]), digits: p[0] || 1 } }); break;
       case CODE.switches: {
-        if (p[2] === 2) { unsupported(command); break; }
+        if (p[2] === 2) { // toggle: flip each switch of the range from its current value
+          for (let id = p[0]; id <= Math.min(p[1], p[0] + 200); id++) out.push({ if: { switch: String(id), equals: true }, then: [{ setSwitch: String(id), value: false }], else: [{ setSwitch: String(id), value: true }] });
+          break;
+        }
         for (let id = p[0]; id <= Math.min(p[1], p[0] + 200); id++) out.push({ setSwitch: String(id), value: p[2] !== 1 });
         break;
       }
@@ -201,12 +204,18 @@ function convertCommandList(list, context = {}) {
         else out.push({ timer: { start: p[2] || 0 } });
         break;
       }
-      case CODE.gold: if (p[1] === 0) out.push({ changeGold: (p[0] === 1 ? -1 : 1) * (p[2] || 0) }); else unsupported(command); break;
+      case CODE.gold:
+        // p[1] 0 direct / 1 a variable (read when the command runs, like MV 125).
+        if (p[1] === 0) out.push({ changeGold: (p[0] === 1 ? -1 : 1) * (p[2] || 0) });
+        else if (p[1] === 1) out.push({ changeGold: { variable: String(p[2]), op: p[0] === 1 ? 'sub' : 'add' } });
+        else unsupported(command);
+        break;
       case CODE.items: {
         // p[0] operation (0 add / 1 remove), p[1] item-id mode (0 direct), p[2] id,
         // p[3] amount mode, p[4] amount. RM2000 ids span items AND weapons/armors.
-        if (p[1] !== 0 || p[3] !== 0) { unsupported(command); break; }
-        const amount = (p[0] === 1 ? -1 : 1) * (p[4] || 0);
+        if (p[1] > 1 || p[3] > 1) { unsupported(command); break; }
+        const amount = p[3] === 0 ? (p[0] === 1 ? -1 : 1) * (p[4] || 0) : { variable: String(p[4]), op: p[0] === 1 ? 'sub' : 'add' };
+        if (p[1] === 1) { out.push({ changeItem: { idVariable: String(p[2]), amount } }); break; } // the id (hence the store) is read when the command runs
         const kind = unifiedKind(p[2] || 0);
         out.push(kind === 1 ? { changeWeapon: { id: p[2], amount } } : kind === 2 ? { changeArmor: { id: p[2], amount } } : { changeItem: { id: p[2] || 0, amount } });
         break;
@@ -227,10 +236,10 @@ function convertCommandList(list, context = {}) {
       }
       case CODE.teleport: out.push({ transfer: { mapId: p[0], x: p[1], y: p[2] } }); break;
       case CODE.picture: {
-        if ((p[1] & 0xff) === 1) { unsupported(command); break; } // x/y from variables
+        const at = (p[1] & 0xff) === 1 ? { xVar: String(p[2]), yVar: String(p[3]) } : { x: p[2] || 0, y: p[3] || 0 }; // x/y direct or read from variables when the command runs
         out.push({
           picture: {
-            id: p[0], name: command.string, origin: (p[1] >> 8) & 0xff ? 1 : 0, x: p[2] || 0, y: p[3] || 0,
+            id: p[0], name: command.string, origin: (p[1] >> 8) & 0xff ? 1 : 0, ...at,
             scaleX: p[5] || 100, scaleY: p[5] || 100, opacity: 255 - (p[6] || 0),
           },
         });
@@ -238,10 +247,10 @@ function convertCommandList(list, context = {}) {
         break;
       }
       case CODE.movePicture: {
-        if ((p[1] & 0xff) === 1) { unsupported(command); break; }
+        const at = (p[1] & 0xff) === 1 ? { xVar: String(p[2]), yVar: String(p[3]) } : { x: p[2] || 0, y: p[3] || 0 };
         out.push({
           movePicture: {
-            id: p[0], x: p[2] || 0, y: p[3] || 0,
+            id: p[0], ...at,
             scaleX: p[5] || 100, scaleY: p[5] || 100, opacity: 255 - (p[6] || 0),
             duration: (p[14] || 0) / 10, wait: (p[15] || 0) !== 0,
           },
@@ -290,8 +299,17 @@ function convertCommandList(list, context = {}) {
         break;
       }
       case CODE.callEvent: {
-        // p[0] 0 common event / 1 map event page / 2 indirect. Only the common-event
-        // call maps: the inliner runs the same conversion the 1005 path uses.
+        // p[0] 0 common event / 1 map event page / 2 indirect. Common events and
+        // pages of an event on this map are inlined by the same conversion the 1005 path uses (the commands keep the caller's
+        // event as "this event", as the engine's interpreter does).
+        if (p[0] === 1) {
+          const target = p[1] === 10005 ? context.eventId : p[1];
+          const pageData = context.rawEvents?.find(event => event.id === target)?.pages?.[(p[2] || 1) - 1];
+          const data = pageData && findChunk(pageData.chunks, 0x34);
+          if (data && (context.depth || 0) < 4) out.push(...convertCommandList(parseCommands(data.data), { ...context, depth: (context.depth || 0) + 1 }));
+          else unsupported(command);
+          break;
+        }
         if (p[0] !== 0) { unsupported(command); break; }
         const common = databaseMaps.commonEvents.get(p[1]);
         if (common && (context.depth || 0) < 4) out.push(...convertCommandList(parseCommands(common), { ...context, depth: (context.depth || 0) + 1 }));
@@ -328,6 +346,7 @@ function convertCommandList(list, context = {}) {
         // (2/3) and party-wide scopes have no single-actor equivalent.
         if (p[0] !== 1) { unsupported(command); break; }
         if (p[2] === 1) { out.push({ changeEquipment: { actor: p[1], slot: (p[3] || 0) + 1, item: 0 } }); break; }
+        if (p[2] === 0 && p[3] === 1) { out.push({ changeEquipment: { actor: p[1], itemVariable: String(p[4]) } }); break; }
         if (p[2] === 0 && p[3] === 0) {
           const kind = unifiedKind(p[4] || 0);
           if (kind === 0) { unsupported(command); break; } // consumables do not equip
@@ -376,6 +395,10 @@ function convertCommandList(list, context = {}) {
         out.push({ systemFlag: { key, value: { name: command.string, volume: p[2] ?? 100, pitch: p[3] ?? 100 } } });
         break;
       }
+      // 10680 Change System Graphics (name, p[0] stretch, p[1] font) and 10690 Change Screen Transitions (p[0] kind, p[1] effect):
+      // kept in rpgExtra.system like the other 2003 system settings; the player draws its own window skin and fades.
+      case 10680: out.push({ systemFlag: { key: 'systemGraphics', value: { name: command.string, stretch: p[0] ?? 0, font: p[1] ?? 0 } } }); break;
+      case 10690: out.push({ systemFlag: { key: `screenTransition:${p[0] ?? 0}`, value: p[1] ?? 0 } }); break;
       case CODE.changeSystemSfx:
         out.push({ systemFlag: { key: `systemSfx:${p[0]}`, value: { name: command.string, volume: p[1] ?? 100, pitch: p[2] ?? 100 } } });
         break;
@@ -426,6 +449,13 @@ function convertCommandList(list, context = {}) {
         const coords = p[1] === 0 ? { x: p[2] || 0, y: p[3] || 0 } : { varX: String(p[2]), varY: String(p[3]) };
         const facing = { 2: 'down', 4: 'left', 6: 'right', 8: 'up' }[(p[4] || 0) - 1];
         out.push({ relocate: { target, ...coords, ...(facing && target === 'player' ? { facing } : {}) } });
+        break;
+      }
+      case 10920: {
+        // Store Event ID (10910, Store Terrain ID, stays unsupported: the chipset terrain table is not converted): p[0] 0 direct or 1 variables, p[1..2] x/y (or their variables), p[3] the result variable.
+        if (p[0] > 1) { unsupported(command); break; }
+        const where = p[0] === 0 ? { x: p[1] || 0, y: p[2] || 0 } : { xVar: String(p[1]), yVar: String(p[2]) };
+        out.push({ locationInfo: { variable: String(p[3] ?? 0), info: 1, ...where } });
         break;
       }
       case CODE.eraseScreen: out.push({ screenFade: { direction: 'out', duration: 24 / 60 } }); break;
@@ -507,8 +537,8 @@ function convertCommandList(list, context = {}) {
           if (code === 36 || code === 37) { flush(); commands.push({ routeThrough: { target, value: code === 36 } }); routeOnly = false; continue; }
           if (code === 38 || code === 39) { flush(); commands.push({ routeOption: { target, option: 'walkAnimation', value: code === 39 } }); routeOnly = false; continue; }
           if (code === 40 || code === 41) { flush(); commands.push({ setTransparent: { target, value: code === 40 } }); routeOnly = false; continue; }
-          // 28-31 (speed/frequency step changes) have no relative form in the
-          // vocabulary: the player's routeOption carries absolute values.
+          // 28-31: one step up or down of the speed (1-6) or frequency (1-8) scale; the player's routeOption carries it as a delta.
+          if (code >= 28 && code <= 31) { flush(); commands.push({ routeOption: { target, option: code <= 29 ? 'speed' : 'frequency', delta: code % 2 === 0 ? 1 : -1 } }); routeOnly = false; continue; }
           flush();
           commands.push({ unsupported: { code: command.code, kind: 2003, route: code } });
           routeOnly = false;
@@ -561,7 +591,9 @@ function convertCommandList(list, context = {}) {
         out.push({ changeClass: { actor: p[1], classId: p[2] || 0, keepExp: p[5] === 0 } });
         break;
       }
-      case CODE.comment: break;
+      case 11350: out.push({ haltMovement: true }); break; // Halt All Movement: every running route stops
+      case 11340: break; // Proceed with Movement after anything but a route: nothing is running that a wait could cover
+      case CODE.comment: case 22410: break; // 22410 continues a comment over several lines
       default: unsupported(command);
     }
     i++;
@@ -630,6 +662,10 @@ function convertCondition(p, command, context) {
         case 0: return { condition: { partyMember: p[1] || 0 } };
         case 1: return { condition: { actorName: { actor: p[1] || 0, name: command.string } } };
         case 4: return { condition: { actorSkill: { actor: p[1] || 0, skill: p[3] || 0 } } };
+        case 5: { // equipped: weapons and armors share the item id space, the player checks the matching slot kind
+          const kind = unifiedKind(p[3] || 0);
+          return kind === 1 ? { condition: { actorWeapon: { actor: p[1] || 0, weapon: p[3] } } } : kind === 2 ? { condition: { actorArmor: { actor: p[1] || 0, armor: p[3] } } } : null;
+        }
         case 6: return { condition: { actorState: { actor: p[1] || 0, state: p[3] || 0 } } };
         default: return null; // level/hp comparisons and "is equipped" have no MWGP condition
       }
@@ -793,7 +829,7 @@ for (const file of mapFiles) {
       const commandsData = findChunk(page.chunks, 0x34);
       const eventId = event.id;
       const converted = commandsData
-        ? convertPageStory(parseCommands(commandsData.data), { mapId: id, eventId })
+        ? convertPageStory(parseCommands(commandsData.data), { mapId: id, eventId, rawEvents: raw.events })
         : { commands: [] };
       const spriteName = str(page.chunks, 0x15);
       if (spriteName) characterNames.add(spriteName);
@@ -863,6 +899,8 @@ const manifest = {
   assets: { root: 'assets', kind: 'decoded', tilesets: true, characters: true, pictures: true, faces: true, audio: Object.keys(audioIndex.bgm).length > 0 },
   audio: { index: audioIndex, system: {}, soundfont: null },
   tilesets, maps, database: db,
+  // 2000/2003 items, weapons and armors share one id space: the kind (1 weapon, 2-5 armor type) of the ids a variable can name.
+  itemKinds: Object.fromEntries([...unifiedType].filter(([, type]) => type >= 1 && type <= 5)),
   plugins: [], compatibility: { commands: {} }, titleScreen: { title1Name: '', title2Name: '', drawGameTitle: true },
 };
 await mkdir(output, { recursive: true });

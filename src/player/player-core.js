@@ -883,7 +883,7 @@ export async function startMwgPlayer(canvas, project) {
       if (!this.mover.isMoving) this.maybeStartEncounter();
       if (this.mover.isMoving) return;
       if (this.cooldown <= 0 && !this.gathering) {
-        this.mover.speed = moveSpeedFor(PLAYER_MOVE_SPEED, this.dashRule());
+        this.mover.speed = moveSpeedFor(PLAYER_MOVE_SPEED * (this.playerRouteSpeed ? 2 ** (this.playerRouteSpeed - 4) : 1), this.dashRule());
         const direction = mwg.Input.isDown('up') ? [0, -1, 'up'] : mwg.Input.isDown('down') ? [0, 1, 'down'] : mwg.Input.isDown('left') ? [-1, 0, 'left'] : mwg.Input.isDown('right') ? [1, 0, 'right'] : null;
         if (direction) {
           this.clearPointer();
@@ -1806,7 +1806,19 @@ export async function startMwgPlayer(canvas, project) {
     setRouteOption(route) {
       const target = String(route?.target || 'player');
       const current = this.routeOptions.get(target) || {};
-      this.routeOptions.set(target, { ...current, [String(route.option)]: route.value });
+      const option = String(route.option);
+      let value = route.value;
+      if (route.delta !== undefined) {
+        // Relative speed/frequency (2000/2003 move commands 28-31): speed runs 1-6 (default 4), frequency 1-8 (default 3).
+        const [base, max] = option === 'speed' ? [4, 6] : [3, 8];
+        value = Math.min(max, Math.max(1, Number(current[option] ?? base) + Number(route.delta)));
+      }
+      this.routeOptions.set(target, { ...current, [option]: value });
+      if (option === 'speed' && target === 'player') this.playerRouteSpeed = Number(value);
+    }
+    // 2000/2003 Halt All Movement: every running route (the player's and the events') ends where it stands.
+    haltMovement() {
+      for (const route of [...this.activeRoutes]) { this.activeRoutes.delete(route); route.resolve(); }
     }
     setRouteThrough(route) {
       this.routeThrough.set(String(route.target || 'player'), route.value === true);
@@ -2284,7 +2296,11 @@ export async function startMwgPlayer(canvas, project) {
       for (const [key, store] of [['changeItem', 'items'], ['changeWeapon', 'weapons'], ['changeArmor', 'armors']]) {
         const change = command[key];
         if (change === undefined) continue;
-        const id = String(change.id);
+        // An id named by a variable (2000/2003): the shared id space says which store holds it.
+        const named = change.idVariable !== undefined ? Number(state.game.variable(String(change.idVariable)) ?? 0) : null;
+        const kindOfId = named === null ? null : Number(project.itemKinds?.[named] || 0);
+        if (named !== null && key === 'changeItem' && kindOfId) { this.applyInventory(state, { [kindOfId === 1 ? 'changeWeapon' : 'changeArmor']: { id: named, amount: change.amount } }); continue; }
+        const id = String(named ?? change.id);
         extra[store][id] = Math.max(0, (extra[store][id] || 0) + this.resolveAmount(state, change.amount));
         if (extra[store][id] === 0) delete extra[store][id];
       }
@@ -2378,7 +2394,13 @@ export async function startMwgPlayer(canvas, project) {
         }
       }
       if (command.changeEquipment) {
-        const { actor, slot, item } = command.changeEquipment;
+        let { actor, slot, item } = command.changeEquipment;
+        if (command.changeEquipment.itemVariable !== undefined) {
+          item = Number(state.game.variable(String(command.changeEquipment.itemVariable)) ?? 0);
+          const itemKind = Number(project.itemKinds?.[item] || 0);
+          slot = itemKind === 1 ? 1 : itemKind;
+          if (!itemKind) { console.warn('MWGP equipment variable names an id that is not a weapon or armor', item); return; }
+        }
         if (item) this.actorRecord(actor).equips[String(slot)] = { id: Number(item), kind: Number(slot) === 1 ? 'weapon' : 'armor' };
         else delete this.actorRecord(actor).equips[String(slot)];
       }
@@ -2665,6 +2687,13 @@ export async function startMwgPlayer(canvas, project) {
     abortBattle() {
       if (!this.battleControls?.abort) { this.unsupportedCommand('abortBattle', {}); return; }
       this.battleControls.abort();
+    }
+    // 337 Show Battle Animation: drawn on each targeted enemy's sprite; the troop event does not wait for it.
+    enemyAnimation(spec) {
+      for (const enemy of this.battleEnemyTargets(spec, 'enemyAnimation')) {
+        const point = this.battlePointFor(enemy);
+        if (point && spec.animation > 0) this.playBattleAnimation(spec.animation, point).catch(error => console.warn('MWGP battle animation failed', error));
+      }
     }
     enemyRecoverAll(spec) {
       for (const enemy of this.battleEnemyTargets(spec, 'enemyRecoverAll')) {
@@ -3627,6 +3656,9 @@ export function resolveGameDataOperand(extra, context, spec) {
 // Exported for tools/test-smoke.mjs: the module has no imports and no
 // top-level side effects, so Node can import it and drive this function with
 // a stub scene. The browser entry point is unaffected (it uses startMwgPlayer).
+// A picture placed "by variables" (2000/2003): the position is read when the command runs.
+const withVariablePosition = (state, spec) => spec.xVar === undefined ? spec : { ...spec, x: Number(state.game.variable(String(spec.xVar)) ?? 0), y: Number(state.game.variable(String(spec.yVar)) ?? 0) };
+
 export function prepareEventCommands(commands, scene) {
   // A malformed list (hand-edited manifest, corrupt data) must never throw
   // synchronously into the caller's frame loop: warn loudly and run nothing.
@@ -3794,6 +3826,8 @@ export function prepareEventCommands(commands, scene) {
     if (command.rotatePicture) return { call: () => scene.rotatePicture(command.rotatePicture) };
     if (command.locationInfo) return { call: state => scene.locationInfo(state, command.locationInfo) };
     if (command.selectItem) return { call: state => scene.selectItem(state, command.selectItem) };
+    if (command.enemyAnimation) return { call: () => scene.enemyAnimation(command.enemyAnimation) };
+    if (command.haltMovement) return { call: () => scene.haltMovement() };
     if (command.abortBattle) return { call: () => scene.abortBattle() };
     if (command.enemyRecoverAll) return { call: () => scene.enemyRecoverAll(command.enemyRecoverAll) };
     if (command.returnToTitle) return { call: () => scene.returnToTitle() };
@@ -3802,9 +3836,9 @@ export function prepareEventCommands(commands, scene) {
     if (command.routeOption) return { call: () => scene.setRouteOption(command.routeOption) };
     if (command.routeImage) return { call: () => scene.setRouteImage(command.routeImage) };
     if (command.move?.repeat) return { call: () => command.move.wait ? scene.runMoveRoute(command.move.target, command.move.steps, command.move) : scene.startMoveRoute(command.move) };
-    if (command.picture) return { call: () => scene.showPicture(command.picture) };
+    if (command.picture) return { call: state => scene.showPicture(withVariablePosition(state, command.picture)) };
     if (command.erasePicture !== undefined) return { call: () => scene.erasePicture(command.erasePicture) };
-    if (command.movePicture) return { call: () => scene.movePicture(command.movePicture) };
+    if (command.movePicture) return { call: state => scene.movePicture(withVariablePosition(state, command.movePicture)) };
     if (command.tintPicture) return { call: () => scene.tintPicture(command.tintPicture) };
     if (command.balloon) return { call: () => scene.showBalloon(command.balloon) };
     if (command.animation) return { call: () => scene.playAnimation(command.animation) };

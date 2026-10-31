@@ -18,6 +18,10 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
   const source = resolve(sourceArg);
   const gameRoot = resolveGameRoot(source);
   const engineKind = existsSync(join(gameRoot, 'js', 'rmmz_core.js')) ? 'rpg-maker-mz' : 'rpg-maker-mv';
+  // The version the game's own core script declares (Utils.RPGMAKER_VERSION): plugins compare against it at load.
+  const engineVersion = (() => {
+    try { return readFileSync(join(gameRoot, 'js', engineKind === 'rpg-maker-mz' ? 'rmmz_core.js' : 'rpg_core.js'), 'utf8').match(/Utils\.RPGMAKER_VERSION\s*=\s*["']([\d.]+)["']/)?.[1] || null; } catch { return null; }
+  })();
   const dataDir = join(gameRoot, 'data');
   const destination = resolve(outputArg);
   const output = await createConversionOutput(destination);
@@ -942,8 +946,8 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
     }
     if (command.code === 333) return [{ changeEnemyState: { index: Number(command.parameters?.[0] ?? 0), add: Number(command.parameters?.[1] || 0) === 0, state: Number(command.parameters?.[2] || 0) } }];
     if (command.code === 334) return [{ enemyRecoverAll: { index: Number(command.parameters?.[0] ?? 0) } }];
-    // 337 plays an animation on an enemy sprite; battles draw no animations, so it is a visual-only no-op (partial).
-    if (command.code === 337) return [];
+    // 337 Show Battle Animation: [enemy index (-1 = the whole troop), animation id]; drawn on the enemy sprites.
+    if (command.code === 337) return [{ enemyAnimation: { index: Number(command.parameters?.[0] ?? 0), animation: Number(command.parameters?.[1] || 0) } }];
     if (command.code === 340) return [{ abortBattle: true }];
     // 104 Select Item: [variable, item type (1 regular, 2 key, 3 hidden A, 4 hidden B)].
     if (command.code === 104) return [{ selectItem: { variable: String(command.parameters?.[0] ?? 0), itemType: Number(command.parameters?.[1] || 1) } }];
@@ -1278,7 +1282,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
       const sign = name.match(/^[\!\$]+/)?.[0] || '';
       const big = sign.includes('$');
       const cols = big ? 3 : 12, rows = big ? 4 : 8;
-      if (size.w % cols || size.h % rows) console.warn(`MWGP convert: character sheet ${file} is ${size.w}x${size.h}, not divisible into ${cols}x${rows}; cells round down`);
+      if (size.w % cols || size.h % rows) console.warn(`MWGP warning: character sheet ${file} is ${size.w}x${size.h}, not divisible into ${cols}x${rows}; cells round down (the sheet itself is off-grid by under a cell, as the engine reads it)`);
       frames[name] = { big, object: sign.includes('!'), fw: Math.floor(size.w / cols), fh: Math.floor(size.h / rows) };
     }
     return frames;
@@ -1334,7 +1338,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
     format: 'MWGP',
     converter: { version: CONVERTER_VERSION },   // keep it this early in the file: readManifestConverterVersion reads only the first bytes
     version: 1,
-    source: { engine: engineKind, projectName: basename(source), convertedAt: new Date().toISOString() },
+    source: { engine: engineKind, ...(engineVersion ? { engineVersion } : {}), projectName: basename(source), convertedAt: new Date().toISOString() },
     display: { title: system.gameTitle || basename(source), width: pluginScreen?.width || system.advanced?.screenWidth || 816, height: pluginScreen?.height || system.advanced?.screenHeight || 624, ...(gameFont ? { font: { file: gameFont.file, family: 'GameFont', size: gameFont.size, fallback: gameFont.fallback } } : {}) },
     initialMapId: startMap?.id || null,
     player: startMap ? { mapId: startMap.id, x: startMap.id === system.startMapId ? system.startX : 1, y: startMap.id === system.startMapId ? system.startY : 1 } : null,
@@ -1473,7 +1477,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
 
   function buildCompatibilityReport(counts) {
     const supported = new Set([
-      301, 331, 332, 333, 334, 336, 351, 0, 101, 102, 105, 108, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129, 135,
+      301, 337, 331, 332, 333, 334, 336, 351, 0, 101, 102, 105, 108, 112, 113, 115, 117, 118, 119, 121, 123, 125, 126, 127, 128, 129, 135,
       201, 202, 203, 204, 211, 212, 335, 213, 214, 221, 222, 223, 224, 225, 230, 231, 232, 234, 235, 241, 242, 243, 136, 216, 217,
       244, 245, 246, 249, 250, 251, 311, 313, 314, 316, 318, 319, 321, 322,
       124, 132, 133, 134, 139, 206, 261, 312, 315, 317, 320, 324, 325, 326, 339, 354,
@@ -1510,7 +1514,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
     // 337 draws no animation (battles have none). 136 switches random encounters, 216 shows the followers and 217
     // gathers them. 281 (map name window) is stored in rpgExtra.system but nothing shows it yet.
     // 137 hides the formation screen; 138/140/323 are stored only.
-    const partial = new Set([111, 122, 205, 355, 356, 357, 137, 138, 140, 281, 323, 337]);
+    const partial = new Set([111, 122, 205, 355, 356, 357, 137, 138, 140, 281, 323]);
     // Keep the report honest for each project. These command families are only
     // partial when this conversion actually had to emit a loud fallback for one
     // of their shapes; otherwise a game that uses only the supported subset
