@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { parseDatabase, parseMapTree, parseMap, readArray, readChunks, findChunk, chunkInt, chunkString } from './lcf.mjs';
+import { CONVERTER_VERSION } from './converter-version.mjs';
 import { chipsetFrameFor } from '../src/player/chipset.js';
 import { buildAudioIndex } from './audio-index.mjs';
 
@@ -368,7 +369,8 @@ const audioIndex = buildAudioIndex(join(output, 'assets', 'audio'));
 const firstActor = db.actors.find(a => startParty.includes(a.id)) || db.actors[0] || {};
 const startMap = maps[0];
 const manifest = {
-  format: 'MWGP', version: 1, converter: { name: 'convert-lcf', version: '0.2.6' },
+  // "version" first: readManifestConverterVersion reads only the first bytes of the file.
+  format: 'MWGP', version: 1, converter: { version: CONVERTER_VERSION, name: 'convert-lcf' },
   source: { engine: 'rpg-maker-2003', projectName: basename(source), title: titleName || basename(source) },
   display: { tileSize: 16, font: null },
   initialMapId: startMap?.id || 1,
