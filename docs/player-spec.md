@@ -69,12 +69,12 @@ Two branches, picked from `manifest.titleScreen`, the same for every engine:
 - **Battle stage** (`buildBattleStage`): map battleback (or dark base),
   troop-positioned enemy battlers, side-view party idle poses dimmed when
   defeated.
-- **RGSS overlay** (`rgss-screen.js`): live `Sprite`/`Plane` instances
-  composited on a letterboxed canvas over the game canvas (z-order, viewports,
-  `src_rect`, opacity); `Bitmap` is real on canvas (blt, text with
-  shadow/outline, gradients, get/set_pixel). `Window` is not drawn yet (games
-  that build their windows from Sprites still show their text); tone/flash and
-  blend types are pending.
+- **RGSS overlay** (`rgss-screen.js`): live `Sprite`/`Plane`/`Window`
+  instances composited on a letterboxed canvas over the game canvas (z-order,
+  viewports, `src_rect`, opacity, blend types, tone/colour/flash overlays);
+  a `Window` draws its contents bitmap inside a translucent backing (or its
+  windowskin stretched) with the cursor rectangle highlighted. `Bitmap` is
+  real on canvas (blt, text with shadow/outline, gradients, get/set_pixel).
 - Map transfers carry `GameState` through `SaveSystem` (`runtime-transition`
   payload) into a scene rebuilt in the same page (`switchMap`; the URL follows
   via `history.replaceState`); music resumes from its playhead. A failed switch
@@ -171,10 +171,14 @@ for the harness.
 Save-data state: `ensureBoot` materializes the game's `SaveData.register`
 values before first script use and snapshots them after every script (every
 registered global, `$player`/`$bag`/`$PokemonGlobal` in Void, is the game's
-own object), which is why Void's character select runs. There is no entry
-point into a game's own menu scenes: Escape opens the player's menu. Running
-them needs a generic scene entry, a real `Window` and full `Game.start_new`
-state.
+own object), which is why Void's character select runs. A scene the game's
+own code asks for (`$scene = Scene_Menu.new` in a script) now runs: the
+runtime hands the assigned instance to the player (`takeSceneRequest`),
+which runs its `main` loop with the map paused underneath — its Sprites and
+Windows draw on the RGSS screen, its `Input` reads the keyboard probe, and
+returning to a `Scene_Map` (or a failing scene) lands back on the map.
+Escape still opens the player's own menu; a game's menu scene runs only
+when its own code requests it, as in the engine.
 
 ## 9. Compatibility, validation in the browser, gaps
 
@@ -186,13 +190,25 @@ state.
   `--maps` additionally boots every map (or a selected spread) and checks for
   crashes and blank output; `--soak` runs a timed input bot and fails on
   runtime errors or an unresponsive page.
-- Known gaps (roadmap): real `Window` (skin/contents/cursor/index); full
-  `Game.start_new` state (menus/battles end to end); a generic entry into a
-  game's own title/menu scenes; the MV scene/window layer for plugins that
-  draw; VX/Ace database mapping;
-  tone/color/flash and blend types on the RGSS overlay; move-route script
-  steps; async conditions/operands; Formation screen; save import from engine
-  formats; 2000/2003 support (converter spec section 9).
+- Shops are Buy/Sell/Leave with quantities (`shop.js`); number and name
+  entry happen in game (`entry.js`: digit-by-digit, letter-by-letter, no
+  browser prompt), and name entry renames the target actor's record. The
+  Control Timer shows its `Sprite_Timer` count on screen (`formatTimer`),
+  and Options carry Always Dash alongside the audio mixer (persisted as
+  `mwgp.options`, shared with the title screen).
+- A save made by RPG Maker itself imports from the title Options
+  (`save-import.js`: MV LZString-base64 and MZ zlib saves decode to the
+  engine's save object, mapped onto switches/variables/self-switches, party,
+  gold, inventory, actor records and the map position in File 1).
+- Known gaps (roadmap): full
+  `Game.start_new` state (a game's own scenes that need state its start-up
+  builds beyond the save-data registrations); the MV scene/window layer for plugins that
+  draw;
+  2000/2003 polish: water animation across frames in the
+  chipset atlas (border variants are composed from the engine's quarter
+  tables, frame 0 only), Maniac/DynRPG patch commands, and
+  the 2003 ATB specifics in battles (conversion and rendering work on both
+  installed projects — `tools/test-lcf.mjs`).
 
 ## 10. MV/MZ web builds: the nw.js host layer (`src/web/nwjs-host.js`)
 

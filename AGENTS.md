@@ -38,6 +38,7 @@ npm start                  # serves the launcher at http://127.0.0.1:4173 (port 
 npm run scan                # same detection logic as `start`, but prints the catalog as JSON and exits
 npm run convert:mv -- "RPGM_versions\<project>" "MWGP_versions\<project>"
 npm run convert:rgss -- "RPGM_versions\<project>" "MWGP_versions\<project>"
+npm run convert:lcf -- "RPGM_versions\<project>" "MWGP_versions\<project>"   # RPG Maker 2000/2003 (LCF)
 npm run convert:auto -- RPGM_versions MWGP_versions [--jobs N] [--skip-existing] [--web]   # every game MWGP by default, in parallel
 npm run studio -- lift|publish|merge|compare|edit            # MWGP Studio commands
 npm run build:web -- "RPGM_versions\<project>" "MWGP_versions\<project>"   # one MV/MZ or XP/VX/Ace web build
@@ -209,7 +210,7 @@ BGM/image), 216 and 281 into `rpgExtra.system`; menu and save access, encounter 
 name band (281), and the battle/victory/defeat audio are honoured (Esc/X, the menu's Save entry, `startTroopBattle`, the
 map scene), the rest (138, 140, 323) is stored only. `changeActorStat` is 312/315/317/326 (MP, EXP
 with level-up, parameter bonus, TP), `changeActorText` 320/324, `changeActorImages` 322 (which the first converter wrongly
-stored as the profile; the profile is 325), `timer` 124 plus the `if.timer` condition (no on-screen counter), `vehicleBoard`
+stored as the profile; the profile is 325), `timer` 124 plus the `if.timer` condition (with the on-screen Sprite_Timer count, `formatTimer`), `vehicleBoard`
 206, `playMovie` 261 (a `<video>` overlay over `assets/movies/<name>.webm`, copied by the converter), `forceAction` 339
 (`runBattle`'s `hooks.onControls` hands the scene a `forceAction`, run at the point of the troop event; the cost is paid, canUse is
 skipped) and `returnToTitle` 354. Also `selectItem` 104, `rotatePicture` 233, `locationInfo` 285 (Game_Map's own terrain-tag/tile/region
@@ -433,8 +434,8 @@ passives screens. `tools/test-list-hook.mjs` covers the contract.
 
 **XP database (`tools/rgss-database.mjs`):** `convert-rgss.js` converts `Actors/Classes/Skills/Items/Weapons/Armors/
 Enemies/Troops/States/System.rxdata` into the same MV-shaped `database`, so XP games with the default battle system
-use this runner and menu unchanged. (VX `.rvdata` / Ace `.rvdata2` files are discovered and their maps/events/scripts convert, but the
-mapper stays XP-only: VX/Ace manifests ship `database: {}`.) Stats map to params (mhp, mmp, atk = weapon atk, def = pdef, mat = int, mdf = mdef,
+use this runner and menu unchanged. (Ace `.rvdata2` databases map too (`convertAceDatabaseTables`: RGSS3 features/effects/formulas are
+already MV-shaped); VX `.rvdata` databases map too (`convertVxDatabaseTables`, assumed VX shapes, no local VX game).) Stats map to params (mhp, mmp, atk = weapon atk, def = pdef, mat = int, mdf = mdef,
 agi, luk = dex, and param 8 = str); each skill's power/stat factors are written out as an XP damage formula string; the
 per-actor stat tables (`actor.params[param][level]`) and XP's exp curve (`actor.expCurve`) live on the actor; element/
 state ranks become trait 11/13 rates; troop pages convert through the same event converter. XP's own records use ids 1
@@ -510,8 +511,8 @@ from `encounter_list`/`encounter_step` (XP, `convert-rgss.js`, equal weights).
   affected.
 - **Gamepad stick**: mwg reads every axis against a fixed 0.5 threshold, the same as the engine's; it is not
   configurable. The player binds only axes 0 and 1 (the left stick).
-- **Not done**: the gold and item doubling of trait 64 (ids 4 and 5) is not applied; the MZ turn-based battles ignore the
-  first strike, as the engine does.
+- **Gold and drop doubling**: trait 64 ids 4 and 5 double the victory gold and the drop odds (`rewards` in `battle.js`).
+- **Not done**: the MZ turn-based battles ignore the first strike, as the engine does.
 
 Older manifests: the list of overridden methods is read again from the plugin sources when a manifest has no `mapHooks`
 (`map-hooks.js`). XP encounter fields of an existing manifest are filled by `npm run migrate:manifest -- <mwgp.json>
@@ -690,9 +691,11 @@ Game-agnostic: nothing in the converter or player names a particular game (sidec
   real menus) is untested. A person playing is the next real check.
 - **Timing** — snippets that do not wait on frames are synchronous; their dialogue/balloons/animations are queued and
   awaited in order after the snippet. Code that waits on frames is lifted to async (see above). Conditions and
-  Control Variables scripts stay synchronous (never lifted). Not covered: move-route script steps.
-  VX converts end to end (`tools/rgss-vx.mjs` tables, synthetic VX/XP fixtures in `npm test`) but ships
-  `database: {}` (flat VX stats unmapped: duel-fallback battles, minimal menu) and empty tile-passage
+  Control Variables scripts that wait are awaited too (`evaluateAsync`/`evaluateValueAsync`). Move-route script
+  steps run between movement segments (`routeSegments` in player-core), including inside repeating routes.
+  VX converts end to end (`tools/rgss-vx.mjs` tables, synthetic VX/XP fixtures in `npm test`); its database
+  maps too (`convertVxDatabaseTables`: flat VX stats onto MV's eight parameters, spi as both mat and mdf)
+  but it ships empty tile-passage
   flags (no database source: movement unclamped), and no local VX game has been played through yet.
   Ace converts end to end the same way (`tools/rgss-ace.mjs`, synthetic Ace fixture in `npm test`,
   `.rgss3a` archives extract): it shares VX's event numbering (assumed, unverified against a real Ace

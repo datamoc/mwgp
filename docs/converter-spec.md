@@ -333,10 +333,19 @@ Prints `{ valid, maps, events, commands }` or the error list.
 
 ## 9. Gaps and roadmap
 
-- **2000/2003 (LCF)**: not converted. Path: liblcf tables (pinned tree in
-  downloads) + LCF2XML round-trip checks, then an LDB/LMT/LMU→MWGP mapper.
-- **VX/Ace database**: flat stats unmapped (`database: {}`); battles and menu
-  stay minimal until mapped.
+- **2000/2003 (LCF)**: converted by `tools/convert-lcf.mjs` (LDB database,
+  LMT map tree, LMU maps/events; chipset atlas composed by the player from
+  `src/player/chipset.js`). Autotile frames splice their four connection
+  quarters with the engine's own tables (`chipsetTileQuads`, after
+  EasyRPG's GenerateAutotileAB/D) at animation frame 0; water animation
+  across frames is not composed. Maniac/DynRPG patch commands stay
+  explicit unsupported markers.
+  Verified on the two installed projects (`tools/test-lcf.mjs`).
+- **VX/Ace database**: mapped to MV-shaped tables by
+  `tools/rgss-database.mjs` (`convertVxDatabaseTables` /
+  `convertAceDatabaseTables`), so battles and menu work; RGSS3 damage
+  formulas and feature lists are carried verbatim where the runner
+  reads them.
 - **Saves are player-side only**: engine save files (`.rpgsave`, `SaveData`)
   are not imported; Continue reads the player's own slots.
 - **No game-, framework- or plugin-specific code** in converter or player:

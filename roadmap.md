@@ -38,9 +38,10 @@ player, not new upstream API.
   Essentials pattern) drew from the top of the sheet. Dimensions now fall back per axis
   in `src/player/rgss-screen.js`, with regression cases in `tools/test-rgss-screen.mjs`
   (`npm test`). The visual re-check itself (fresh capture vs the sheet symptom) stays open.
-- [ ] Preserve nested RGSS event labels. Fresh conversion still reports dropping labels
-  inside blocks (maps 27-29 and 47-49 in Void 0.1.4); exercise their jumps after fixing
-  conversion. Reported to the session owning `tools/convert-rgss.js`.
+- [x] Preserve nested RGSS event labels. `convert-rgss.js` turns a label (118) inside a
+  branch, loop or choice into its own passage (the rest of the block plus what follows it), and
+  `tools/test-smoke.mjs` pins it on the XP fixture (2026-10-31). No drop warning remains in the
+  converter; reconvert Void to pick up the passages in maps 27-29 and 47-49 if the manifest predates this.
 - [x] Identify the HTTP 404s in the Karryn reference: its own cache loader deliberately
   fetches optional cache files and falls back to an empty cache when absent. Preserve
   fetch/XHR failures as network notes, while failed script/image/media/font/stylesheet
