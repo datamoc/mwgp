@@ -1241,6 +1241,7 @@ export async function startMwgPlayer(canvas, project) {
       // Pages containing labels run as a story: passages keyed by label name,
       // following { goto } jumps until a passage runs out. GameState is mutated
       // in place, so switches/variables set mid-passage survive the jump.
+      this.currentTrigger = page?.trigger;
       if (page.story) {
         const passages = Object.fromEntries(Object.entries(page.story.passages || {}).map(([name, body]) => [name, prepareEventCommands(body, this)]));
         const order = Array.isArray(page.story.order) ? page.story.order : Object.keys(passages);
@@ -1736,7 +1737,11 @@ export async function startMwgPlayer(canvas, project) {
     async runLoop(body) {
       // MV loops are unbounded unless a Break Loop fires; the cap only guards against a
       // malformed/never-breaking loop freezing the tab, it is not gameplay-visible.
-      for (let iteration = 0; iteration < 100000; iteration++) {
+      // A parallel event gets one interpreter slice per frame in the engine, so its
+      // loops cannot spin five figures there — cap them low enough that an infinite
+      // parallel loop costs milliseconds instead of seconds of timer churn.
+      const cap = this.currentTrigger === 'parallel' ? 400 : 100000;
+      for (let iteration = 0; iteration < cap; iteration++) {
         // Keep malformed or plugin-dependent loops cooperative. Without this
         // yield, even the safety cap would still freeze input/rendering first.
         if (iteration > 0 && iteration % 100 === 0) await new Promise(resolve => setTimeout(resolve, 0));
@@ -1747,7 +1752,7 @@ export async function startMwgPlayer(canvas, project) {
           throw error;
         }
       }
-      console.warn('MWGP loop exceeded 100000 iterations without a Break Loop; stopping it');
+      if (cap >= 100000) console.warn('MWGP loop exceeded 100000 iterations without a Break Loop; stopping it');
     }
     copyVariable(state, command) {
       const value = command.random

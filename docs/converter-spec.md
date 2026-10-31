@@ -338,8 +338,19 @@ Prints `{ valid, maps, events, commands }` or the error list.
   `src/player/chipset.js`). Autotile frames splice their four connection
   quarters with the engine's own tables (`chipsetTileQuads`, after
   EasyRPG's GenerateAutotileAB/D) at animation frame 0; water animation
-  across frames is not composed. Maniac/DynRPG patch commands stay
-  explicit unsupported markers.
+  across frames is not composed. The documented command surface
+  (liblcf `rpg::EventCommand`, ~128 core codes) converts except the
+  documented gaps: 0.26 % of Shadow's Penance's 1.53 M commands and 0.7 %
+  of Theia's 5.6 M stay loud `{ unsupported }` markers — map-event Call
+  Event, route speed/frequency steps, screen transitions other than fade,
+  variable-coordinate pictures, level/hp/actor-equip conditions, 2003
+  sprite flash, and the Maniac/DynRPG patch commands (which stay explicit
+  markers by policy). Command layouts are pinned against EasyRPG's
+  interpreters (`notes/rpgmaker-docs/lcf-command-params.md`, local
+  reference checkout) — the 10220 Control Variables layout in particular
+  was misread before (op/type/value at wrong indexes, silently writing
+  wrong values) and the corrected readback is verified against real
+  command tuples. Per-command status: `docs/engine-coverage.md`.
   Verified on the two installed projects (`tools/test-lcf.mjs`).
 - **VX/Ace database**: mapped to MV-shaped tables by
   `tools/rgss-database.mjs` (`convertVxDatabaseTables` /
