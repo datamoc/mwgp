@@ -9,23 +9,24 @@ const params = () => Array.from({ length: 8 }, (_, param) => [0, ...Array.from({
 const actor = (id, name) => ({ id, name, nickname: '', classId: 1, initialLevel: 1, maxLevel: 99, profile: '', note: '', characterName: '', characterIndex: 0, faceName: '', faceIndex: 0, battlerName: '', equips: [1, 0, 0, 0, 0], traits: [], skills: [] });
 
 // One event: an action event whose page shows one line of text when the player faces it and presses the action key.
-const actionEvent = (id, x, y, text) => ({
+const actionEvent = (id, x, y, text, { moveType = 0, moveSpeed = 3, moveFrequency = 3 } = {}) => ({
   id, name: `EV${String(id).padStart(3, '0')}`, note: '', x, y,
   pages: [{
     conditions: { actorId: 1, actorValid: false, itemId: 1, itemValid: false, selfSwitchCh: 'A', selfSwitchValid: false, switch1Id: 1, switch1Valid: false, switch2Id: 1, switch2Valid: false, variableId: 1, variableValid: false, variableValue: 0 },
     directionFix: false, image: { tileId: 0, characterName: '', direction: 2, pattern: 1, characterIndex: 0 },
     list: [{ code: 101, indent: 0, parameters: ['', 0, 0, 2] }, { code: 401, indent: 0, parameters: [text] }, { code: 0, indent: 0, parameters: [] }],
-    moveFrequency: 3, moveRoute: { list: [{ code: 0, parameters: [] }], repeat: true, skippable: false, wait: false },
-    moveSpeed: 3, moveType: 0, priorityType: 1, stepAnime: false, through: false, trigger: 0, walkAnime: true,
+    moveFrequency, moveRoute: { list: [{ code: 0, parameters: [] }], repeat: true, skippable: false, wait: false },
+    moveSpeed, moveType, priorityType: 1, stepAnime: false, through: false, trigger: 0, walkAnime: true,
   }],
 });
 
-const map = ({ id, name, displayName, disableDashing = false, encounters = false, events = [] }) => ({
+// `tiles` puts tile ids on the lowest layer: [x, y, tileId]. The tileset below gives tile 5 the damage-floor flag and tile 6 the counter flag.
+const map = ({ id, name, displayName, disableDashing = false, encounters = false, events = [], tiles = [] }) => ({
   id, displayName, disableDashing, encounterStep: 30, encounterList: encounters ? [{ troopId: 1, weight: 10, regionSet: [] }] : [],
   width: 8, height: 8, tilesetId: 1, autoplayBgm: false, autoplayBgs: false, scrollType: 0, specifyBattleback: false,
   bgm: { name: '', volume: 90, pitch: 100, pan: 0 }, bgs: { name: '', volume: 90, pitch: 100, pan: 0 },
   battleback1Name: '', battleback2Name: '', parallaxName: '', parallaxLoopX: false, parallaxLoopY: false, parallaxSx: 0, parallaxSy: 0,
-  note: name, data: [...row(64), ...row(64), ...row(64), ...row(64), ...row(64), ...row(64)],
+  note: name, data: [...Object.assign(row(64), Object.fromEntries(tiles.map(([x, y, tile]) => [y * 8 + x, tile]))), ...row(64), ...row(64), ...row(64), ...row(64), ...row(64)],
   events: [null, ...events],
 });
 
@@ -53,8 +54,8 @@ export function writeSyntheticMvProject(dir) {
   write('Enemies.json', [null, { id: 1, name: 'Slime', battlerName: '', battlerHue: 0, params: [50, 0, 10, 10, 10, 10, 10, 10], exp: 10, gold: 5, dropItems: [], actions: [{ conditionParam1: 0, conditionParam2: 0, conditionType: 0, rating: 5, skillId: 1 }], traits: [], note: '' }]);
   write('Troops.json', [null, { id: 1, name: 'Slimes', members: [{ enemyId: 1, x: 400, y: 300, hidden: false }], pages: [], span: 0 }]);
   write('MapInfos.json', [null, { id: 1, name: 'Room', order: 1, parentId: 0, expanded: false }, { id: 2, name: 'Corridor', order: 2, parentId: 0, expanded: false }]);
-  write('Tilesets.json', [null, { id: 1, name: 'Synthetic', mode: 0, tilesetNames: ['', '', '', '', '', '', '', '', ''], flags: [0], note: '' }]);
-  write('Map001.json', map({ id: 1, name: 'Room', displayName: 'Test Room', encounters: true, events: [actionEvent(1, 4, 2, 'Hello from the sign.')] }));
-  write('Map002.json', map({ id: 2, name: 'Corridor', displayName: 'Second Room', disableDashing: true }));
+  write('Tilesets.json', [null, { id: 1, name: 'Synthetic', mode: 0, tilesetNames: ['', '', '', '', '', '', '', '', ''], flags: [0, 0, 0, 0, 0, 0x100, 0x80], note: '' }]);
+  write('Map001.json', map({ id: 1, name: 'Room', displayName: 'Test Room', encounters: true, events: [actionEvent(1, 4, 2, 'Hello from the sign.'), actionEvent(2, 6, 4, 'Across the counter.')], tiles: [[1, 5, 5], [6, 3, 6]] }));
+  write('Map002.json', map({ id: 2, name: 'Corridor', displayName: 'Second Room', disableDashing: true, events: [actionEvent(1, 6, 6, 'A wanderer.', { moveType: 1, moveSpeed: 5, moveFrequency: 5 })] }));
   return dir;
 }

@@ -2,6 +2,7 @@
 import { AudioManager } from './audio-manager.js';
 import { assetUrl, loadAssetUrl } from './asset-url.js';
 import { createBattleEngine } from './battle-engine.js';
+import { chooseDirections, DEFAULT_FREQUENCY, DEFAULT_SPEED, DIRECTION_STEPS, moveInterval, stopFrames } from './event-movement.js';
 import { canEncounter, encounterProgress, encounterStepCount, followerStep, isDashing, moveSpeedFor, pickTroop } from './map-rules.js';
 import { WeatherLayer } from './weather.js';
 import { createMapEngine } from './map-engine.js';
@@ -18,6 +19,9 @@ import { stagePositions } from './formation.js';
 const KNOWN_TRIGGERS = new Set(['action', 'touch', 'autorun', 'parallel']);
 // Cells per frame of a walking character (a dash doubles it, see map-rules.js).
 const PLAYER_MOVE_SPEED = 6;
+// Tileset flag bits shared by the map rules (bush 0x40 is read in the encounter code).
+const TILE_FLAG_COUNTER = 0x80;
+const TILE_FLAG_DAMAGE_FLOOR = 0x100;
 
 // Sprite_Timer's text: minutes unpadded, seconds zero-padded (the engine
 // floors the remaining time to whole seconds). Pure so tests can pin it.
@@ -841,6 +845,7 @@ export async function startMwgPlayer(canvas, project) {
       this.updateBattlePoses(dt);
       this.updateCameraPan(dt);
       this.updateRoutes(dt);
+      this.updateSelfMovement(dt);
       this.updatePreload(dt);
       if (nativeAutotilesReady) {
         this.autotileElapsed += dt;
@@ -879,7 +884,7 @@ export async function startMwgPlayer(canvas, project) {
       this.cooldown -= dt;
       this.renderPosition = { x: this.player.x / tileSize, y: this.player.y / tileSize };
       this.updateCamera();
-      if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1; this.syncActiveVehicle(); if (!this.runEventAt(x, y, 'touch')) this.countEncounterStep(x, y); }
+      if (this.pendingStep && !this.mover.isMoving) { const [x, y] = this.pendingStep; position.x = x; position.y = y; this.pendingStep = null; this.rpgExtra.steps = (this.rpgExtra.steps || 0) + 1; this.syncActiveVehicle(); this.applyFloorDamage(x, y); if (!this.runEventAt(x, y, 'touch')) this.countEncounterStep(x, y); }
       if (!this.mover.isMoving) this.maybeStartEncounter();
       if (this.mover.isMoving) return;
       if (this.cooldown <= 0 && !this.gathering) {
@@ -897,7 +902,7 @@ export async function startMwgPlayer(canvas, project) {
           this.finishPointerAction();
         }
         if (mwg.Input.justPressed('confirm')) {
-          if (!this.tryVehicleAction()) this.runEventAt(...this.targetCell(), 'action');
+          if (!this.tryVehicleAction()) this.triggerAction();
         }
         if (mwg.Input.justPressed('padMenu') && this.menuAllowed()) this.openMenu();
       }
@@ -1173,21 +1178,45 @@ export async function startMwgPlayer(canvas, project) {
     tileFlagAt(x, y, bit, layers) {
       return layers.some(layer => (Number(tilesetFlags[this.tileIdAt(x, y, layer)] ?? 0) & bit) !== 0);
     }
+    // Game_Player.triggerAction: the event in front; when none starts and the cell in front is a counter, the one behind it.
+    triggerAction() {
+      const [x, y] = this.targetCell();
+      if (this.runEventAt(x, y, 'action')) return true;
+      if (!this.tileFlagAt(x, y, TILE_FLAG_COUNTER, [0, 1, 2, 3])) return false;
+      const [dx, dy] = [x - position.x, y - position.y];
+      return this.runEventAt(x + dx, y + dy, 'action');
+    }
+    // Game_Party.onPlayerWalk / Game_Actor.executeFloorDamage: each step on a damage floor costs every fighting member
+    // 10 HP (never the last one unless the database's "floor death" option is on) and flashes the screen red.
+    applyFloorDamage(x, y) {
+      if (this.activeVehicle || !this.tileFlagAt(x, y, TILE_FLAG_DAMAGE_FLOOR, [0, 1, 2, 3])) return;
+      const floorDeath = project.database?.system?.optFloorDeath === true;
+      for (const id of (this.rpgExtra.party || []).slice(0, this.maxBattleMembers())) {
+        const record = this.actorRecord(id);
+        if (!(record.hp > 0)) continue;
+        const damage = Math.min(10, floorDeath ? record.hp : Math.max(record.hp - 1, 0));
+        record.hp -= damage;
+        record.dead = record.hp <= 0;
+      }
+      this.screenFlash({ color: 0xff0000, peak: 128 / 255, duration: 8 / 60, wait: false });
+    }
     targetCell() { const offsets = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }; const [dx, dy] = offsets[this.facing]; return [position.x + dx, position.y + dy, 'action']; }
     canStep(x, y, dx, dy) {
       if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
-      const size = map.width * map.height, bit = directionBit(dx, dy);
-      // Resolve the visible layers from top to bottom. Empty cells and star
-      // tiles do not participate in collision; the first real tile is
-      // authoritative. Treating an empty upper layer as passable used to let
-      // the lower wall be walked through, while waiting until the end could
-      // reject valid door/stair cells whose upper tile is passable.
       if (this.routeThrough.get('player') === true) return true;
+      return this.tilesAllowStep(x, y, dx, dy) && this.eventAllowsStep(x, y);
+    }
+    // The map's own passability of entering (x, y) with the step (dx, dy); characters are not looked at.
+    tilesAllowStep(x, y, dx, dy) {
+      // Resolve the visible layers from top to bottom. Empty cells and star tiles do not participate in collision; the
+      // first real tile is authoritative. Treating an empty upper layer as passable used to let the lower wall be walked
+      // through, while waiting until the end could reject valid door/stair cells whose upper tile is passable.
+      const size = map.width * map.height, bit = directionBit(dx, dy);
       const tileIds = Array.from({ length: 4 }, (_, index) => {
         const layer = 3 - index;
         return map.data?.[layer * size + y * map.width + x] || 0;
       });
-      return passageAllowsStep(tileIds, tilesetFlags, bit) && this.eventAllowsStep(x, y);
+      return passageAllowsStep(tileIds, tilesetFlags, bit);
     }
     eventAllowsStep(x, y) {
       const event = mapEntry?.mwgEvents?.find(item => item && item.x === x && item.y === y);
@@ -1906,6 +1935,50 @@ export async function startMwgPlayer(canvas, project) {
       const changed = this.rpgExtra.mapTilesets?.[String(nearest.mapId)];
       if (changed !== undefined) next.set('tileset', String(changed));
       preloadMap(next);
+    }
+    // The map's events as the scene holds them (positions change with movement).
+    eventsOnMap() { return (mapEntry?.mwgEvents || []).map(event => ({ id: event.id, x: event.x, y: event.y })); }
+    // Autonomous movement of events (the page's "Autonomous Movement"): random and approach decide a step every
+    // move-time-plus-stop-time (speed and frequency; a route's Change Speed/Frequency overrides the page); a custom
+    // route runs as a background route. Events hop a tile at a time and wait while anything else is happening.
+    updateSelfMovement(dt) {
+      if (this.dialogue || this.eventRunning || this.menuOpen || this.transferring || this.encounterBusy || !this.mover) return;
+      this.selfMovement ||= new Map();
+      this.customRoutes ||= new Map();
+      let moved = false;
+      for (const event of mapEntry?.mwgEvents || []) {
+        if (this.erasedEvents.has(event.id)) continue;
+        const movement = mwg.Rpg.activePage(event, this.gameState)?.movement;
+        const key = `event:${event.id}`;
+        if (!movement || !movement.type) { this.selfMovement.delete(event.id); continue; }
+        if (movement.type === 3) {
+          const page = mwg.Rpg.activePage(event, this.gameState);
+          if (movement.route && this.customRoutes.get(event.id) !== page) { this.customRoutes.set(event.id, page); this.startMoveRoute({ ...movement.route, target: key }); }
+          continue;
+        }
+        if (this.activeRoutes.size && [...this.activeRoutes].some(route => route.key === key)) continue;
+        const wait = (this.selfMovement.get(event.id) ?? Math.random() * 0.5) - dt;
+        if (wait > 0) { this.selfMovement.set(event.id, wait); continue; }
+        const options = this.routeOptions.get(key) || {};
+        const speed = Number(options.speed ?? movement.speed ?? DEFAULT_SPEED), frequency = Number(options.frequency ?? movement.frequency ?? DEFAULT_FREQUENCY);
+        const directions = chooseDirections({ type: movement.type, event, player: position, facing: event.facing || 'down' });
+        const page = mwg.Rpg.activePage(event, this.gameState);
+        const step = directions.map(direction => [direction, ...DIRECTION_STEPS[direction]]).find(([, dx, dy]) => this.eventCanStepTo(event, page, dx, dy));
+        if (!step) { this.selfMovement.set(event.id, directions.length ? 0.05 : stopFrames(frequency) / 60); continue; }
+        const [direction, dx, dy] = step;
+        event.x += dx; event.y += dy; if (!movement.directionFix) event.facing = direction; moved = true;
+        this.selfMovement.set(event.id, moveInterval(speed, frequency));
+      }
+      if (moved) this.refreshEventSprites();
+    }
+    // Whether an autonomous step of this event fits: inside the map, passable (unless the page is Through), clear of the
+    // player and of other solid events.
+    eventCanStepTo(event, page, dx, dy) {
+      const x = event.x + dx, y = event.y + dy;
+      if (x < 0 || y < 0 || x >= map.width || y >= map.height) return false;
+      if (page?.through === true) return true;
+      if (x === position.x && y === position.y && (page?.priorityType ?? 1) === 1) return false;
+      return this.eventAllowsStep(x, y) && this.tilesAllowStep(x, y, dx, dy);
     }
     updateRoutes(dt) {
       for (const route of [...this.activeRoutes]) {

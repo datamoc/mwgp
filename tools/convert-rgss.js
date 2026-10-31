@@ -246,6 +246,7 @@ export async function convertRgss(extractedArg, outputArg, flags = []) {
       // A labeled list converts to { story } instead of a flat array; the player
       // drives it with runStoryLoop (see runPage).
       const converted = convertCommands(list, { mapId, eventId });
+      const movement = convertMovement(page, mapId, eventId);
       return {
         trigger: ['action', 'touch', 'touch', 'autorun', 'parallel'][Number(field(page, 'trigger', 0))] || 'action',
         conditions: convertPageConditions(field(page, 'condition', null), mapId, eventId),
@@ -253,10 +254,45 @@ export async function convertRgss(extractedArg, outputArg, flags = []) {
         ...(converted.story ? { story: converted.story } : {}),
         through: Boolean(field(page, 'through', false)),
         priorityType: Number(field(page, 'through', false)) ? 0 : 1,
+        ...(movement ? { movement } : {}),
         image: field(graphic, 'character_name', '') ? { name: field(graphic, 'character_name', ''), index: 0, direction: Number(field(graphic, 'direction', 2)), pattern: Number(field(graphic, 'pattern', 1)) } : null
       };
     });
     return { id: String(eventId), name: String(field(event, 'name', '') || ''), x: Number(field(event, 'x', 0)), y: Number(field(event, 'y', 0)), pages };
+  }
+
+  // The page's autonomous movement (move_type 0 fixed, 1 random, 2 approach, 3 custom route), speed 1-6, frequency, and the
+  // walking / stepping / direction-fix flags; only what differs from the defaults is written. XP and VX have six frequency
+  // levels (their wait is (40 - 2f)(6 - f) frames), Ace five like MV: the XP/VX level f behaves as MV's f - 1.
+  function convertMovement(page, mapId, eventId) {
+    const type = Number(field(page, 'move_type', 0)), speed = Number(field(page, 'move_speed', 4));
+    const rawFrequency = Number(field(page, 'move_frequency', 3));
+    const frequency = isAce ? Math.min(5, Math.max(1, rawFrequency)) : Math.min(5, Math.max(1, rawFrequency - 1));
+    const options = { walkAnime: field(page, 'walk_anime', true) !== false, stepAnime: field(page, 'step_anime', false) === true, directionFix: field(page, 'direction_fix', false) === true };
+    if (!type && speed === 4 && frequency === 3 && options.walkAnime && !options.stepAnime && !options.directionFix) return null;
+    const route = type === 3 ? customRoute(field(page, 'move_route', null), mapId, eventId) : null;
+    return { type, speed, frequency, ...options, ...(route ? { route } : {}) };
+  }
+
+  // A page's custom route as one repeating move: its movement, jump, turn and wait steps; any other step is dropped loudly.
+  function customRoute(route, mapId, eventId) {
+    const unwrapped = unwrap(route);
+    const steps = [];
+    for (const item of field(unwrapped, 'list', [])) {
+      const code = field(item, 'code', 0), parameters = field(item, 'parameters', []);
+      const movement = {
+        1: { dx: 0, dy: 1 }, 2: { dx: -1, dy: 0 }, 3: { dx: 1, dy: 0 }, 4: { dx: 0, dy: -1 },
+        5: { dx: -1, dy: 1 }, 6: { dx: 1, dy: 1 }, 7: { dx: -1, dy: -1 }, 8: { dx: 1, dy: -1 },
+        9: { random: true }, 10: { toward: true }, 11: { away: true }, 12: { forward: true }, 13: { backward: true }
+      }[code];
+      const turn = { 16: 'down', 17: 'left', 18: 'right', 19: 'up', 20: 'right90', 21: 'left90', 22: 'around', 23: 'random', 24: 'random', 25: 'toward', 26: 'away' }[code];
+      if (movement) steps.push(movement);
+      else if (code === 14) steps.push({ jump: { dx: Number(parameters?.[0] || 0), dy: Number(parameters?.[1] || 0) } });
+      else if (turn) steps.push({ turn });
+      else if (code === 15) steps.push({ wait: Number(parameters?.[0] || 0) / FRAME_DIVISOR });
+      else if (code !== 0) console.warn(`MWGP convert: custom movement route step ${code} of map ${mapId} event ${eventId} has no converted equivalent and is skipped`);
+    }
+    return steps.length ? { target: `event:${eventId}`, steps, repeat: field(unwrapped, 'repeat', true) !== false, skippable: field(unwrapped, 'skippable', false) === true } : null;
   }
 
   function convertCommands(list, context = {}) {

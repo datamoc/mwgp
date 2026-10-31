@@ -211,6 +211,44 @@ export async function checkMapFeatures(browser, { port }) {
       await loaded.context.close();
     }
 
+    // 6b. Autonomous movement: an event set to random movement leaves its cell and stays inside the map.
+    {
+      const { context, page, errors } = await openPlayer(browser, base, '&map=2');
+      const cells = new Set();
+      let inside = true;
+      for (let i = 0; i < 30; i++) {
+        const event = await page.evaluate(() => { const e = globalThis.__MWG__.currentScene.eventsOnMap?.()[0] || null; return e; });
+        if (event) { cells.add(`${event.x},${event.y}`); inside &&= event.x >= 0 && event.y >= 0 && event.x < 8 && event.y < 8; }
+        await sleep(250);
+      }
+      check('a random-movement event wanders', cells.size > 1, `${cells.size} different cells`);
+      check('a wandering event stays inside the map', inside);
+      check('no page errors with a wandering event', errors.length === 0, errors.slice(0, 2).join(' | '));
+      await context.close();
+    }
+
+    // 6c. Map tiles: a damage floor costs the party HP on the step that lands on it, and an action across a counter
+    // reaches the event behind it.
+    {
+      const { context, page, errors } = await openPlayer(browser, base, '&map=1&x=1&y=4');
+      const hp = () => page.evaluate(() => globalThis.__MWG__.currentScene.actorRecord(1).hp);
+      const before = await hp();
+      await page.keyboard.down('ArrowDown');
+      await until(() => sceneState(page), current => current.y >= 5);
+      await page.keyboard.up('ArrowDown');
+      await sleep(300);
+      const after = await hp();
+      check('a damage floor costs the leader HP', after < before, `HP ${before} -> ${after}`);
+      await context.close();
+      const second = await openPlayer(browser, base, '&map=1&x=6&y=2');
+      await second.page.evaluate(() => { globalThis.__MWG__.currentScene.facing = 'down'; });
+      await second.page.keyboard.press('Enter');
+      const state = await until(() => sceneState(second.page), current => current.dialogue);
+      check('an action across a counter reaches the event behind it', state.dialogue, `at (${state.x},${state.y})`);
+      check('no page errors on damage floors and counters', errors.length + second.errors.length === 0, [...errors, ...second.errors].slice(0, 2).join(' | '));
+      await second.context.close();
+    }
+
     // 7. Weather: power 5 gives 50 falling particles, and none clears them.
     {
       const { context, page, errors } = await openPlayer(browser, base);

@@ -255,6 +255,7 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
       // drives it with runStoryLoop (see runPage).
       const converted = convertCommands(page.list || [], { mapId, eventId: event.id });
       if (page.image?.characterName) characterNames.add(page.image.characterName);
+      const movement = convertMovement(page, mapId, event.id);
       return {
         trigger: ['action', 'touch', 'touch', 'autorun', 'parallel'][page.trigger] || 'action',
         conditions: convertConditions(page.conditions, mapId, event.id),
@@ -262,9 +263,27 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
         ...(converted.story ? { story: converted.story } : {}),
         through: page.through === true,
         priorityType: page.priorityType === 0 || page.priorityType === 2 ? page.priorityType : 1,
+        ...(movement ? { movement } : {}),
         image: page.image?.characterName ? { name: page.image.characterName, index: page.image.characterIndex || 0, direction: page.image.direction || 2, pattern: page.image.pattern || 1 } : null
       };
     }) };
+  }
+
+  // The page's autonomous movement (Autonomous Movement and Options in the editor): type 0 fixed, 1 random, 2 approach,
+  // 3 custom route; only what differs from the defaults (fixed, speed 4, frequency 3, walking animation on) is written.
+  function convertMovement(page, mapId, eventId) {
+    const speed = Number(page.moveSpeed ?? 4), frequency = Number(page.moveFrequency ?? 3), type = Number(page.moveType || 0);
+    const options = { walkAnime: page.walkAnime !== false, stepAnime: page.stepAnime === true, directionFix: page.directionFix === true };
+    if (!type && speed === 4 && frequency === 3 && options.walkAnime && !options.stepAnime && !options.directionFix) return null;
+    let route = null;
+    if (type === 3) {
+      const converted = convertCommands([{ code: 205, indent: 0, parameters: [0, page.moveRoute || { list: [], repeat: true }] }], { mapId, eventId });
+      const moves = Array.isArray(converted) ? converted.filter(command => command.move) : [];
+      if (moves.length === 1 && converted.length === 1) route = moves[0].move;
+      else if (converted.length) console.warn(`MWGP convert: custom movement route of ${mapId ? `map ${mapId} ` : ''}event ${eventId} has steps other than movement; only its first movement part runs`);
+      if (!route && moves.length) route = moves[0].move;
+    }
+    return { type, speed, frequency, ...options, ...(route ? { route } : {}) };
   }
 
   // Self switches ('A'-'D') are a namespace keyed per map+event, distinct from the global
