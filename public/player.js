@@ -293,6 +293,35 @@ async function showTitleScreen(project) {
     const box = document.createElement('input'); box.type = 'checkbox'; box.checked = titleAudio.volumes.muted; box.addEventListener('change', () => titleAudio.setMuted(box.checked));
     const muteText = document.createElement('span'); muteText.textContent = 'Mute (M in game)'; mute.append(box, muteText); options.append(mute);
   } else options.textContent = 'This game has no converted audio.';
+  // Always Dash (the engine's ConfigManager option), shared with the in-game Options screen.
+  const dashRow = document.createElement('label'); dashRow.style.cssText = 'display:flex;gap:10px;align-items:center;margin:8px 0 0';
+  const dashBox = document.createElement('input'); dashBox.type = 'checkbox';
+  try { dashBox.checked = JSON.parse(localStorage.getItem('mwgp.options') || '{}').alwaysDash === true; } catch { dashBox.checked = false; }
+  dashBox.addEventListener('change', () => { try { const saved = JSON.parse(localStorage.getItem('mwgp.options') || '{}'); saved.alwaysDash = dashBox.checked; localStorage.setItem('mwgp.options', JSON.stringify(saved)); } catch { /* storage unavailable */ } });
+  const dashText = document.createElement('span'); dashText.textContent = 'Always Dash'; dashRow.append(dashBox, dashText); options.append(dashRow);
+  const rememberRow = document.createElement('label'); rememberRow.style.cssText = 'display:flex;gap:10px;align-items:center;margin:8px 0 0';
+  const rememberBox = document.createElement('input'); rememberBox.type = 'checkbox';
+  try { rememberBox.checked = JSON.parse(localStorage.getItem('mwgp.options') || '{}').commandRemember === true; } catch { rememberBox.checked = false; }
+  rememberBox.addEventListener('change', () => { try { const saved = JSON.parse(localStorage.getItem('mwgp.options') || '{}'); saved.commandRemember = rememberBox.checked; localStorage.setItem('mwgp.options', JSON.stringify(saved)); } catch { /* storage unavailable */ } });
+  const rememberText = document.createElement('span'); rememberText.textContent = 'Command Remember'; rememberRow.append(rememberBox, rememberText); options.append(rememberRow);
+  // Import a save made by RPG Maker itself (MV .rpgsave / MZ .rmmzsave) into File 1, then Continue.
+  const importRow = document.createElement('div'); importRow.style.cssText = 'margin:10px 0 0';
+  const importButton = document.createElement('button'); importButton.type = 'button'; importButton.textContent = 'Import RPG Maker save…'; importButton.style.cssText = 'padding:6px 10px;cursor:pointer';
+  const importFile = document.createElement('input'); importFile.type = 'file'; importFile.accept = '.rpgsave,.rmmzsave'; importFile.hidden = true;
+  importButton.addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', async () => {
+    const file = importFile.files?.[0]; if (!file) return;
+    try {
+      const { decodeEngineSave, convertEngineSave } = await import('/save-import.js');
+      const state = convertEngineSave(await decodeEngineSave(new Uint8Array(await file.arrayBuffer())));
+      const saves = new globalThis.mwg.SaveSystem({ namespace: `mwgp:${project.source?.projectName || 'project'}`, version: 1 });
+      const leaderId = state.extra.party[0], leader = leaderId ? state.extra.actors[String(leaderId)] : null;
+      saves.save('slot-1', state, { mapId: state.mapId, x: state.x, y: state.y, gold: state.extra.gold, leader: leader ? { name: leader.name, level: leader.level } : null });
+      importButton.textContent = 'Imported into File 1 — reloading…';
+      location.reload();
+    } catch (error) { console.warn('MWGP save import failed', error); importButton.textContent = 'Import failed — not an RPG Maker save'; }
+  });
+  importRow.append(importButton, importFile); options.append(importRow);
   const note = document.createElement('p'); note.className = 'mwgp-title-note'; note.textContent = 'Arrow keys / WASD / Enter or Space';
   const buttons = []; const makeButton = (label, primary, action) => { const button = document.createElement('button'); button.type = 'button'; button.textContent = label; if (primary) button.dataset.primary = 'true'; button.addEventListener('click', () => { menuSound('ok'); action(); }); buttons.push(button); return button; };
   let finish; const done = new Promise(resolve => { finish = mode => { titleAudio?.fadeOutBgm(0.8); if (mode === 'continue') { const next = new URL(location.href); next.searchParams.set('load', '1'); next.searchParams.set('skipTitle', '1'); history.replaceState(null, '', next); } else if (mode === 'new') { const next = new URL(location.href); next.searchParams.set('newGame', '1'); next.searchParams.set('skipTitle', '1'); history.replaceState(null, '', next); } root.remove(); resolve(); }; });
@@ -428,7 +457,28 @@ async function showTitleScreen(project) {
     menu.append(note); root.append(art, shade, content, menu, options); document.body.append(root);
   }
   const onKey = event => { if (!root.isConnected) return; if (['ArrowDown','ArrowRight','ArrowUp','ArrowLeft'].includes(event.key)) { if (!buttons.length) return; event.preventDefault(); const delta = event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1; const current = buttons.indexOf(document.activeElement); buttons[(current + delta + buttons.length) % buttons.length].focus(); menuSound('cursor'); } else if ((event.key === 'Enter' || event.key === ' ') && document.activeElement instanceof HTMLButtonElement) { event.preventDefault(); document.activeElement.click(); } else if (event.key === 'Escape') options.hidden = true; };
-  window.addEventListener('keydown', onKey); (buttons[0] || root).focus(); await done; window.removeEventListener('keydown', onKey);
+  window.addEventListener('keydown', onKey); (buttons[0] || root).focus();
+  // Gamepad on the title (the in-game pad bindings start with the scene):
+  // d-pad / left stick move the focus, A confirms, B closes Options.
+  let padPrevious = [];
+  const pollPad = () => {
+    if (!root.isConnected) return;
+    const pad = [...(navigator.getGamepads?.() || [])].find(candidate => candidate?.connected);
+    if (pad && buttons.length) {
+      const pressed = index => Boolean(pad.buttons[index]?.pressed);
+      const down = [...Array(16)].map((_, index) => pressed(index) || (index === 12 && (pad.axes[1] || 0) < -0.5) || (index === 13 && (pad.axes[1] || 0) > 0.5) || (index === 14 && (pad.axes[0] || 0) < -0.5) || (index === 15 && (pad.axes[0] || 0) > 0.5));
+      const edge = index => down[index] && !padPrevious[index];
+      const current = buttons.indexOf(document.activeElement);
+      if (edge(12) || edge(14)) { buttons[(current - 1 + buttons.length) % buttons.length].focus(); menuSound('cursor'); }
+      else if (edge(13) || edge(15)) { buttons[(current + 1) % buttons.length].focus(); menuSound('cursor'); }
+      else if (edge(0) && document.activeElement instanceof HTMLButtonElement) document.activeElement.click();
+      else if (edge(1)) options.hidden = true;
+      padPrevious = down;
+    }
+    if (root.isConnected) requestAnimationFrame(pollPad);
+  };
+  requestAnimationFrame(pollPad);
+  await done; window.removeEventListener('keydown', onKey);
 }
 async function showCompatibilityWarning(project) {
   // Per-feature report (T128): areas with a concrete remaining gap, most-used

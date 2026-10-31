@@ -8,6 +8,9 @@ import { createMapEngine } from './map-engine.js';
 import { runBattle, createPicker, expForLevel, actorParamBase, partyAbilities } from './battle.js';
 
 import { runMenu } from './menu.js';
+import { runShop } from './shop.js';
+import { chipsetAutotileIds, chipsetFillCellFor, chipsetTileQuads, ATLAS_BASE as CHIPSET_ATLAS_BASE, CHIPSET_COLS } from './chipset.js';
+import { runNumberInput, runNameInput } from './entry.js';
 import { stagePositions } from './formation.js';
 
 // Event page triggers the scene can never fire (an editor typo or a hand-edited manifest): like every
@@ -15,6 +18,13 @@ import { stagePositions } from './formation.js';
 const KNOWN_TRIGGERS = new Set(['action', 'touch', 'autorun', 'parallel']);
 // Cells per frame of a walking character (a dash doubles it, see map-rules.js).
 const PLAYER_MOVE_SPEED = 6;
+
+// Sprite_Timer's text: minutes unpadded, seconds zero-padded (the engine
+// floors the remaining time to whole seconds). Pure so tests can pin it.
+export function formatTimer(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
 const warnedTriggers = new Set();
 export function checkPageTriggers(mapEntry) {
   for (const event of mapEntry?.mwgEvents || [])
@@ -229,11 +239,36 @@ async function loadRubyData(project) {
   }));
 }
 
+// RGSS loads a bitmap file synchronously and the game reads its pixels at once (a window skin's text colours, a button's size). A browser
+// decodes after the fact, so the small UI folders are decoded up front: Bitmap.new on one of them is then immediate.
+const PRELOADED_IMAGE_FOLDERS = ['graphics/windowskins/', 'graphics/ui/', 'graphics/pictures/', 'graphics/icons/'];
+async function loadRubyImages(project) {
+  const root = project.assets?.root;
+  if (!root || !Array.isArray(project.fileIndex) || typeof createImageBitmap !== 'function') return;
+  const paths = project.fileIndex.filter(path => /.(png|jpe?g|gif|bmp)$/i.test(path) && PRELOADED_IMAGE_FOLDERS.some(folder => path.toLowerCase().startsWith(folder)));
+  if (!paths.length) return;
+  const decoded = project.decodedImages = new Map();
+  let next = 0;
+  const worker = async () => {
+    while (next < paths.length) {
+      const path = paths[next++];
+      const [top, ...rest] = path.split('/');
+      const url = `${root}/${top.toLowerCase()}/${rest.map(encodeURIComponent).join('/')}`;
+      try {
+        const response = await fetch(url);
+        if (response.ok) decoded.set(url, await createImageBitmap(await response.blob()));
+      } catch { /* the asynchronous load path stays the fallback for this file */ }
+    }
+  };
+  await Promise.all(Array.from({ length: 16 }, worker));
+}
+
 const SLOT_COUNT = 5;
 
 export async function startMwgPlayer(canvas, project) {
   await loadPluginFiles(project);
   await loadRubyData(project);
+  await loadRubyImages(project);
   // Loaded here rather than statically so prepareEventCommands stays importable from Node.
   const { createRgssRuntime } = await (project.loadRgssRuntime?.() || import(`/rgss-script.js?v=${Date.now()}`));
   const mwg = globalThis.mwg;
@@ -264,8 +299,11 @@ export async function startMwgPlayer(canvas, project) {
   const map = mapEntry?.data;
   const tileSize = project.display?.tileSize || 48;
   const isXp = project.source?.engine === 'rpg-maker-xp';
+  const is2k3 = project.source?.engine === 'rpg-maker-2003';
   const xpFormat = project.tilesetFormat;
   const xpStaticBase = isXp ? Number(xpFormat?.staticTileBase) : 0;
+  // 2003 map data already holds atlas frames (+1, 0 = empty): frames are identity minus one.
+  const frameBase = is2k3 ? 1 : xpStaticBase;
   if (isXp && (!Number.isInteger(xpStaticBase) || xpStaticBase <= 0)) {
     throw new Error('XP MWGP project is missing a valid tilesetFormat.staticTileBase');
   }
@@ -281,7 +319,7 @@ export async function startMwgPlayer(canvas, project) {
   const assetRoot = project.assets?.kind === 'decoded' ? project.assets.root : null;
   const tileset = project.tilesets?.[tilesetId];
   const names = tileset?.tilesetNames || [];
-  const realSheets = [0, 1, 2, 3, 4, 5, 6, 7, 8].filter(index => names[index]).map(index => ({ slot: index, url: `${assetRoot}/img/tilesets/${encodeURIComponent(names[index])}.png` }));
+  const realSheets = [0, 1, 2, 3, 4, 5, 6, 7, 8].filter(index => names[index]).map(index => ({ slot: index, url: `${assetRoot}/img/tilesets/${encodeURIComponent(names[index])}${/\.(png|bmp|xyz)$/i.test(names[index]) ? '' : '.png'}` }));
   const sheetEntries = assetRoot && realSheets.length ? realSheets : [{ slot: 5, url: placeholderSheet() }];
   const xpAutotileEntries = isXp && assetRoot ? (tileset?.autotileNames || []).map((name, index) => name ? { index, url: `${assetRoot}/graphics/Autotiles/${encodeURIComponent(name)}.png` } : null).filter(Boolean) : [];
   const sheetUrls = sheetEntries.map(entry => entry.url);
@@ -315,6 +353,36 @@ export async function startMwgPlayer(canvas, project) {
   const sheets = await Promise.all(renderSheetEntries.map(entry => entry.slot < 4 && !(mvA4Native && entry.slot === 3)
     ? buildAutotileSheet(entry.url, entry.slot, mwg, tilesetFlags)
     : Promise.resolve(mwg.SpriteSheet.grid(entry.url, tileSize))));
+  // RPG Maker 2003: compose the chipset atlas (chipset image, then one
+  // frame per autotile id spliced from its four connection quarters;
+  // chipset.js has the shared layout) and use it as the slot-5 sheet.
+  // Water animation across frames is not composed (frame 0 only).
+  if (is2k3) {
+    const slot = renderSheetEntries.findIndex(entry => entry.slot === 5);
+    if (slot >= 0) {
+      try {
+        const source = mwg.Texture2D.from(renderSheetEntries[slot].url)?.source;
+        const canvas = document.createElement('canvas');
+        const autotiles = chipsetAutotileIds();
+        canvas.width = 480; canvas.height = Math.ceil((CHIPSET_ATLAS_BASE + autotiles.length) / CHIPSET_COLS) * 16;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(source, 0, 0);
+        autotiles.forEach((id, rank) => {
+          const frame = CHIPSET_ATLAS_BASE + rank;
+          const dx = (frame % CHIPSET_COLS) * 16;
+          const dy = Math.floor(frame / CHIPSET_COLS) * 16;
+          const quads = chipsetTileQuads(id);
+          if (quads) {
+            quads.forEach((quad, k) => ctx.drawImage(source, quad.x, quad.y, 8, 8, dx + (k % 2) * 8, dy + Math.floor(k / 2) * 8, 8, 8));
+          } else {
+            const fill = chipsetFillCellFor(id);
+            ctx.drawImage(source, fill.x * 16, fill.y * 16, 16, 16, dx, dy, 16, 16);
+          }
+        });
+        sheets[slot] = mwg.SpriteSheet.fromTexture(mwg.Texture2D.from(canvas), tileSize);
+      } catch (error) { console.warn('MWGP 2003 chipset atlas failed; drawing the raw chipset', error); }
+    }
+  }
   // The static autotile atlases drawn onto canvases belong to this map's scene and go with it.
   const ownedAtlases = sheets.filter((_, index) => renderSheetEntries[index].slot < 4 && !(mvA4Native && renderSheetEntries[index].slot === 3));
   const mvA4Sheet = mvA4Native ? sheets[renderSheetEntries.findIndex(entry => entry.slot === 3)] : null;
@@ -401,7 +469,7 @@ export async function startMwgPlayer(canvas, project) {
   const isAutotile = tile => isXp ? tile > 0 && tile < xpStaticBase : tile >= 2048 && tile < 8192;
   // Cells a native autotile layer draws instead of the static atlas: every XP autotile, and MV A4 (ids 5888-8191).
   const isNativeAutotile = tile => isXp ? nativeAutotilesReady && isAutotile(tile) : mvA4Native && tile >= 5888 && tile < 8192;
-  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) || isNativeAutotile(tile) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase)));
+  const layers = Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isXp && isAboveTile(tile) || isNativeAutotile(tile) ? mwg.EMPTY : tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, frameBase)));
   // An XP autotile id (48 per slot) whose slot has no image in the tileset (or a missing file) has no set to
   // resolve against, and addAutotileLayer throws on it; such cells draw nothing (as RPG Maker does).
   const xpAutotileSlots = new Set(xpAutotileSheets.map(entry => entry.index));
@@ -415,8 +483,8 @@ export async function startMwgPlayer(canvas, project) {
     return 0;
   });
   const aboveLayers = isXp
-    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) && !isNativeAutotile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY))
-    : [effectiveTiles.map(tile => isAboveTile(tile) && !isNativeAutotile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, xpStaticBase) : mwg.EMPTY)];
+    ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isAboveTile(tile) && !isNativeAutotile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, frameBase) : mwg.EMPTY))
+    : [effectiveTiles.map(tile => isAboveTile(tile) && !isNativeAutotile(tile) ? tileToFrame(tile, renderSheetEntries, sheets, mwg, isXp, tilesetFlags, frameBase) : mwg.EMPTY)];
   // MV A4 cells, layer by layer: the ones drawn beneath characters, and (as one sparse layer, like the atlas path) the effective star tiles above them.
   const isA4Cell = tile => tile >= 5888 && tile < 8192;
   const mvA4Layers = mvA4Native ? Array.from({ length: 4 }, (_, index) => rpgmLayer(map, index).map(tile => isA4Cell(tile) && !isAboveTile(tile) ? tile : mwg.EMPTY)) : [];
@@ -787,6 +855,9 @@ export async function startMwgPlayer(canvas, project) {
       }
       // A map switch is being built: this scene is done, so it takes no more input or events.
       if (this.transferring) return;
+      // A scene of the game's own is running (its main loop owns input now):
+      // the map keeps drawing above, but takes no input or events.
+      if (this.gameScene) return;
       if (this.dialogue || this.encounterBusy) { this.clearPointer(); return; }
       if (this.confirmLock) {
         // A browser/embedded keyboard can lose the matching keyup while a
@@ -1029,6 +1100,7 @@ export async function startMwgPlayer(canvas, project) {
       return isDashing({
         allowed: !this.activeVehicle && !mapEntry?.data?.disableDashing && !this.encounterBusy,
         shiftHeld: mwg.Input.isDown('dash'),
+        alwaysDash: this.playerOptions().alwaysDash === true,
         destination: Boolean(this.pointerRoute?.length || this.pointerAction),
       });
     }
@@ -1306,20 +1378,26 @@ export async function startMwgPlayer(canvas, project) {
       if (settings.kind === 'panorama') { this.panorama = visual; if (this.stage.addChildAt) this.stage.addChildAt(visual, 0); else this.stage.addChild(visual); }
       else { visual.alpha = Math.max(0, Math.min(1, Number(settings.opacity ?? 0) / 255)); this.fog = visual; if (this.stage.addChildAt) this.stage.addChildAt(visual, 2); else this.stage.addChild(visual); }
     }
-    inputNumber(state, command) {
+    // 103 Input Number: the game's own digit entry (entry.js), not a browser prompt.
+    async inputNumber(state, command) {
       const variable = String(command.inputNumber.variable);
       const digits = Math.max(1, Math.min(9, Number(command.inputNumber.digits) || 1));
       const current = Number(state.game.variable(variable) || 0);
-      const entered = globalThis.prompt?.(`Enter a number (${digits} digit${digits === 1 ? '' : 's'})`, String(current));
-      if (entered === null || entered === undefined || entered === '') return;
-      const value = Math.max(0, Math.min(10 ** digits - 1, Math.trunc(Number(entered))));
-      if (Number.isFinite(value)) state.game.setVariable(variable, value);
+      const value = await runNumberInput({ present: request => this.presentDialogue(request), digits, current, terms: project.database?.system?.terms });
+      if (value === null || value === undefined) return;
+      const clamped = Math.max(0, Math.min(10 ** digits - 1, Math.trunc(Number(value))));
+      if (Number.isFinite(clamped)) state.game.setVariable(variable, clamped);
     }
-    inputName(state, command) {
+    // 303 Name Input Processing: names the target actor (menus, battles and \N follow the record name).
+    async inputName(state, command) {
       const maxLength = Math.max(1, Math.min(32, Number(command.inputName?.maxLength) || 12));
-      const current = String(this.rpgExtra.playerName || '');
-      const entered = globalThis.prompt?.('What is your name?', current);
+      const actorId = Number(command.inputName?.actorId || 0);
+      const record = actorId > 0 ? this.actorRecord(actorId) : null;
+      const current = String(record?.name || (actorId > 0 ? project.database?.actors?.[actorId]?.name : '') || this.rpgExtra.playerName || '');
+      const entered = await runNameInput({ present: request => this.presentDialogue(request), maxLength, current, terms: project.database?.system?.terms });
       const value = entered === null || entered === undefined ? current : String(entered).trim().slice(0, maxLength);
+      if (record && value) record.name = value;
+      if ((!actorId || (this.rpgExtra.party || [])[0] === actorId) && value) this.rpgExtra.playerName = value;
       this.rpgExtra.playerName = value || current || 'Player';
     }
     presentDialogue(request) {
@@ -1356,35 +1434,13 @@ export async function startMwgPlayer(canvas, project) {
       const chosen = await this.presentDialogue({ text: command.ask || '', portrait: command.portrait, choices: command.choices || [] });
       return this.runBranch((command.branches || [])[Number(chosen)]);
     }
+    // 302 Shop Processing: Buy / Sell / Leave with quantities (shop.js).
     async openShop(spec) {
       const goods = (spec?.goods || []).filter(entry => Number(entry?.id) > 0);
       if (!goods.length) return;
-      const database = project.database || {};
-      const typeInfo = kind => kind === 1 ? ['weapons', 'Weapon'] : kind === 2 ? ['armors', 'Armor'] : ['items', 'Item'];
-      const entries = goods.map((entry, index) => {
-        const [store] = typeInfo(Number(entry.kind));
-        const item = database[store]?.[Number(entry.id)];
-        const price = Number(entry.priceType) === 1 ? Number(entry.price || 0) : Number(item?.price || 0);
-        return { ...entry, index, store, item, price: Math.max(0, price) };
-      }).filter(entry => entry.item);
-      if (!entries.length) { await this.presentDialogue({ text: 'This shop has nothing available.' }); return; }
-      const choices = entries.map(entry => ({ text: String(entry.item.name || 'Unknown') + ' - ' + entry.price + ' G', value: entry.index }));
-      choices.push({ text: 'Leave', value: -1 });
-      while (true) {
-        const chosen = await this.presentDialogue({ text: 'Gold: ' + Number(this.rpgExtra.gold || 0) + ' G', choices });
-        const index = Number(chosen);
-        if (!Number.isInteger(index) || index < 0) return;
-        const entry = entries.find(candidate => candidate.index === index);
-        if (!entry) return;
-        if (Number(this.rpgExtra.gold || 0) < entry.price) {
-          await this.presentDialogue({ text: 'Not enough gold.' });
-          continue;
-        }
-        this.rpgExtra.gold -= entry.price;
-        const key = String(entry.id);
-        this.rpgExtra[entry.store][key] = (this.rpgExtra[entry.store][key] || 0) + 1;
-        await this.presentDialogue({ text: 'Purchased ' + String(entry.item.name || 'item') + '.' });
-      }
+      const state = { gold: Number(this.rpgExtra.gold || 0) };
+      await runShop({ database: project.database || {}, state, items: this.rpgExtra.items ||= {}, weapons: this.rpgExtra.weapons ||= {}, armors: this.rpgExtra.armors ||= {}, goods, present: request => this.presentDialogue(request) });
+      this.rpgExtra.gold = state.gold;
     }
     // Change Weather (236): particles on the weather layer; a screen tint only when the layer could not be made.
     setWeather(weather) {
@@ -1608,7 +1664,7 @@ export async function startMwgPlayer(canvas, project) {
       let result;
       try {
         result = await runBattle({
-          database, troopId, party, records, items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true, encounter: spec.encounter === true,
+          database, troopId, party, records, items: this.rpgExtra.items, canEscape: spec.canEscape === true, canLose: spec.canLose === true, encounter: spec.encounter === true, commandRemember: this.playerOptions().commandRemember === true,
           present: request => { this.refreshBattleStage(); return this.presentDialogue(request); },
           variable: key => (String(key).startsWith('switch:') ? this.gameState.switch(String(key).slice(7)) : this.gameState.variable(String(key))),
           hooks: {
@@ -1699,7 +1755,7 @@ export async function startMwgPlayer(canvas, project) {
         : state.game.variable(command.variable);
       state.game.setVariable(command.copyVariable, value);
     }
-    modifyVariable(state, command) {
+    async modifyVariable(state, command) {
       const spec = command.modifyVariable || {};
       const current = Number(state.game.variable(String(spec.target)) || 0);
       const operandSpec = spec.operand;
@@ -1710,7 +1766,7 @@ export async function startMwgPlayer(canvas, project) {
           : operandSpec?.gameData
             ? resolveGameDataOperand(this.rpgExtra, { playerX: this.mover?.x ?? 0, playerY: this.mover?.y ?? 0, mapId: Number(mapEntry?.id) ?? 0 }, operandSpec.gameData)
             : operandSpec?.script
-              ? this.evalScriptOperand(operandSpec.script, state)
+              ? await this.evalScriptOperand(operandSpec.script, state)
               : Number(operandSpec?.value ?? operandSpec ?? 0);
       const value = spec.operation === 'set' ? operand
         : spec.operation === 'add' ? current + operand
@@ -1720,13 +1776,13 @@ export async function startMwgPlayer(canvas, project) {
               : spec.operation === 'modulo' ? (operand === 0 ? 0 : current % operand) : current;
       state.game.setVariable(String(spec.target), value);
     }
-    evalScriptOperand(script, state) {
+    async evalScriptOperand(script, state) {
       // Control Set > Script: the raw eval result (not a truthiness test), so
       // strings assign as strings exactly like the engine's operateVariable.
       // Failures read as 0 with a loud warning, matching the engine's catch
       // (which resets the variable to 0) instead of aborting the event.
       try {
-        const value = this.rgss.evaluateValue(script, state, this.currentEvent);
+        const value = script?.async && this.rgss.evaluateValueAsync ? await this.rgss.evaluateValueAsync(script, state, this.currentEvent) : this.rgss.evaluateValue(script, state, this.currentEvent);
         return value ?? 0;
       } catch (error) {
         console.warn('MWGP script operand failed and read as 0', script?.source ?? script, error);
@@ -1762,7 +1818,26 @@ export async function startMwgPlayer(canvas, project) {
       event.routeImage = { ...route.image };
       this.refreshEventSprites();
     }
-    runMoveRoute(target, steps, options = {}) {
+    async runMoveRoute(target, steps, options = {}) {
+      // A route with script steps runs as segments: movement chunks through
+      // the library runner, script steps through the script runtime, in
+      // order (and around again when the route repeats). The runner itself
+      // has no script step, so a mixed route cannot be one runner.
+      const segments = routeSegments(steps);
+      if (segments.some(segment => segment.script)) {
+        const generation = this.routeGeneration || 0;
+        do {
+          for (const segment of segments) {
+            if ((this.routeGeneration || 0) !== generation) return;
+            if (segment.script) await this.runScript(segment.script, { game: this.gameState });
+            else await this.runRouteSegment(target, segment.steps, { ...options, segmented: true });
+          }
+        } while (options.repeat === true);
+        return;
+      }
+      return this.runRouteSegment(target, steps, options);
+    }
+    runRouteSegment(target, steps, options = {}) {
       const isPlayer = target === 'player';
       const eventId = target === 'self' && this.currentEvent ? String(this.currentEvent.id)
         : String(target || '').startsWith('event:') ? String(target).slice(6) : null;
@@ -1773,7 +1848,7 @@ export async function startMwgPlayer(canvas, project) {
       if (!routeSteps.length) return Promise.resolve();
       const key = String(target);
       const mover = isPlayer ? this.mover : this.eventMover(event);
-      const runner = new mwg.Rpg.MoveRouteRunner(mover, { steps: routeSteps, repeat: options.repeat === true, skippable: true }, {
+      const runner = new mwg.Rpg.MoveRouteRunner(mover, { steps: routeSteps, repeat: options.repeat === true && !options.segmented, skippable: true }, {
         // A blocked step is skipped (the runner is skippable), as the player's routes always were; Through ignores passability.
         canMove: (dx, dy) => this.routeThrough.get(key) === true || this.canStep(mover.x + dx, mover.y + dy, dx, dy)
       });
@@ -2105,14 +2180,31 @@ export async function startMwgPlayer(canvas, project) {
       } finally { this.menuOpen = false; this.confirmLock = true; this.confirmLockUntil = performance.now() + 180; }
       return 'close';
     }
-    // Options: the audio mixer (master / BGM / BGS / ME / SE, cycling 0-100 %, plus mute).
+    // ConfigManager-style options that persist across sessions (localStorage), shared with the title screen.
+    playerOptions() {
+      if (this._playerOptions) return this._playerOptions;
+      let saved = {};
+      try { saved = JSON.parse(globalThis.localStorage?.getItem('mwgp.options') || '{}') || {}; } catch { saved = {}; }
+      this._playerOptions = { alwaysDash: saved.alwaysDash === true, commandRemember: saved.commandRemember === true };
+      return this._playerOptions;
+    }
+    setPlayerOption(key, value) {
+      this.playerOptions()[key] = value;
+      try { globalThis.localStorage?.setItem('mwgp.options', JSON.stringify(this._playerOptions)); } catch { /* storage unavailable */ }
+    }
+    // Options: the audio mixer (master / BGM / BGS / ME / SE, cycling 0-100 %, plus mute) and Always Dash.
     async optionsMenu(present) {
-      if (!this.audio) { await present({ text: 'No options for this project.' }); return; }
+      if (!this.audio) {
+        const pickDash = createPicker(present, project.database?.system?.terms);
+        for (;;) { const entry = await pickDash('Options', [{ kind: 'alwaysDash', label: `Always Dash: ${this.playerOptions().alwaysDash ? 'on' : 'off'}` }]); if (!entry) return; this.setPlayerOption('alwaysDash', !this.playerOptions().alwaysDash); }
+      }
       const pick = createPicker(present, project.database?.system?.terms);
       const rows = [['master', 'Master'], ['bgm', project.database?.system?.terms?.messages?.bgmVolume || 'BGM Volume'], ['bgs', project.database?.system?.terms?.messages?.bgsVolume || 'BGS Volume'], ['me', project.database?.system?.terms?.messages?.meVolume || 'ME Volume'], ['se', project.database?.system?.terms?.messages?.seVolume || 'SE Volume']];
       for (;;) {
-        const entry = await pick('Options', [...rows.map(([kind, label]) => ({ kind, label: `${label}: ${Math.round(this.audio.volumes[kind] * 100)}%` })), { kind: 'mute', label: `Mute: ${this.audio.volumes.muted ? 'on' : 'off'}` }]);
+        const entry = await pick('Options', [...rows.map(([kind, label]) => ({ kind, label: `${label}: ${Math.round(this.audio.volumes[kind] * 100)}%` })), { kind: 'mute', label: `Mute: ${this.audio.volumes.muted ? 'on' : 'off'}` }, { kind: 'alwaysDash', label: `Always Dash: ${this.playerOptions().alwaysDash ? 'on' : 'off'}` }, { kind: 'commandRemember', label: `Command Remember: ${this.playerOptions().commandRemember ? 'on' : 'off'}` }]);
         if (!entry) return;
+        if (entry.kind === 'alwaysDash') { this.setPlayerOption('alwaysDash', !this.playerOptions().alwaysDash); continue; }
+        if (entry.kind === 'commandRemember') { this.setPlayerOption('commandRemember', !this.playerOptions().commandRemember); continue; }
         if (entry.kind === 'mute') this.audio.toggleMute();
         else { const next = (Math.round(this.audio.volumes[entry.kind] * 4) + 1) % 5; this.audio.setVolume(entry.kind, next / 4); }
       }
@@ -2316,17 +2408,48 @@ export async function startMwgPlayer(canvas, project) {
     }
     changeActorText({ actor, field, text }) { this.actorRecord(actor)[field] = text; }
     changeActorImages(spec) { Object.assign(this.actorRecord(spec.actor), { characterName: spec.characterName, characterIndex: spec.characterIndex, faceName: spec.faceName, faceIndex: spec.faceIndex, battlerName: spec.battlerName }); }
-    // 124 Control Timer: counts down in seconds while the map runs; condition 111/timer reads it. There is no
-    // on-screen counter (the engine draws one); the value is what events can observe.
+    // 124 Control Timer: counts down in seconds while the map runs; condition 111/timer reads it, and
+    // Sprite_Timer shows the remaining time at the top right of the screen while it works.
     setTimer(spec) {
-      if (spec.stop) { if (this.rpgExtra.timer) this.rpgExtra.timer.working = false; return; }
+      if (spec.stop) { if (this.rpgExtra.timer) this.rpgExtra.timer.working = false; this.hideTimer(); return; }
       this.rpgExtra.timer = { seconds: Math.max(0, Number(spec.start || 0)), working: true };
+      this.showTimer();
     }
     tickTimer(dt) {
       const timer = this.rpgExtra.timer;
-      if (!timer?.working) return;
+      if (!timer?.working) { this.hideTimer(); return; }
       timer.seconds = Math.max(0, timer.seconds - dt);
       if (timer.seconds <= 0) timer.working = false;   // the engine's onExpire aborts a battle; on the map nothing else happens
+      this.updateTimerDisplay();
+    }
+    // Sprite_Timer: a small dark band with the M:SS count, top right, above the map and below the windows.
+    showTimer() {
+      if (this.timerBox || typeof mwg === 'undefined' || !this.stage) return;
+      try {
+        const band = new mwg.TintedSprite({ texture: gradientTexture(mwg) });
+        band.width = 110; band.height = 32;
+        const label = new mwg.Label({ text: formatTimer(this.rpgExtra.timer?.seconds), size: 20, color: 0xffffff, align: 'right' });
+        label.anchor?.set(1, 0); label.x = 102; label.y = 5;
+        const box = new mwg.Container2D();
+        box.addChild(band); box.addChild(label);
+        box.x = Math.max(0, (game.width || 816) - 118); box.y = 8;
+        this.stage.addChild(box);
+        this.timerBox = { box, label, shown: null };
+        this.updateTimerDisplay(true);
+      } catch { this.timerBox = null; }
+    }
+    updateTimerDisplay(force = false) {
+      const timer = this.rpgExtra.timer;
+      if (!timer?.working) { this.hideTimer(); return; }
+      if (!this.timerBox) { this.showTimer(); return; }
+      const text = formatTimer(timer.seconds);
+      if (force || text !== this.timerBox.shown) { this.timerBox.shown = text; try { this.timerBox.label.setText ? this.timerBox.label.setText(text) : (this.timerBox.label.text = text); } catch { /* label gone */ } }
+    }
+    hideTimer() {
+      if (!this.timerBox) return;
+      this.timerBox.box.removeFromParent?.();
+      this.timerBox.box.destroy?.({ children: true });
+      this.timerBox = null;
     }
     // 206 Get on/off Vehicle, the same action as pressing the vehicle key facing one.
     boardVehicle() { this.tryVehicleAction(); }
@@ -2594,8 +2717,29 @@ export async function startMwgPlayer(canvas, project) {
       return wait ? new Promise(resolve => setTimeout(resolve, duration * 1000)) : Promise.resolve();
     }
     // Event-script Ruby (XP/VX/Ace) that the converter transpiled to JS; see rgss-script.js.
-    runScript(script, state) { return this.rgss.run(script, state, this.currentEvent); }
-    evalScriptCondition(script, state) { return this.rgss.evaluate(script, state, this.currentEvent); }
+    async runScript(script, state) {
+      const result = await this.rgss.run(script, state, this.currentEvent);
+      await this.runGameSceneRequest();
+      return result;
+    }
+    // A scene the game's own script asked for (`$scene = Scene_Menu.new`):
+    // run its main loop with the map paused underneath (its Sprites and
+    // Windows draw on the RGSS screen, its Input reads the keyboard probe).
+    // Returning to a Scene_Map, or a scene that fails, lands back on the map.
+    async runGameSceneRequest() {
+      if (this.gameSceneRunning) return;
+      const request = this.rgss.takeSceneRequest?.();
+      if (!request) return;
+      const name = request?.constructor?.name || '';
+      if (/map/i.test(name)) return;
+      this.gameSceneRunning = true;
+      this.gameScene = request;
+      try { await request.main(); }
+      catch (error) { console.warn(`MWGP game scene ${name || '(unnamed)'} failed; returning to the map`, error); }
+      finally { this.gameScene = null; this.gameSceneRunning = false; }
+      return this.runGameSceneRequest();
+    }
+    evalScriptCondition(script, state) { return script?.async && this.rgss.evaluateAsync ? this.rgss.evaluateAsync(script, state, this.currentEvent) : this.rgss.evaluate(script, state, this.currentEvent); }
     pluginCommand(command, state) {
       // The game's own plugins: MV's `Game_Interpreter#pluginCommand` chain, or the MZ command the named plugin registered.
       if (this.rgss.pluginCommand?.(command?.name, command?.args, state, this.currentEvent, { plugin: command?.plugin, params: command?.params })) return;
@@ -2911,6 +3055,7 @@ export async function startMwgPlayer(canvas, project) {
       } catch (error) { console.error('MWGP load failed', error); this.flashTitle('✗ Load failed — see console (F12)'); return false; }
     }
     teardown() {
+      this.routeGeneration = (this.routeGeneration || 0) + 1;
       window.removeEventListener('keydown', this.saveKey);
       canvas?.removeEventListener('pointerdown', this.onPointerDown);
       if (this.gathering) { const done = this.gathering; this.gathering = null; done(); }
@@ -3368,6 +3513,22 @@ export function transferTargetsOfPage(page) {
   return targets;
 }
 
+// A converted route split where its script steps fall: consecutive movement
+// descriptors group into runner segments, each script step stands alone.
+// Pure so tests can pin the split; the scene runs the segments in order.
+export function routeSegments(steps) {
+  const segments = [];
+  let chunk = [];
+  for (const step of steps || []) {
+    if (step?.script !== undefined) {
+      if (chunk.length) { segments.push({ steps: chunk }); chunk = []; }
+      segments.push({ script: step.script });
+    } else if (step) chunk.push(step);
+  }
+  if (chunk.length) segments.push({ steps: chunk });
+  return segments;
+}
+
 // The converter's move-step descriptors as MoveRouteRunner steps. `aim` answers where "the player" is for toward/away
 // (null for a route with nothing to aim at, which drops those steps). A step it does not know is dropped.
 export function toRouteSteps(steps, aim = null) {
@@ -3479,7 +3640,7 @@ export function prepareEventCommands(commands, scene) {
       return { call: () => {} };
     }
     if (command.if?.script) return { call: async state => {
-      const matches = scene.evalScriptCondition(command.if.script, state);
+      const matches = await scene.evalScriptCondition(command.if.script, state);
       await scene.runBranch(prepareEventCommands(matches ? command.then : command.else, scene));
     } };
     if (command.if?.operator) return { call: async state => {
@@ -3593,7 +3754,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.exitEvent) return { call: () => { throw new ExitEventSignal(); } };
     if (command.goto !== undefined) return { call: () => { throw new JumpSignal(command.goto); } };
     if (command.copyVariable !== undefined) return { call: state => scene.copyVariable(state, command) };
-    if (command.modifyVariable) return { call: state => scene.modifyVariable(state, command) };
+    if (command.modifyVariable) return { call: async state => scene.modifyVariable(state, command) };
     if (command.inputNumber) return { call: state => scene.inputNumber(state, command) };
     if (command.inputName) return { call: state => scene.inputName(state, command) };
     if (command.messageOptions) return { call: () => scene.setMessageOptions(command.messageOptions) };
@@ -3668,7 +3829,7 @@ export function prepareEventCommands(commands, scene) {
     if (command.setTransparent !== undefined) return { call: () => scene.setTransparent(command.setTransparent) };
     if (command.eraseEvent) return { call: () => scene.eraseEvent() };
     // XP scripts arrive transpiled (`js`); MV/MZ scripts are JavaScript in `script` itself.
-    if (command.script !== undefined && (command.js !== undefined || command.error !== undefined || command.mv === true)) return { call: state => scene.runScript({ source: command.script, js: command.js, async: command.async === true, error: command.error }, state) };
+    if (command.script !== undefined && (command.js !== undefined || command.error !== undefined || command.mv === true)) return { call: async state => scene.runScript({ source: command.script, js: command.js, async: command.async === true, error: command.error }, state) };
     if (command.script !== undefined) return { call: () => scene.unsupportedCommand('script', command.script) };
     if (command.pluginCommand) return { call: state => scene.pluginCommand(command.pluginCommand, state) };
     // Convert-time unsupported marker (unmappable 122 operands, ...): warn
@@ -3818,6 +3979,11 @@ export function characterCellIndex(geom, index, direction, pattern) {
   if (geom.format === 'xp') {
     const row = { 2: 0, 4: 1, 6: 2, 8: 3 }[direction] ?? 0;
     return row * 4 + Math.min(3, pattern ?? 1);
+  }
+  if (geom.format === 'rm2k') {
+    const row = { 2: 0, 4: 1, 6: 2, 8: 3 }[direction] ?? 0;
+    const characterIndex = Number(index) || 0;
+    return (Math.floor(characterIndex / 4) * 4 + row) * 12 + (characterIndex % 4) * 3 + Math.min(2, pattern ?? 1);
   }
   const stride = geom.big ? 3 : 12;
   const characterIndex = Number(index) || 0;

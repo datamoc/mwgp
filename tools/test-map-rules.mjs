@@ -165,5 +165,29 @@ const battleLog = async (options) => {
   assert.equal(JSON.stringify(records), before, 'no record is created or changed');
   assert.equal(partyAbilities(database, {}, [1]).size, 0, 'a party without the traits has no abilities');
 }
+{
+  // Party abilities 4 and 5 double the gold and the drop odds (a drop with denominator 2 needs a roll below 2/2).
+  const reward = async (ability) => {
+    const db = structuredClone(database);
+    db.enemies[1].params[0] = 1; db.enemies[1].gold = 10;
+    db.enemies[1].dropItems = [{ kind: 1, dataId: 1, denominator: 2 }];
+    db.items = [null, { id: 1, name: 'Potion' }];
+    if (ability !== undefined) db.actors[1].traits = [{ code: 64, dataId: ability, value: 0 }];
+    const gained = { gold: 0, items: [] };
+    const present = async ({ choices }) => choices?.find(choice => typeof choice.value === 'number')?.value;
+    const result = await runBattle({ database: db, troopId: 1, party: [1], records: {}, present, rng: () => 0.75, canEscape: true, hooks: { gainGold: g => { gained.gold += g; }, gainItem: (kind, id) => gained.items.push(`${kind}:${id}`) } });
+    return { result, gained };
+  };
+  const plain = await reward();
+  assert.equal(plain.result.outcome, 'win');
+  assert.equal(plain.gained.gold, 10);
+  assert.equal(plain.gained.items.length, 0, 'a roll of 0.75 misses a 1-in-2 drop');
+  const gold = await reward(4);
+  assert.equal(gold.gained.gold, 20, 'gold double');
+  assert.equal(gold.gained.items.length, 0, 'gold double leaves the drops alone');
+  const drops = await reward(5);
+  assert.equal(drops.gained.gold, 10, 'drop double leaves the gold alone');
+  assert.deepEqual(drops.gained.items, ['1:1'], 'drop double makes a 1-in-2 drop certain');
+}
 
-console.log('map rules ok (step counts, progress, blockers, troop pick, regions, weights, dash, followers, first strike)');
+console.log('map rules ok (step counts, progress, blockers, troop pick, regions, weights, dash, followers, first strike, gold/drop double)');

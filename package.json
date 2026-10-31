@@ -15,7 +15,15 @@
   "bugs": {
     "url": "https://github.com/datamoc/mwgp/issues"
   },
-  "keywords": ["rpg-maker", "rpg-maker-mv", "rpg-maker-mz", "rgss", "game-converter", "browser-game", "editor"],
+  "keywords": [
+    "rpg-maker",
+    "rpg-maker-mv",
+    "rpg-maker-mz",
+    "rgss",
+    "game-converter",
+    "browser-game",
+    "editor"
+  ],
   "bin": {
     "mwgp": "bin/mwgp.mjs"
   },
@@ -41,6 +49,7 @@
     "scan": "node src/server.js --scan",
     "convert:mv": "node tools/convert-mv.js",
     "convert:rgss": "node tools/convert-rgss.js",
+    "convert:lcf": "node tools/convert-lcf.mjs",
     "export:converter": "node tools/export-browser-converter.mjs",
     "export:studio": "node tools/export-standalone-studio.mjs",
     "test:converter-browser": "node tools/test-browser-converter.mjs",
@@ -63,10 +72,10 @@
     "migrate:manifest": "node tools/migrate-manifest.mjs",
     "test:studio": "node tools/test-mwgp-studio.mjs && node tools/test-studio-code.mjs && node tools/test-studio-reconversion.mjs",
     "test:lcf": "node tools/test-lcf.mjs",
-    "test": "node tools/test-rgss-screen.mjs && node tools/test-smoke.mjs"
+    "test": "node tools/test-rgss-screen.mjs && node tools/test-player-functions.mjs && node tools/test-lcf.mjs && node tools/test-smoke.mjs"
   },
   "dependencies": {
-    "@datamoc/mwg": "^0.48.1",
+    "@datamoc/mwg": "^0.49.0",
     "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",
     "nostalgist": "^0.20.2",
@@ -77,5 +86,8 @@
     "buffer": "6.0.3",
     "esbuild": "0.28.2",
     "fflate": "0.8.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }

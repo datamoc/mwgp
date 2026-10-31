@@ -654,13 +654,16 @@ export async function convertMv(sourceArg, outputArg, flags = []) {
             commands.push({ sound: { name: se.name, volume: Number(se.volume ?? 90), pitch: Number(se.pitch ?? 100), pan: Number(se.pan || 0) } });
           }
         } else if (step.code === 45 && step.parameters?.[0]) {
-          routeOnly = false;
           const script = String(step.parameters[0]);
           // ROUTE_SCRIPT is MV JavaScript, just like command 355. Preserve the
           // mv marker and syntax diagnostic so prepareEventCommands sends it
           // through the bounded globals bridge instead of dropping it as an
-          // untyped/unsupported script.
+          // untyped/unsupported script. In a repeating route the step also
+          // joins the repeatable steps as a script descriptor, so the route
+          // stays one repeating move whose segments the player runs in order.
           commands.push({ script, mv: true, ...scriptBody(script) });
+          repeatableSteps.push({ script: { source: script, mv: true, ...scriptBody(script) } });
+          if (!route.repeat) routeOnly = false;
         }
         else if (step.code !== 0) routeOnly = false;
       }

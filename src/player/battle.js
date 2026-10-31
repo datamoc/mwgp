@@ -190,6 +190,8 @@ export class ActorBattler extends Battler {
     if (record.dead || this.hp <= 0) { this.hp = 0; if (!this.hasState(DEATH_STATE)) this.states.push({ id: DEATH_STATE, turns: 0 }); }
   }
   get level() { return Math.max(1, Number(this.record.level || this.source.initialLevel || 1)); }
+  // Name Input Processing (303) renames the actor on its record; every screen follows it.
+  get name() { return this.record?.name || super.name; }
   // Party formation (src/player/formation.js): the row this actor stands in, out of `formationRows`.
   formationRow = 0; formationRows = 1;
   get tgr() { return super.tgr * rowModifiers(this.formationRow, this.formationRows).tgr; }
@@ -314,8 +316,9 @@ export function battleText(database) {
 // A paged menu over the dialogue seam: at most five entries at a time, then "next page" / "back" rows.
 // Resolves to the chosen entry, or null when backed out.
 export function createPicker(present, terms = {}) {
-  return async (text, entries, { back = true } = {}) => {
-    let page = 0;
+  return async (text, entries, { back = true, initial = 0 } = {}) => {
+    // Command Remember: start on the page holding the remembered entry.
+    let page = Math.min(Math.max(0, Math.floor((Number(initial) || 0) / 5)), Math.max(0, Math.ceil(entries.length / 5) - 1));
     for (;;) {
       const per = 5, slice = entries.slice(page * per, page * per + per);
       const choices = slice.map((entry, index) => ({ text: entry.label, value: page * per + index }));
@@ -344,7 +347,7 @@ export function partyAbilities(database, records, partyIds) {
 }
 
 export async function runBattle(options) {
-  const { database, troopId, party: partyIds, records, items = {}, present, rng = Math.random, tpRandom = Math.random, formation = 'default', variable = () => 0, canEscape = true, canLose = false, encounter = false, hooks = {} } = options;
+  const { database, troopId, party: partyIds, records, items = {}, present, rng = Math.random, tpRandom = Math.random, formation = 'default', variable = () => 0, canEscape = true, canLose = false, encounter = false, commandRemember = false, hooks = {} } = options;
   const { terms, message, basic } = battleText(database);
   const battle = { database, rng, variable, terms, items };
   const troop = database.troops?.[troopId];
@@ -505,14 +508,17 @@ export async function runBattle(options) {
   const canPay = (subject, skill) => { const cost = costOf(subject, skill); return subject.mp >= cost.mp && subject.tp >= cost.tp; };
 
   // ---- choosing actions ---------------------------------------------------------------------
+  const rememberedCommands = {};   // ConfigManager.commandRemember: last battle command per actor
   const actorCommand = async actor => {
     for (;;) {
       const commands = [{ label: terms.commands?.[2] || 'Attack', kind: 'attack' }];
       if (actor.skills().length) commands.push({ label: terms.commands?.[5] || 'Skill', kind: 'skill' });
       commands.push({ label: terms.commands?.[3] || 'Guard', kind: 'guard' });
       if (Object.values(items).some(count => count > 0)) commands.push({ label: terms.commands?.[4] || 'Item', kind: 'item' });
-      const command = await pick(`${statusText(actor)}\n${actor.name}?`, commands, { back: false });
+      const rememberedAt = commandRemember ? commands.findIndex(entry => entry.kind === rememberedCommands[actor.actorId]) : -1;
+      const command = await pick(`${statusText(actor)}\n${actor.name}?`, commands, { back: false, initial: rememberedAt < 0 ? 0 : rememberedAt });
       if (!command) continue;
+      if (commandRemember) rememberedCommands[actor.actorId] = command.kind;
       if (command.kind === 'guard') return { subject: actor, kind: 'guard', item: database.skills?.[guardSkillId(database)] };
       if (command.kind === 'attack') { const target = await chooseTarget(actor, database.skills[attackSkillId(database)]); if (target) return { subject: actor, kind: 'skill', item: database.skills[attackSkillId(database)], target }; continue; }
       if (command.kind === 'skill') {
@@ -642,10 +648,13 @@ export async function runBattle(options) {
   };
   const rewards = async () => {
     const exp = enemies.reduce((sum, enemy) => sum + Number(enemy.source.exp || 0), 0);
-    const gold = enemies.reduce((sum, enemy) => sum + Number(enemy.source.gold || 0), 0);
+    // Party abilities 4 and 5 (Game_Party.ABILITY_GOLD_DOUBLE / DROP_ITEM_DOUBLE) double the gold and the drop odds.
+    const goldRate = actors.some(actor => actor.traits(64, 4).length) ? 2 : 1;
+    const dropRate = actors.some(actor => actor.traits(64, 5).length) ? 2 : 1;
+    const gold = enemies.reduce((sum, enemy) => sum + Number(enemy.source.gold || 0), 0) * goldRate;
     const drops = [];
     for (const enemy of enemies) for (const drop of enemy.source.dropItems || []) {
-      if (drop.kind > 0 && rng() * Number(drop.denominator || 1) < 1) drops.push({ kind: drop.kind, id: drop.dataId });
+      if (drop.kind > 0 && rng() * Number(drop.denominator || 1) < dropRate) drops.push({ kind: drop.kind, id: drop.dataId });
     }
     const log = [format(message('victory'), partyName()), ...(exp > 0 ? [format(message('obtainExp'), exp, terms.basic?.[8] || 'EXP')] : []), ...(gold > 0 ? [format(message('obtainGold'), gold).replace('\\G', terms.currencyUnit || database.system?.currencyUnit || 'G')] : [])];
     for (const drop of drops) {
