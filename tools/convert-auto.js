@@ -53,7 +53,7 @@ const staleOnly = flags.has('--stale');
 const mvAsMwgp = !flags.has('--web');
 mkdirSync(outputRoot, { recursive: true });
 
-const has2k3 = folder => existsSync(join(folder, 'RPG_RT.exe')) && existsSync(join(folder, 'RPG_RT.ldb'));
+const has2k3 = folder => existsSync(join(folder, 'RPG_RT.ldb')) && existsSync(join(folder, 'RPG_RT.lmt'));
 const hasRxdata = folder => existsSync(join(folder, 'Data')) &&
   readdirSync(join(folder, 'Data')).some(name => /\.(rxdata|rvdata|rvdata2)$/i.test(name));
 const hasMv = folder => existsSync(join(folder, 'www', 'index.html')) || existsSync(join(folder, 'index.html'));
@@ -143,10 +143,11 @@ async function convert(game) {
   if (staleOnly && !mvAsMwgp && existsSync(join(to, 'mwgp-web.json'))) return { status: 'skipped', reason: 'web build' };
   // A lone web build is not "already converted" under the MWGP default (it is not editable): only --web counts it as existing.
   if (skipExisting && (existsSync(join(to, 'mwgp.json')) || (!mvAsMwgp && existsSync(join(to, 'mwgp-web.json'))))) return { status: 'skipped', reason: 'already converted' };
-  // RPG Maker 2000/2003 (T124): detected explicitly and reported as its own
-  // case — the LCF reader exists (tools/lcf.mjs) but there is no chipset
-  // rendering in the player yet, so writing a manifest would be a lie.
-  if (has2k3(from)) return { status: 'skipped', reason: 'RPG Maker 2000/2003 (RPG_RT) detected: LCF conversion not available yet (parser foundation in tools/lcf.mjs)' };
+  // RPG Maker 2000/2003: the LCF converter writes an MWGP manifest
+  // (chipset atlas rendering lives in the player; autotile border variants
+  // are composed as interior fills, and patch-only commands stay explicit
+  // unsupported markers).
+  if (has2k3(from)) { update(game, { status: 'converting', label: 'starting' }); return gameResult('lcf', await invoke(game, 'convert-lcf.mjs', [from, to])); }
   if (hasRxdata(from) || hasRgssad(from)) {
     update(game, { status: 'converting', label: 'starting' });
     if (!mvAsMwgp) return gameResult('web', await invoke(game, 'build-web.js', [from, to]));

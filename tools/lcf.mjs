@@ -32,7 +32,7 @@ export function writeBer(value) {
   return Buffer.from(bytes);
 }
 
-function readChunks(buffer, start, end) {
+export function readChunks(buffer, start, end) {
   const chunks = [];
   let cursor = start;
   while (cursor < end) {
@@ -53,20 +53,20 @@ export function parseLcf(buffer) {
 }
 
 export const chunkInt = (chunk) => (chunk ? readBer(chunk.data, 0).value : 0);
-export const chunkString = (chunk) => {
-  if (!chunk) return "";
-  const length = readBer(chunk.data, 0);
-  return chunk.data.subarray(length.next, length.next + length.value).toString("latin1");
-};
+// A record's string chunk payload is the raw string itself (the chunk header
+// already carries its length); verified on real databases, where a length
+// prefix would eat the first character of every name.
+export const chunkString = (chunk) => (chunk ? chunk.data.toString("latin1") : "");
 export const findChunk = (chunks, id) => chunks.find((chunk) => chunk.id === id);
 
 // Keyed record lists (map events, map-tree entries): per record, its id
 // (BER), then its chunks, closed by a zero chunk id. No length wrapper.
-export function readKeyedEntries(data) {
+export function readKeyedEntries(data, limit = Infinity) {
   const entries = [];
   let cursor = 0;
-  while (cursor < data.length) {
+  while (cursor < data.length && entries.length < limit) {
     const id = readBer(data, cursor); cursor = id.next;
+    if (id.value === 0 && entries.length >= limit) break;
     const chunks = [];
     while (cursor < data.length) {
       const chunkId = readBer(data, cursor); cursor = chunkId.next;
@@ -80,11 +80,36 @@ export function readKeyedEntries(data) {
   return entries;
 }
 
+// An LCF array field: BER element count, then that many keyed entries.
+export function readArray(data) {
+  if (!data?.length) return [];
+  const count = readBer(data, 0);
+  return readKeyedEntries(data.subarray(count.next), count.value);
+}
+
+// One MapXXXX.lmu: dimensions, chipset, the two tile layers and the events.
+// Event records: 1 name, 2 x, 3 y, 5 pages (an array of page records, kept
+// as raw chunk lists until the page/event-command mapper lands).
+export function parseMapEvents(eventsData) {
+  return readArray(eventsData).map((entry) => {
+    const pagesChunk = findChunk(entry.chunks, 0x05);
+    return {
+      id: entry.id,
+      name: chunkString(findChunk(entry.chunks, 0x01)),
+      x: chunkInt(findChunk(entry.chunks, 0x02)),
+      y: chunkInt(findChunk(entry.chunks, 0x03)),
+      pages: pagesChunk ? readArray(pagesChunk.data).map((page) => ({ id: page.id, chunks: page.chunks })) : [],
+    };
+  });
+}
+
 // One MapXXXX.lmu: dimensions, chipset, the two tile layers and event ids.
 export function parseMap(buffer) {
   const { magic, chunks } = parseLcf(buffer);
   if (magic !== "LcfMapUnit") throw new Error(`LCF: expected LcfMapUnit, got ${magic}`);
-  const width = chunkInt(findChunk(chunks, 0x02)), height = chunkInt(findChunk(chunks, 0x03));
+  const width = chunkInt(findChunk(chunks, 0x02));
+  // The height chunk is omitted on some maps (the layer size still says it).
+  const heightChunk = chunkInt(findChunk(chunks, 0x03));
   const layer = (id) => {
     const chunk = findChunk(chunks, id);
     if (!chunk) return [];
@@ -93,22 +118,74 @@ export function parseMap(buffer) {
     return tiles;
   };
   const eventsChunk = findChunk(chunks, 0x51);
-  const eventIds = eventsChunk ? readKeyedEntries(eventsChunk.data).map((entry) => entry.id) : [];
-  return { width, height, chipsetId: chunkInt(findChunk(chunks, 0x01)), lower: layer(0x47), upper: layer(0x48), eventIds };
+  const lower = layer(0x47), upper = layer(0x48);
+  // Dimension chunks are omitted at the editor defaults: an untouched map
+  // is 20x15, and a lone layer size still fixes the other dimension.
+  const mapWidth = width || (heightChunk ? Math.floor(lower.length / heightChunk) : 20);
+  const height = heightChunk || (mapWidth ? Math.floor(lower.length / mapWidth) : 0);
+  const events = eventsChunk ? parseMapEvents(eventsChunk.data) : [];
+  return { width: mapWidth, height, chipsetId: chunkInt(findChunk(chunks, 0x01)), lower, upper, eventIds: events.map((event) => event.id), events };
 }
 
-// RPG_RT.lmt: the map tree (names and parentage shown in the editor).
+// RPG_RT.lmt: the map tree. Unlike the database, the file body is the map
+// array itself (BER count incl. the root entry, then keyed entries), then
+// the tree order (BER count, then map ids) and the active map id.
 export function parseMapTree(buffer) {
-  const { magic, chunks } = parseLcf(buffer);
-  if (magic !== "LcfMapTree") throw new Error(`LCF: expected LcfMapTree, got ${magic}`);
-  const mapsChunk = findChunk(chunks, 0x01);
-  const maps = mapsChunk ? readKeyedEntries(mapsChunk.data).map((entry) => ({
-    id: entry.id, name: chunkString(findChunk(entry.chunks, 0x01)), parentId: chunkInt(findChunk(entry.chunks, 0x02)),
-  })) : [];
-  const orderChunk = findChunk(chunks, 0x02);
+  const magicLength = readBer(buffer, 0);
+  const magic = buffer.subarray(magicLength.next, magicLength.next + magicLength.value).toString('latin1');
+  if (magic !== 'LcfMapTree') throw new Error(`LCF: expected LcfMapTree, got ${magic}`);
+  let cursor = magicLength.next + magicLength.value;
+  const count = readBer(buffer, cursor); cursor = count.next;
+  const maps = [];
+  for (let i = 0; i < count.value && cursor < buffer.length; i++) {
+    const id = readBer(buffer, cursor); cursor = id.next;
+    const chunks = [];
+    while (cursor < buffer.length) {
+      const chunkId = readBer(buffer, cursor); cursor = chunkId.next;
+      if (chunkId.value === 0) break;
+      const length = readBer(buffer, cursor); cursor = length.next;
+      chunks.push({ id: chunkId.value, data: buffer.subarray(cursor, cursor + length.value) });
+      cursor += length.value;
+    }
+    maps.push({ id: id.value, name: chunkString(findChunk(chunks, 0x01)), parentId: chunkInt(findChunk(chunks, 0x02)) });
+  }
   const order = [];
-  if (orderChunk) for (let cursor = readBer(orderChunk.data, 0).next; cursor < orderChunk.data.length;) { const item = readBer(orderChunk.data, cursor); order.push(item.value); cursor = item.next; }
+  if (cursor < buffer.length) {
+    const orderCount = readBer(buffer, cursor); cursor = orderCount.next;
+    for (let i = 0; i < orderCount.value && cursor < buffer.length; i++) { const item = readBer(buffer, cursor); order.push(item.value); cursor = item.next; }
+  }
   return { maps, order };
 }
 
-export const isLcfProject = (names) => names.includes("RPG_RT.ldb") && names.includes("RPG_RT.exe");
+// A project is 2000/2003 when both LCF halves are present; the executable
+// name is not trusted (games rename RPG_RT.exe, e.g. to the game's title).
+export const isLcfProject = (names) => names.includes("RPG_RT.ldb") && names.includes("RPG_RT.lmt");
+
+// RPG_RT.ldb: the Database object's fields are chunks 11-32; the record
+// sections are LCF arrays (count prefix + keyed entries) whose first chunk
+// is the record name. Section ids follow liblcf's Database layout; the two
+// single-object sections (terms 21, system 22) and the 2003 additions whose
+// layout is not yet mapped (29, 32) stay raw chunk lists. Verified against
+// real databases: section counts and record names must come out readable.
+const DATABASE_SECTIONS = {
+  11: 'actors', 12: 'skills', 13: 'items', 14: 'enemies', 15: 'troops',
+  16: 'terrains', 17: 'attributes', 18: 'states', 19: 'animations',
+  20: 'tilesets', 23: 'switches', 24: 'variables', 25: 'commonEvents', 30: 'classes',
+};
+
+export function parseDatabase(buffer) {
+  const { magic, chunks } = parseLcf(buffer);
+  if (magic !== 'LcfDataBase') throw new Error(`LCF: expected LcfDataBase, got ${magic}`);
+  const database = { terms: null, system: null, raw: {} };
+  for (const chunk of chunks) {
+    const name = DATABASE_SECTIONS[chunk.id];
+    if (name) {
+      database[name] = readArray(chunk.data).map((entry) => ({
+        id: entry.id, name: chunkString(findChunk(entry.chunks, 0x01)), chunks: entry.chunks,
+      }));
+    } else if (chunk.id === 21) database.terms = readChunks(chunk.data, 0, chunk.data.length);
+    else if (chunk.id === 22) database.system = readChunks(chunk.data, 0, chunk.data.length);
+    else if (chunk.data.length) database.raw[chunk.id] = chunk;
+  }
+  return database;
+}

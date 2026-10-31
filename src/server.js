@@ -57,14 +57,18 @@ function detectGame(folderName) {
   const flatRoot = !mvRoot && existsSync(join(folder, 'data', 'System.json')) ? folder : null;
   const gameRoot = mvRoot || flatRoot;
   const rgss = existsSync(join(folder, 'Game.ini')) && existsSync(join(folder, 'Game.exe'));
-  if (!gameRoot && !rgss) return null;
+  // RPG Maker 2000/2003: both LCF halves present; the executable is often
+  // renamed to the game's title, so take RPG_RT.exe when there, else any exe.
+  const lcf = existsSync(join(folder, 'RPG_RT.ldb')) && existsSync(join(folder, 'RPG_RT.lmt'));
+  if (!gameRoot && !rgss && !lcf) return null;
   const isMz = gameRoot && existsSync(join(gameRoot, 'js', 'rmmz_core.js'));
+  const lcfExe = lcf ? (existsSync(join(folder, 'RPG_RT.exe')) ? 'RPG_RT.exe' : readdirSync(folder).find(name => name.toLowerCase().endsWith('.exe') && !name.toLowerCase().endsWith('.bak.exe'))) : null;
   return {
     id: Buffer.from(folderName, 'utf8').toString('base64url'),
     name: folderName,
-    engine: gameRoot ? (isMz ? 'RPG Maker MZ' : 'RPG Maker MV') : 'RPG Maker XP/VX/Ace (RGSS)',
-    kind: gameRoot ? 'mv' : 'rgss',
-    executable: join(folder, 'Game.exe')
+    engine: gameRoot ? (isMz ? 'RPG Maker MZ' : 'RPG Maker MV') : lcf ? 'RPG Maker 2000/2003' : 'RPG Maker XP/VX/Ace (RGSS)',
+    kind: gameRoot ? 'mv' : lcf ? 'lcf' : 'rgss',
+    executable: lcf && lcfExe ? join(folder, lcfExe) : join(folder, 'Game.exe')
   };
 }
 
