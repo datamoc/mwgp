@@ -1016,7 +1016,7 @@ else notes.push('RGSS label fallthrough order preserved ok');
     o.Input.update(); checks.push(o.Input.trigger(13) && o.Input.press(13)); o.Input.update(); checks.push(!o.Input.trigger(13) && o.Input.press(13)); fire('keyup', 'Enter'); checks.push(!o.Input.press(13));
     fire('keydown', 'ArrowLeft'); fire('keydown', 'ArrowUp'); checks.push(o.Input.dir4() === 4 && o.Input.dir8() === 7);
     checks.push(o.Input.USE === 13 && o.Input.BACK === 12 && o.Input.LIMIT === 7 && 'USE' in o.Input && Object.keys(o.Input).includes('BACK') && o.Input.UNKNOWN === undefined);   // game constants resolve against the module
-    now = 42.5; checks.push(o.System.uptime() === 42.5 && o.System.is_windows() === false);
+    now = 42.5; checks.push(o.System.uptime === 42.5 && o.System.delta === 0 && o.System.is_windows() === false);
     const original = { list: [1, { deep: true }], color }; const copy = o.Marshal.load(o.Marshal.dump(original));
     copy.list[1].deep = false; checks.push(copy !== original && original.list[1].deep === true && copy.color instanceof o.Color && copy.color.equals(color));
     o.save_data({ a: 1 }, 'Data/Cache.rxdata'); checks.push(o.load_data('data\\cache.rxdata').a === 1);
@@ -2221,7 +2221,11 @@ try {
       '@width': 6, '@height': 5,
       '@data': O('Table', { '@raw': tableBytes(6, 5, 3, i => (i < 30 ? 2816 : (i === 30 ? 20 : (i === 61 ? 1 : 0)))) }),
       '@events': new Map([[1, O('RPG::Event', { '@id': 1, '@name': 'Greeter', '@x': 2, '@y': 3,
-        '@pages': [pageOf(list, O('RPG::Event::Page::Graphic', { '@character_name': 'Hero', '@character_index': 0, '@direction': 2, '@pattern': 1 }))] })]]),
+        '@pages': [pageOf(list, O('RPG::Event::Page::Graphic', { '@character_name': 'Hero', '@character_index': 0, '@direction': 2, '@pattern': 1 }))] })],
+      // A label nested in a branch, jumped to from the page's end: it becomes its own passage.
+      [2, O('RPG::Event', { '@id': 2, '@name': 'Jumper', '@x': 0, '@y': 0, '@pages': [pageOf([
+        cmd(111, [0, 1, 0], 0), cmd(118, ['inner'], 1), cmd(101, ['in'], 1), cmd(401, ['in'], 1), cmd(412, [], 0),
+        cmd(101, ['after']), cmd(401, ['after']), cmd(119, ['inner'])])] })]]),
       '@encounter_list': [3, 5], '@encounter_step': 20,
       '@bgm': audioFile('Town1'), '@autoplay_bgm': true, '@bgs': audioFile(''), '@autoplay_bgs': false
     };
@@ -2353,6 +2357,10 @@ try {
       strongly(m.source.engine === 'rpg-maker-xp', 'XP manifest keeps the XP engine tag');
       strongly(JSON.stringify(m.tilesets[0]?.tilesetNames) === JSON.stringify([null, null, null, null, null, 'World'])
         && m.tilesets[0]?.flags?.length === 30, 'XP tileset still maps with flags');
+      const story = m.maps[0].mwgEvents[1]?.pages[0]?.story;
+      strongly(story?.passages?.inner?.[0]?.say === 'in' && story.passages.inner.some(c => c.say === 'after')
+        && story.passages.inner.at(-1)?.goto === 'inner', 'XP label nested in a branch becomes a passage that runs on to the commands after the branch');
+      strongly(!JSON.stringify(story?.passages?.main).includes('__nestedLabel') && story.passages.main.at(-1)?.goto === 'inner', 'XP nested label markers are stripped from the main passage');
       strongly(one(c => c.wait === 1) !== undefined, 'XP 106 waits /20');
       strongly(one(c => c.eraseEvent) !== undefined, 'XP 116 erases');
       strongly(one(c => c.setTransparent === true) !== undefined, 'XP 208 sets transparency');

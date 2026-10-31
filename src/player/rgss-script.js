@@ -93,6 +93,29 @@ function installRubyCore() {
     lastMatch = found ? { text, index: found.index, groups: [...found] } : null;
     return Boolean(found);
   });
+  // `str[/re/]` (Ruby: the matched text, or nil) arrives as a property read whose key is the regexp's text ("/source/flags"): answered from the
+  // String prototype's own prototype, so it runs the search and records the match for `$~`.
+  if (!Object.getPrototypeOf(String.prototype)?.__mwgpRegexpIndex) {
+    const parent = Object.getPrototypeOf(String.prototype);
+    const hook = new Proxy(parent, {
+      get(target, key, receiver) {
+        if (key === '__mwgpRegexpIndex') return true;
+        if (typeof key === 'string' && key.length > 2 && key.charCodeAt(0) === 47) {
+          const end = key.lastIndexOf('/');
+          if (end > 0 && /^[a-z]*$/.test(key.slice(end + 1))) {
+            try {
+              const text = String(receiver);
+              const found = new RegExp(key.slice(1, end), key.slice(end + 1).replace(/[gy]/g, '')).exec(text);
+              lastMatch = found ? { text, index: found.index, groups: [...found] } : null;
+              return found ? found[0] : undefined;
+            } catch { /* not a regexp after all */ }
+          }
+        }
+        return Reflect.get(target, key, receiver);
+      }
+    });
+    Object.setPrototypeOf(String.prototype, hook);
+  }
   // Ruby String methods with no JS counterpart that game scripts call directly.
   define(String.prototype, 'reverse', function () { return [...String(this)].reverse().join(''); });
   define(String.prototype, 'swapcase', function () { return [...String(this)].map(char => char === char.toUpperCase() ? char.toLowerCase() : char.toUpperCase()).join(''); });
@@ -109,6 +132,27 @@ function installRubyCore() {
   define(Number.prototype, 'to_f', function () { return Number(this); });
   define(Number.prototype, 'to_s', function (base = 10) { return this.toString(base); });
   define(Number.prototype, 'clamp', function (min, max) { return Math.min(Math.max(Number(this), min), max); });
+  // Integer#even? / odd? / zero? / positive? / negative?: Ruby2JS strips the `?` and reads the name as a property (`n.even`), which is
+  // undefined on a JS number and so always falsy. Accessors give the predicates their value.
+  for (const [name, test] of [['even', n => n % 2 === 0], ['odd', n => Math.abs(n % 2) === 1], ['zero', n => n === 0], ['positive', n => n > 0], ['negative', n => n < 0]]) {
+    if (!Object.getOwnPropertyDescriptor(Number.prototype, name)) Object.defineProperty(Number.prototype, name, { configurable: true, enumerable: false, get() { return test(Number(this)); } });
+  }
+  // Integer#digits(base = 10): the digits, least significant first. A paren-less `n.digits` is a property read, `n.digits(2)` a call: the
+  // accessor hands back a list that can also be called with the base.
+  if (!Object.getOwnPropertyDescriptor(Number.prototype, 'digits')) {
+    const integerDigits = (value, base = 10) => { let rest = Math.abs(Math.trunc(Number(value))); if (rest === 0) return [0]; const out = []; while (rest > 0) { out.push(rest % base); rest = Math.floor(rest / base); } return out; };
+    Object.defineProperty(Number.prototype, 'digits', {
+      configurable: true, enumerable: false,
+      get() {
+        const value = Number(this), list = integerDigits(value);
+        return new Proxy(base => integerDigits(value, base), {
+          get: (target, key) => key === 'call' || key === 'apply' || key === 'bind' ? Reflect.get(target, key) : typeof list[key] === 'function' ? list[key].bind(list) : list[key],
+          has: (_, key) => key in list,
+          getPrototypeOf: () => Array.prototype
+        });
+      }
+    });
+  }
   // `disposed?` on an object that never had a disposable resource (a game wrapper around the inert display layer).
   define(Object.prototype, 'disposed', function () { return false; });
   // Hash#keys / #values as properties (Ruby2JS reads a Hash's `.keys` without a call): accessors on Object.prototype, so
@@ -128,6 +172,22 @@ function installRubyCore() {
   // keep their own `map`.
   define(Object.prototype, 'map', function (block) { return Object.entries(this).map(block); });
   define(Object.prototype, 'each_pair', function (block) { Object.entries(this).forEach(([key, value]) => block(key, value)); return this; });
+  // Object#method(:name): a callable bound to the receiver (Ruby's Method object), `name` read as a symbol.
+  define(Object.prototype, 'method', function (name) {
+    const key = String(name);
+    const fn = this[key] ?? this[key.replace(/[?!]$/, '')];
+    if (typeof fn !== 'function') throw new Error(`NameError: undefined method '${key}' for ${this?.constructor?.name ?? typeof this}`);
+    return fn.bind(this);
+  });
+  // Object#equal?(other) (identity, `?` stripped from names).
+  define(Object.prototype, 'equal', function (other) { return this === other; });
+  // String#squeeze: runs of the same character collapse to one (only the characters given, when there are some).
+  define(String.prototype, 'squeeze', function (...sets) { const chars = sets.join(''); return String(this).replace(/(.)+/gs, (run, char) => (!chars || chars.includes(char) ? char : run)); });
+  // Hash#select / #filter / #reject over a plain object: the block receives (key, value) and the result is a Hash again.
+  const pickEntries = (hash, block, keep) => Array.isArray(hash) ? hash.filter((item, index) => Boolean(block(item, index)) === keep) : Object.fromEntries(Object.entries(hash).filter(([key, value]) => Boolean(block(key, value)) === keep));
+  define(Object.prototype, 'select', function (block) { return pickEntries(this, block, true); });
+  define(Object.prototype, 'filter', function (block) { return pickEntries(this, block, true); });
+  define(Object.prototype, 'reject', function (block) { return pickEntries(this, block, false); });
   // Hash#clear (a Ruby Hash is a plain object here; Array/Map/Set keep their own clear).
   define(Object.prototype, 'clear', function () { for (const key of Object.keys(this)) delete this[key]; return this; });
   define(Array.prototype, 'clear', function () { this.length = 0; return this; });
@@ -334,6 +394,11 @@ export function rubyFormat(template, args) {
   });
 }
 
+// Something the game can run as a scene: an object with a main loop.
+export function isGameSceneInstance(value) {
+  return Boolean(value && typeof value === 'object' && typeof value.main === 'function');
+}
+
 export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, library = null, pluginLibrary = null, rubyData = null, fileIndex = null, textFiles = null, dialect = 'rgss' } = {}) {
   const debugRuby = typeof location !== 'undefined' && new URLSearchParams(location.search).get('debugRuby') === '1';
   if (dialect === 'rgss') installRubyCore();
@@ -456,9 +521,12 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   let framesSpun = 0;
   // Graphics.frame_count: the frames the browser has shown since the page began (a script may reset it by assigning).
   let graphicsFrames = 0, graphicsFrameOffset = 0;
+  // System.delta: the seconds the last frame took (what the game's own animations and text speed scale by).
+  let frameDelta = 1 / 60, lastFrameStamp = 0;
+  const stampFrame = () => { const now = typeof performance !== 'undefined' ? performance.now() : Date.now(); if (lastFrameStamp) frameDelta = Math.min(0.1, Math.max(0, (now - lastFrameStamp) / 1000)); lastFrameStamp = now; };
   const nextFrame = who => {
     if (++framesSpun > 4000) { framesSpun = 0; throw new Error(`MWGP: this script spins on ${who} without yielding a frame (it could not be made async); skipped`); }
-    return resumeAfter(new Promise(resolve => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => { framesSpun = 0; graphicsFrames++; resolve(); }) : setTimeout(() => { framesSpun = 0; graphicsFrames++; resolve(); }, 16))));
+    return resumeAfter(new Promise(resolve => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => { framesSpun = 0; graphicsFrames++; stampFrame(); resolve(); }) : setTimeout(() => { framesSpun = 0; graphicsFrames++; resolve(); }, 16))));
   };
   // Scripts that wait interleave, and `current`/`queue` are shared: a wait remembers the caller's context (taken when the
   // wait starts, while that script is the one running) and puts it back when the script resumes.
@@ -484,6 +552,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       // The ivars the game's Game_Character/Game_Event methods read.
       get _id() { return target; }, get _map_id() { return mapId; }, get map_id() { return reader('map_id', () => mapId); },
       get _x() { return position().x; }, get _y() { return position().y; }, get _direction() { return direction(); },
+      // Game_Character#map: the map the character is on, the game's `$game_map` here (`terrain_tag`, `passable?`, ... run on it).
+      get map() { return dialectBuiltins().$game_map; },
       // Balloon/animation ids are how VX/Ace scripts trigger those effects.
       // The graphic a game assigns to its player (`$game_player.character_name = "walk"`): the scene redraws the player from it.
       get character_name() { return reader('character_name', () => isPlayer ? (scene.playerCharacterName ?? '') : (eventById(id)?.image?.name ?? '')); },
@@ -597,6 +667,14 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
 
   // A built-in module the game also reopens (`module FileTest; def self.audio_exist?`): the built-in answers first, and
   // names it lacks come from the game's own module.
+  // Like reopenedBuiltin, for the display classes: only a plain method name the shim lacks reaches the game's unit.
+  const gameStatics = (name, base) => new Proxy(base, {
+    get: (target, key, receiver) => {
+      if (typeof key === 'symbol' || key in target || key === 'then' || key === 'toJSON' || key.startsWith('_') || !definedMethods.has(key)) return Reflect.get(target, key, receiver);
+      const own = unit(name);
+      return (own && typeof own === 'object') || typeof own === 'function' ? own[key] : undefined;
+    }
+  });
   const reopenedBuiltin = (name, base) => new Proxy(base, {
     get: (target, key, receiver) => {
       if (typeof key === 'symbol' || key in target) return Reflect.get(target, key, receiver);
@@ -730,6 +808,9 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   };
   const imageCanvas = name => { const base = fsPath(name).toLowerCase(); return writtenImages.get(base) ?? writtenImages.get(base + '.png') ?? null; };
   const rgssClasses = createRgssClasses({
+    onConstruct: (instance, target) => builtins.__RUBY_PRE?.apply(instance, target),
+    delta: () => frameDelta,
+    decoded: url => scene.project?.decodedImages?.get(url),
     screen, imageCanvas, writeImage,
     callableNames: callableMethods,
     rawFile: path => { const key = fsPath(path).toLowerCase(); return fsFiles.has(key) ? (fsText.get(key) ?? String.fromCharCode(0)) : undefined; },
@@ -776,7 +857,23 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       }
     })
   });
+  // The game's own synchronous `each` on a class or a non-plain, non-iterable object, as a collector; null when there is none.
+  const ownEach = value => {
+    if (value == null || (typeof value !== 'object' && typeof value !== 'function')) return null;
+    // A plain object is a Ruby Hash, unless it carries an `each` of its own (a module object that defines one).
+    const plain = typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+    if (plain ? typeof Object.getOwnPropertyDescriptor(value, 'each')?.value !== 'function' : typeof value[Symbol.iterator] === 'function') return null;
+    let each;
+    try { each = value.each; } catch { return null; }
+    if (typeof each !== 'function') return null;
+    return pick => { const out = []; each.call(value, (...args) => { out.push(pick(args)); }); return out; };
+  };
+  // RGSS1 scene switching: the game assigns `$scene = SomeScene.new`; this
+  // marker stands for the player's own map scene, so an assignment the game
+  // makes is visible as a change (see takeSceneRequest in the runtime API).
+  const mapSceneMarker = { __mwgpMapScene: true };
   const builtins = {
+    $scene: mapSceneMarker,
     $game_switches: keyed(key => current.state.game.switch(key), (key, value) => current.state.game.setSwitch(key, Boolean(value))),
     // Variables store raw values like MV/XP (a script can keep a string: Ruby's
     // `slice!` returns one). Readers coerce to Number where they do arithmetic.
@@ -807,6 +904,50 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         addUserAnimation: () => ({ disposed: () => true })
       })
     },
+    // Ruby's Time over a JS Date: the clock readers games use (Pokémon-style clocks, save stamps) and strftime.
+    Time: (() => {
+      const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+      const pad = (value, size = 2, fill = '0') => String(value).padStart(size, fill);
+      class RubyTime {
+        constructor(...parts) { this._date = parts.length ? new Date(...parts) : new Date(); }
+        get year() { return this._date.getFullYear(); } get month() { return this._date.getMonth() + 1; } get mon() { return this.month; }
+        get day() { return this._date.getDate(); } get mday() { return this.day; } get hour() { return this._date.getHours(); }
+        get min() { return this._date.getMinutes(); } get sec() { return this._date.getSeconds(); } get wday() { return this._date.getDay(); }
+        get usec() { return this._date.getMilliseconds() * 1000; } get nsec() { return this._date.getMilliseconds() * 1e6; }
+        get yday() { return Math.floor((this._date - new Date(this.year, 0, 0)) / 864e5); }
+        to_i() { return Math.floor(this._date.getTime() / 1000); } to_f() { return this._date.getTime() / 1000; } to_r() { return this.to_f(); }
+        valueOf() { return this._date.getTime() / 1000; }
+        plus(seconds) { return RubyTime.at(this.to_f() + Number(seconds)); }
+        minus(other) { return other instanceof RubyTime ? this.to_f() - other.to_f() : RubyTime.at(this.to_f() - Number(other)); }
+        to_s() { return this.strftime('%Y-%m-%d %H:%M:%S %z'); }
+        strftime(format) {
+          const date = this._date, hour12 = date.getHours() % 12 || 12, offset = -date.getTimezoneOffset();
+          const table = {
+            Y: this.year, C: Math.floor(this.year / 100), y: pad(this.year % 100), m: pad(this.month), B: MONTHS[date.getMonth()], b: MONTHS[date.getMonth()].slice(0, 3), h: MONTHS[date.getMonth()].slice(0, 3),
+            d: pad(this.day), e: pad(this.day, 2, ' '), j: pad(this.yday, 3), H: pad(this.hour), k: pad(this.hour, 2, ' '), I: pad(hour12), l: pad(hour12, 2, ' '),
+            M: pad(this.min), S: pad(this.sec), L: pad(date.getMilliseconds(), 3), N: pad(date.getMilliseconds() * 1e6, 9), P: this.hour < 12 ? 'am' : 'pm', p: this.hour < 12 ? 'AM' : 'PM',
+            A: DAYS[this.wday], a: DAYS[this.wday].slice(0, 3), u: this.wday || 7, w: this.wday, s: this.to_i(),
+            z: (offset < 0 ? '-' : '+') + pad(Math.floor(Math.abs(offset) / 60)) + pad(Math.abs(offset) % 60), Z: '', '%': '%'
+          };
+          table.F = `${table.Y}-${table.m}-${table.d}`; table.T = table.X = `${table.H}:${table.M}:${table.S}`; table.D = table.x = `${table.m}/${table.d}/${table.y}`; table.R = `${table.H}:${table.M}`;
+          return String(format).replace(/%([-0^#_]?)(d*)([a-zA-Z%])/g, (whole, flag, width, key) => {
+            if (!(key in table)) return whole;
+            let text = String(table[key]);
+            if (flag === '-') text = text.replace(/^[0 ]+(?=.)/, ''); else if (flag === '^') text = text.toUpperCase(); else if (flag === '_') text = text.replace(/^0+(?=.)/, match => ' '.repeat(match.length));
+            return width ? text.padStart(Number(width), flag === '_' ? ' ' : '0') : text;
+          });
+        }
+        // `Time.now` reads as a property when the game defines no `now`, and as a call when it does: the value answers both.
+        static get now() { const time = new RubyTime(); return new Proxy(function () { return time; }, { get: (_, key) => { const value = time[key]; return typeof value === 'function' ? value.bind(time) : value; }, apply: () => time }); }
+        static at(seconds) { const time = new RubyTime(); time._date = new Date(Number(seconds) * 1000); return time; }
+        static mktime(...parts) { const [year, month = 1, day = 1, hour = 0, min = 0, sec = 0] = parts; return new RubyTime(year, month - 1, day, hour, min, sec); }
+        static local(...parts) { return RubyTime.mktime(...parts); }
+        static utc(...parts) { return RubyTime.mktime(...parts); }
+        static gm(...parts) { return RubyTime.mktime(...parts); }
+      }
+      return RubyTime;
+    })(),
     Graphics: {
       // The converter lifts code that waits on frames to async (tools/rgss-async.mjs), so a blocking screen awaits the
       // browser's next frame here. Code that could not be lifted and spins on it synchronously gets a loud error
@@ -818,12 +959,26 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       transition: (duration = 8) => later('Graphics.transition', () => scene.screenFade?.({ direction: 'in', duration: Number(duration) / 20, wait: false })),
       fadeout: frames => later('Graphics.fadeout', () => scene.screenFade?.({ direction: 'out', duration: Number(frames) / 60, wait: true })),
       fadein: frames => later('Graphics.fadein', () => scene.screenFade?.({ direction: 'in', duration: Number(frames) / 60, wait: true })),
-      snap_to_bitmap: () => new rgssClasses.Bitmap(0, 0), screenshot() { warnOnce('Graphics.screenshot', 'needs the RGSS display layer'); }, scale: 1, resize_screen() {}, resize_window() {}, center() {},
+      // The game canvas copied into a bitmap (the menus of the game's own Ruby blur or dim it as a backdrop).
+      snap_to_bitmap: () => {
+        const width = Number(scene.project?.display?.width) || 640, height = Number(scene.project?.display?.height) || 480;
+        const bitmap = new rgssClasses.Bitmap(width, height);
+        try {
+          // A WebGL canvas is cleared once presented, so read the stage back through the renderer, not the DOM canvas.
+          const app = globalThis.__MWG__?.app;
+          let source = null;
+          try { source = app?.renderer?.extract?.canvas?.(app.stage) ?? null; } catch { /* fall through to the DOM canvas */ }
+          if (!source && typeof document !== 'undefined') source = document.querySelector('#game');
+          if (source && bitmap.canvas) bitmap.canvas.getContext('2d').drawImage(source, 0, 0, width, height);
+        } catch { /* a canvas that cannot be read leaves the bitmap blank */ }
+        return bitmap;
+      }, screenshot() { warnOnce('Graphics.screenshot', 'needs the RGSS display layer'); }, scale: 1, resize_screen() {}, resize_window() {}, center() {},
       get frame_count() { return reader('frame_count', () => graphicsFrames + graphicsFrameOffset); },
       set frame_count(value) { graphicsFrameOffset = Number(value) - graphicsFrames; },
       get frame_rate() { return reader('frame_rate', () => 60); },
-      get width() { return reader('width', () => 640); },
-      get height() { return reader('height', () => 480); }
+      // The game's own screen size (the manifest's display), which its UI lays itself out against (`Graphics.height - 96`).
+      get width() { return reader('width', () => Number(scene.project?.display?.width) || 640); },
+      get height() { return reader('height', () => Number(scene.project?.display?.height) || 480); }
     },
     Audio: rgssAudio,
     // Ruby's modulo takes the divisor's sign (the converter rewrites every `a % b` to `__mod(a, b)`).
@@ -877,15 +1032,41 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     // checks one against String or Symbol with `instanceof`.
     __ruby_is_a: (value, klass) => {
       if ((klass === String || klass === Symbol) && typeof value === 'string') return true;
-      return typeof klass === 'function' && value instanceof klass;
+      // `case x when Processes::XY` names a constant, not a class: Ruby's `===` is plain equality there.
+      if (typeof klass !== 'function') return value === klass;
+      return value instanceof klass;
     },
     // Ruby's `!x`: only nil/false are falsy (the converter rewrites `!x` to `__falsy(x)` for a bare value read).
     __falsy: value => value === null || value === undefined || value === false,
+    // Raised around the implicit `super()` of a derived constructor whose Ruby `initialize` never calls super: the transpiled constructors
+    // above it return at once, as Ruby skips those `initialize` methods (see constructorOrderEdits in tools/rgss-async.mjs).
+    __RUBY_SKIP: { on: false },
+    // Fields a derived constructor sets before `super()` (Ruby allows it, JS does not touch `this` yet): kept per `new.target`, applied by the
+    // root constructor of the chain so a parent's initialize that reads them sees them (see constructorOrderEdits in tools/rgss-async.mjs).
+    __RUBY_PRE: {
+      target: null, fields: null,
+      set(target, key, value) { if (this.target !== target) { this.target = target; this.fields = {}; } this.fields[key] = value; },
+      // The fields stored so far for this construction (a later `@x = @y.f` before `super` reads them).
+      self(target) { return this.target === target && this.fields ? this.fields : {}; },
+      apply(object, target) { if (this.fields && this.target === target) { const fields = this.fields; this.target = null; this.fields = null; Object.assign(object, fields); } }
+    },
     // A values context (`DATA.each_value`, `.values.each`): plain-prototype objects are Ruby hashes even when
     // `installRubyHashIterator` gave them a pair-yielding iterator for `for...of` loops, so they still read as values.
-    __values: value => (value != null && typeof value === 'object' && (typeof value[Symbol.iterator] !== 'function' || Object.getPrototypeOf(value) === Object.prototype) ? Object.values(value) : value),
-    __each: value => (value != null && typeof value[Symbol.iterator] !== 'function' && typeof value === 'object' ? Object.entries(value) : value),
-    ...Object.fromEntries(Object.entries(rgssClasses).map(([name, Class]) => [name, callableAttributes(Class)])),
+    // `for x in obj` / `obj.each`: a class or object that is not iterable but defines its own Ruby `each` (a data registry such as a
+    // `GameData` class, which extends the game's `each`) is walked through it, collecting what it yields.
+    __values: value => {
+      const own = ownEach(value);
+      if (own) return own(args => args[0]);
+      return value != null && typeof value === 'object' && (typeof value[Symbol.iterator] !== 'function' || Object.getPrototypeOf(value) === Object.prototype) ? Object.values(value) : value;
+    },
+    __each: value => {
+      const own = ownEach(value);
+      if (own) return own(args => (args.length > 1 ? args : args[0]));
+      return value != null && typeof value[Symbol.iterator] !== 'function' && typeof value === 'object' ? Object.entries(value) : value;
+    },
+    // A class method the game adds to one of these (`Color.black` on a reopened `Color`) is borrowed from the game's own unit of that name,
+    // which builds the shim's instances (a bare `Color` inside it is this one).
+    ...Object.fromEntries(Object.entries(rgssClasses).map(([name, Class]) => [name, gameStatics(name, callableAttributes(Class))])),
     // Class-body macros that Ruby2JS leaves as calls when they sit in a module body; nothing to do
     // in JS (accessors compile to properties, visibility does not exist).
     attr_accessor() {}, attr_reader() {}, attr_writer() {}, module_function() {}, private() {}, public() {}, protected() {},
@@ -897,6 +1078,22 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       read: path => fsText.get(fsPath(path).toLowerCase()) ?? '',
       // Read-only: a file in the index opens (its text, when embedded; otherwise a single NUL byte per read), anything else is ENOENT.
       open: (path, mode, block) => {
+        // A write or append mode (a game's debug log, a saved table) gets an in-memory file for this page: later reads see it, and
+        // it is capped, so a chatty log cannot grow without bound. Nothing reaches a disk.
+        if (/[wa]/.test(String(mode ?? 'r'))) {
+          const key = fsPath(path).toLowerCase();
+          if (!fsFiles.has(key)) fsFiles.set(key, fsPath(path));
+          if (/w/.test(String(mode)) || !fsText.has(key)) fsText.set(key, '');
+          const append = chunk => { const current = fsText.get(key) ?? ''; if (current.length < 1_000_000) fsText.set(key, current + chunk); return chunk.length; };
+          const newline = String.fromCharCode(10);
+          const out = {
+            write: (...parts) => append(parts.map(String).join('')), print: (...parts) => append(parts.map(String).join('')),
+            puts: (...lines) => append((lines.length ? lines.flat() : ['']).map(line => String(line ?? '')).join(newline) + newline),
+            flush() { return out; }, close() {}, sync: true, path: String(path)
+          };
+          out['<<'] = text => { append(String(text)); return out; };
+          return typeof block === 'function' ? block(out) : out;
+        }
         if (!fsFiles.has(fsPath(path).toLowerCase())) throw Object.assign(new Error(`No such file or directory - ${path}`), { name: 'Errno::ENOENT', code: 'ENOENT' });
         const text = fsText.get(fsPath(path).toLowerCase());
         const file = { read: length => (text !== undefined ? (length === undefined ? text : text.slice(0, length)) : String.fromCharCode(0).repeat(length === undefined ? 0 : length)), readlines: () => (text ?? '').split(String.fromCharCode(10)), close() {}, eof: () => true, each_line() {}, path: String(path) };
@@ -913,6 +1110,8 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     FileTest: reopenedBuiltin('FileTest', { exist: fsExists, exists: fsExists, file: path => fsFiles.has(fsPath(path).toLowerCase()), directory: path => fsDirs.has(fsPath(path).toLowerCase()), readable: fsExists }),
     // Kernel#sprintf / format: %[flags][width][.precision]type for s d i f x X o b e c and %%, plus %<name>s / %{name} for a hash argument.
     sprintf: (template, ...args) => rubyFormat(template, args), format: (template, ...args) => rubyFormat(template, args),
+    // Kernel#printf writes to standard output, which a browser page has no use for: the debug console takes it.
+    printf: (template, ...args) => { console.debug(rubyFormat(template, args)); },
     // `Kernel.pbShowCommands(...)`: the game's global functions called through their module; each resolves to the game's own unit.
     Kernel: new Proxy({}, { get: (_, key) => typeof key === 'string' ? (...args) => scope[key](...args) : undefined }),
     // Reflection used by "define only if missing" idioms at module/class top level: nothing is defined.
@@ -1143,6 +1342,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     // A game reopens Ruby's own classes (`class Numeric; def to_s_formatted`). Ruby2JS emits those as classes of the same name, but
     // JS numbers, strings and arrays never see them, so each method is installed on the matching JS prototype. A method the JS
     // built-in or this shim already has is left alone: the built-in wins, as the library only fills in what Ruby adds.
+    for (const name of VALUE_CLASSES) { try { if (Object.hasOwn(units, name)) unit(name); } catch (error) { console.warn(`MWGP reopened value class ${name} could not be loaded`, error); } }
     const builtinTargets = { Numeric: Number.prototype, Integer: Number.prototype, Float: Number.prototype, String: String.prototype, Array: Array.prototype };
     for (const [name, target] of Object.entries(builtinTargets)) {
       try {
@@ -1382,6 +1582,16 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
   const FOR_OF = /for [(](let|const|var) ([^;]*?) of ([A-Za-z_$][\w$.]*(?:[[][^\]]*[\]])*)[)]/g;
   const iterableLoops = js => dialect !== 'rgss' ? js : js.replace(FOR_OF, (whole, kind, target, subject) => `for (${kind} ${target} of __each(${subject}))`);
   const compile = (js, tail = '') => new Function('scope', `with (scope) {\n${iterableLoops(js)}\n${tail}\n}`);
+  // A game that reopens one of the runtime's value classes (`class Color`) and rebuilds its constructor around the engine's
+  // (`alias init_original initialize`, rewritten by the converter into `this.set(...)`) gets instances of the runtime's class: the
+  // unit's class extends it, so `new Color(...)` inside the game's own code builds something the runtime's classes accept.
+  const extendBuiltinValueClass = (name, source) => {
+    if (dialect !== 'rgss' || typeof rgssClasses?.[name] !== 'function' || typeof source !== 'string') return source;
+    const header = new RegExp(`\\bclass ${name} \\{`);
+    if (!header.test(source) || !source.includes('this.set(') || !/constructor\([^)]*\) \{/.test(source)) return source;
+    builtins[`__shim_${name}`] = rgssClasses[name];
+    return source.replace(header, `class ${name} extends __shim_${name} {`).replace(/constructor\(([^)]*)\) \{/, 'constructor($1) { super();');
+  };
   const unit = name => {
     if (dialect === 'mv') { ensurePlugins(); return typeof pluginGlobals[name] === 'function' ? pluginGlobals[name] : engineClasses.get(name); }
     if (loaded.has(name)) return loaded.get(name);
@@ -1389,7 +1599,7 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     loading.add(name);
     try {
       // `this` is the scope so top-level reflection calls (`method_defined`) resolve to built-ins.
-      const exported = compile(attachNestedModules(fixExportedGetters(units[name])), `return typeof ${name} !== 'undefined' ? ${name} : undefined;`).call(scope, scope);
+      const exported = compile(attachNestedModules(fixExportedGetters(extendBuiltinValueClass(name, units[name]))), `return typeof ${name} !== 'undefined' ? ${name} : undefined;`).call(scope, scope);
       flushDeferredMixins();
       const adapted = adaptRubyHash(exported);
       // Data classes whose registry the game loads from a shipped file (`static DATA_FILENAME = "types.dat"`): fill `DATA`
@@ -1431,6 +1641,11 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
         adapted.AudioFile = class AudioFile { constructor(name = '', volume = 100, pitch = 100) { this._name = name; this._volume = volume; this._pitch = pitch; } get name() { return this._name; } set name(value) { this._name = value; } get volume() { return this._volume; } set volume(value) { this._volume = value; } get pitch() { return this._pitch; } set pitch(value) { this._pitch = value; } };
       }
       if (name === 'RPG' && adapted?.Cache && typeof adapted.Cache === 'object' && adapted.Cache._cache === undefined) adapted.Cache._cache = {};
+      // `RPG::Cache.clear` is RGSS's own (it empties the bitmap cache) and the game only extends the module. Without it the call lands on
+      // the generic Hash#clear, which deleted every function of the module.
+      if (name === 'RPG' && adapted?.Cache && typeof adapted.Cache === 'object' && !Object.hasOwn(adapted.Cache, 'clear')) {
+        Object.defineProperty(adapted.Cache, 'clear', { configurable: true, enumerable: false, value: () => { adapted.Cache._cache = {}; } });
+      }
       // The game's classes construct instances that honour the call-vs-property rule (see `gameInstance`).
       let exposed = adapted;
       if (dialect === 'rgss' && typeof adapted === 'function') exposed = gameClass(adapted);
@@ -1442,13 +1657,25 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       const safeExport = exposed && (typeof exposed === 'object' || typeof exposed === 'function')
         ? new Proxy(exposed, { get: (target, key, receiver) => {
           if (Reflect.has(target, key)) {
-            const value = Reflect.get(target, key, receiver);
+            // A constant the unit exports that is a built-in with internal slots (a RegExp) must be read on itself, not on the proxy.
+            const builtin = target instanceof RegExp || target instanceof Map || target instanceof Set || target instanceof Date;
+            const value = Reflect.get(target, key, builtin ? target : receiver);
+            if (builtin) return typeof value === 'function' ? value.bind(target) : value;
             if (typeof key === 'string' && !key.startsWith('_') && typeof value !== 'function' && callableMethods.has(key)) return () => value;
             return value;
           }
           return typeof key === 'string' && definedMethods.has(key) ? stub(`${name}.${key}`) : undefined;
         } })
         : exposed;
+      // Methods the game adds to one of the runtime's own classes (`class Color; def to_rgb32`): the runtime's instances answer them too.
+      if (dialect === 'rgss' && VALUE_CLASSES.has(name) && typeof exported === 'function' && exported.prototype && typeof rgssClasses?.[name] === 'function') {
+        const target = rgssClasses[name].prototype;
+        for (const member of Object.getOwnPropertyNames(exported.prototype)) {
+          if (member === 'constructor' || member in target) continue;
+          const descriptor = Object.getOwnPropertyDescriptor(exported.prototype, member);
+          if (descriptor) Object.defineProperty(target, member, { ...descriptor, enumerable: false, configurable: true });
+        }
+      }
       loaded.set(name, safeExport);
     } catch (error) {
       console.error(`MWGP RGSS library unit "${name}" failed to load`, error);
@@ -1457,6 +1684,10 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
     return loaded.get(name);
   };
 
+  const startupGlobalTried = new Set();
+  // The runtime's plain value classes: a game that reopens one adds methods its instances must answer; the unit is loaded up front because the
+  // name `Color` resolves to the runtime's class and would never ask for it.
+  const VALUE_CLASSES = new Set(['Color', 'Tone', 'Rect', 'Font']);
   const scope = new Proxy({}, {
     has: (_, key) => typeof key === 'string' && !JS_BUILTINS.has(key) && (dialect !== 'mv' || key in mvBuiltins || !(key in globalThis)),
     get: (_, key) => {
@@ -1483,6 +1714,22 @@ export function createRgssRuntime(scene, { mapId, mapEvents = [], mapSize = {}, 
       if (typeof key === 'string' && /^[A-Z]/.test(key)) {
         for (const host of loaded.values()) {
           if ((typeof host === 'function' || (host && typeof host === 'object')) && Object.hasOwn(host, key) && typeof host[key] === 'function') return host[key];
+        }
+      }
+      // A start-up global (`$Name`) the game's own boot builds with `$Name = Name.new` (then `.setup(map_id)`) and no
+      // save-data value restores: the runtime does not run that boot, so it constructs the game's class of that name once,
+      // the way the boot would, instead of answering a stub that swallows every call. Anything that fails stays a stub.
+      if (typeof key === 'string' && /^\$[A-Z]/.test(key) && !startupGlobalTried.has(key)) {
+        startupGlobalTried.add(key);
+        const Class = unit(key.slice(1));
+        if (typeof Class === 'function') {
+          try {
+            const instance = new Class();
+            dialectBuiltins()[key] = instance;
+            const mapId = dialectBuiltins().$game_map?.map_id;
+            if (typeof instance.setup === 'function') instance.setup(typeof mapId === 'function' ? mapId.call(dialectBuiltins().$game_map) : mapId);
+            return instance;
+          } catch (error) { delete dialectBuiltins()[key]; console.warn(`MWGP RGSS start-up global ${key} could not be built`, error); }
         }
       }
       return stub(key);
@@ -1529,6 +1776,18 @@ ${iterableLoops(js)}
   const usable = (script, condition) => script?.error === undefined && jsOf(script, condition) !== undefined;
 
   return {
+    // A scene the game's own code asked for (`$scene = Scene_Menu.new` in a
+    // script): the assigned instance, once, or null. The player's map scene
+    // is the marker, so returning to it (or never leaving) reads as null;
+    // the caller decides by the instance's class whether it runs it.
+    takeSceneRequest() {
+      if (dialect === 'mv') return null;
+      const assigned = builtins.$scene;
+      if (!assigned || assigned === mapSceneMarker) return null;
+      builtins.$scene = mapSceneMarker;
+      if (!isGameSceneInstance(assigned)) { warnOnce('$scene=', 'was assigned something without a main loop; staying on the map'); return null; }
+      return assigned;
+    },
     // What the shim implements, for tools/rgss-coverage.mjs: every built-in name with its own
     // member names (getters are listed, not invoked).
     // A canvas the game wrote under this name (see writeImage), for the scene to draw.
@@ -1536,6 +1795,8 @@ ${iterableLoops(js)}
     // The display objects of the RGSS screen right now (diagnostics).
     screenItems: () => screen?.debug?.() ?? [],
     introspect() {
+      // (diagnostics) the frames the script clock has run, and the scripts waiting on one
+      // eslint-disable-next-line no-unused-labels
       const own = value => {
         if (!value || (typeof value !== 'object' && typeof value !== 'function')) return [];
         try { return Reflect.ownKeys(value).filter(key => typeof key === 'string'); } catch { return []; }
@@ -1544,6 +1805,7 @@ ${iterableLoops(js)}
         dialect,
         builtins: Object.fromEntries(Object.entries(dialectBuiltins()).map(([name, value]) => [name, { type: typeof value, members: own(value) }])),
         // Every distinct call that hit the loud "not implemented" path so far (the remaining script gaps).
+        frames: graphicsFrames + graphicsFrameOffset,
         warned: [...warned]
       };
     },
@@ -1666,6 +1928,35 @@ ${iterableLoops(js)}
       queue = null;
       try { return Boolean(body(jsOf(script, true)).call(interpreterFor(event), scope)); }
       catch (error) { console.error('MWGP RGSS script condition failed', describe(script), error); return false; }
+      finally { current = saved.current; queue = saved.queue; }
+    },
+    // The async pair for conditions/operands whose snippet waits on frames
+    // (flagged `async` by the converter's lift): the synchronous pair would
+    // read the returned promise itself (always truthy / NaN), so these await.
+    async evaluateAsync(script, state, event) {
+      if (!usable(script, true)) {
+        console.warn('MWGP RGSS script condition could not be transpiled; treating as false', describe(script), script?.error ?? '');
+        return false;
+      }
+      ensureBoot();
+      const saved = { current, queue };
+      current = { state, event };
+      queue = null;
+      try { return Boolean(await asyncBody(jsOf(script, true)).call(interpreterFor(event), scope)); }
+      catch (error) { console.error('MWGP RGSS script condition failed', describe(script), error); return false; }
+      finally { current = saved.current; queue = saved.queue; }
+    },
+    async evaluateValueAsync(script, state, event) {
+      if (!usable(script, true)) {
+        console.warn('MWGP RGSS script operand could not be transpiled; reading as 0', describe(script), script?.error ?? '');
+        return 0;
+      }
+      ensureBoot();
+      const saved = { current, queue };
+      current = { state, event };
+      queue = null;
+      try { const value = await asyncBody(jsOf(script, true)).call(interpreterFor(event), scope); snapshotEngine(); return value; }
+      catch (error) { console.error('MWGP RGSS script operand failed', describe(script), error); return 0; }
       finally { current = saved.current; queue = saved.queue; }
     },
     // Control Variables > Script: the raw eval result (not a truthiness test,

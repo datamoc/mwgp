@@ -42,13 +42,14 @@ export function createKeyProbe(target = typeof window !== 'undefined' ? window :
   return { down: symbol => any(held, symbol), pressed: symbol => any(latched, symbol) || any(edges, symbol), update: () => { latched = new Set(edges); edges.clear(); } };
 }
 
-export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = null, reopened = () => undefined, shipped = () => undefined, imageUrl = () => null, imageCanvas = () => null, writeImage = () => false, screen = null, callableNames = null, rawFile = () => undefined }) {
+export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = null, reopened = () => undefined, shipped = () => undefined, imageUrl = () => null, imageCanvas = () => null, writeImage = () => false, screen = null, callableNames = null, rawFile = () => undefined, onConstruct = null, delta = () => 0, decoded = () => undefined }) {
   const loud = (owner, method) => () => { warnOnce(`${owner}.${method}`, 'needs the RGSS display layer, which the headless script runtime does not have'); };
 
   // Value objects (Color, Tone, Rect, Font) answer a name the game `def`s anywhere as a callable reader (`clr.red()`): the game
   // reads every such name as a call. Their own methods use `_fields`, so the wrapper is transparent to them.
   const callable = instance => (callableNames?.size ? new Proxy(instance, {
     get: (target, key, receiver) => {
+      if (key === '__raw') return target;
       const value = Reflect.get(target, key, receiver);
       return typeof key === 'string' && typeof value !== 'function' && value !== undefined && !key.startsWith('_') && callableNames.has(key) ? () => value : value;
     }
@@ -67,6 +68,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     get blue() { return this._blue; } set blue(value) { this._blue = clamp255(value); }
     get alpha() { return this._alpha; } set alpha(value) { this._alpha = clamp255(value); }
     equals(other) { return other && other._red === this._red && other._green === this._green && other._blue === this._blue && other._alpha === this._alpha; }
+    clone() { return new Color(this._red, this._green, this._blue, this._alpha); } dup() { return this.clone(); }
     to_s() { return `(${this._red}, ${this._green}, ${this._blue}, ${this._alpha})`; }
     toString() { return this.to_s(); }
     _dump() { return `${this._red},${this._green},${this._blue},${this._alpha}`; }
@@ -84,6 +86,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     get blue() { return this._blue; } set blue(value) { this._blue = clampTone(value); }
     get gray() { return this._gray; } set gray(value) { this._gray = clamp255(value); }
     equals(other) { return other && other._red === this._red && other._green === this._green && other._blue === this._blue && other._gray === this._gray; }
+    clone() { return new Tone(this._red, this._green, this._blue, this._gray); } dup() { return this.clone(); }
     to_s() { return `(${this._red}, ${this._green}, ${this._blue}, ${this._gray})`; }
     toString() { return this.to_s(); }
   }
@@ -101,6 +104,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     get height() { return this._height; } set height(value) { this._height = Number(value) || 0; }
     empty() { return this.set(0, 0, 0, 0); }
     equals(other) { return Boolean(other) && other._x === this._x && other._y === this._y && other._width === this._width && other._height === this._height; }
+    clone() { return new Rect(this._x, this._y, this._width, this._height); } dup() { return this.clone(); }
     to_s() { return `(${this._x}, ${this._y}, ${this._width}, ${this._height})`; }
     toString() { return this.to_s(); }
   }
@@ -109,7 +113,11 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
       this.name = name ?? Font.default_name; this.size = size ?? Font.default_size;
       this.bold = Font.default_bold; this.italic = Font.default_italic;
       this.color = new Color(255, 255, 255, 255); this.shadow = Font.default_shadow; this.outline = Font.default_outline; this.out_color = new Color(0, 0, 0, 128);
+      return callable(this);
     }
+    // A copy goes through the constructor so it is a call-style value again (the generic Object copy would return a bare object).
+    clone() { const from = this.__raw ?? this; const copy = new Font(from.name, from.size); const raw = copy.__raw ?? copy; raw.bold = from.bold; raw.italic = from.italic; raw.shadow = from.shadow; raw.outline = from.outline; raw.color = from.color?.clone?.() ?? from.color; raw.out_color = from.out_color?.clone?.() ?? from.out_color; return copy; }
+    dup() { return this.clone(); }
     static exist(name) { return typeof name === 'string' && name.length > 0; }
   }
   Object.assign(Font, { default_name: 'Arial', default_size: 22, default_bold: false, default_italic: false, default_shadow: false, default_outline: true, default_color: new Color(255, 255, 255, 255), default_out_color: new Color(0, 0, 0, 128) });
@@ -117,30 +125,48 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
   // ---- display classes: state is kept, drawing and pixel access are loud no-ops -----------
   const receiverOf = target => target;
   const display = (owner, methods, extra = {}) => {
-    const known = new Set(methods);
-    return class {
+    // dispose / disposed / flash / update are real methods of the base class below; the others stay loud no-ops (nothing draws them).
+    const known = new Set(methods.filter(name => !['dispose', 'disposed', 'flash', 'update'].includes(name)));
+    const Base = class {
       constructor(...args) {
         const store = { ...extra, __args: args };
         const self = new Proxy(this, {
           get: (target, key) => {
             if (typeof key === 'symbol') return Reflect.get(target, key);
             if (Object.hasOwn(store, key)) {   // own only: Object.prototype carries Ruby fallbacks (`disposed`)
+              // An accessor the game's own subclass defines (`SpriteWindow#x`) answers first, as it does in RGSS.
+              const accessor = globalThis.__mwgpNoAccessors ? null : subclassAccessor(Object.getPrototypeOf(target), key);
+              if (accessor?.get) {
+                // The game reads a name it `def`s anywhere as a call (`s.x()`): a plain value the accessor returns answers that way too.
+                const result = accessor.get.call(self);
+                return callableNames?.has(key) && !key.startsWith('_') && typeof result !== 'function' && result !== undefined ? () => result : result;
+              }
               const value = store[key];
               // A name the game `def`s anywhere is read as a call (`this.opacity()`), including while a subclass is still constructing.
               // Never for an underscore-prefixed key: that's always a plain ivar field (`@x` -> `this._x`), never a method call,
               // even when some unrelated class in the game happens to define a method of that literal (underscored) name.
               return callableNames?.has(key) && !key.startsWith('_') && typeof value !== 'function' && value !== undefined ? () => value : value;
             }
-            if (key === 'dispose') return () => { store.__disposed = true; screen?.remove(store); };
-            if (key === 'disposed') return () => Boolean(store.__disposed);
-            // update / flash / effects: nothing to advance or show (the screen draws bitmaps only).
-            if (key === 'update' || key === 'flash') return () => undefined;
-            if (known.has(key)) return (...callArgs) => { loud(owner, key)(); return undefined; };
+            // dispose / disposed / flash / update are methods of the base class (below), so a game subclass overrides them and reaches
+            // them with `super`.
+            if (known.has(key)) {
+              // A game subclass that defines the method itself answers first.
+              if (subclassMember(Object.getPrototypeOf(target), key)) return Reflect.get(target, key, self);
+              return (...callArgs) => { loud(owner, key)(); return undefined; };
+            }
             // Accessors a game subclass defines (`columns`, ...) are read as calls too.
             const inherited = Reflect.get(target, key, receiverOf(target, key));
             return callableNames?.has(key) && typeof inherited !== 'function' && inherited !== undefined && !key.startsWith('_') ? () => inherited : inherited;
           },
-          set: (target, key, value) => { store[key] = value; return true; },
+          set: (target, key, value) => {
+            if (typeof key === 'string') {
+              const accessor = globalThis.__mwgpNoAccessors ? null : subclassAccessor(Object.getPrototypeOf(target), key);
+              if (accessor?.set) { accessor.set.call(self, value); return true; }
+            }
+            // Diagnostics only (`__mwgpOrigins`): a position that is not a number is a game/runtime mismatch worth a stack.
+            if (globalThis.__mwgpOrigins && (key === 'x' || key === 'y' || key === 'z') && (typeof value === 'function' || (typeof value === 'number' && Number.isNaN(value)) || typeof value === 'string')) console.warn(`MWGP DEBUG ${owner}.${key} set to ${typeof value} ${String(value).slice(0, 40)}`, new Error().stack.split(String.fromCharCode(10)).slice(2, 7).join(' | '));
+            store[key] = value; return true;
+          },
           has: (target, key) => key in store || known.has(key) || key in target
         });
         if (owner === 'Bitmap' || owner === 'Sprite' || owner === 'Viewport' || owner === 'Window' || owner === 'Plane' || owner === 'Tilemap') store.__disposed = false;
@@ -148,13 +174,43 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
         // Sprite.new(viewport) / Plane.new(viewport): the first argument is the viewport; Viewport.new(x, y, w, h) or (rect).
         // Per-instance defaults that are objects (a shared default would be shared by every sprite).
         if (owner === 'Sprite') store.src_rect = new Rect(0, 0, 0, 0);
-        if (owner === 'Window') { store.cursor_rect = new Rect(0, 0, 0, 0); store.contents = store.contents ?? null; }
+        // Every RGSS display object starts with a transparent color and a neutral tone (a game reads them back: `sprite.color.clone`).
+        if (owner === 'Sprite' || owner === 'Viewport' || owner === 'Plane' || owner === 'Window') { store.color ??= new Color(0, 0, 0, 0); store.tone ??= new Tone(0, 0, 0, 0); }
+        // A game's own window class (Essentials' SpriteWindow) draws itself with Sprites: the screen adds no frame or backing for it.
+        if (owner === 'Window' && Object.getPrototypeOf(this) !== Base.prototype) store.__selfDrawn = true;
+        if (owner === 'Window') { store.cursor_rect = new Rect(0, 0, 0, 0); store.contents = store.contents ?? null; const nums = args.filter(a => typeof a === 'number'); if (nums.length >= 4) [store.x, store.y, store.width, store.height] = nums.slice(-4); }
         if ((owner === 'Sprite' || owner === 'Plane') && args[0] && typeof args[0] === 'object') store.viewport = args[0];
         if (owner === 'Viewport') store.rect = args[0] && typeof args[0] === 'object' ? args[0] : new Rect(args[0] || 0, args[1] || 0, args[2] || 640, args[3] || 480);
-        if (owner === 'Sprite') screen?.add('sprite', store); else if (owner === 'Plane') screen?.add('plane', store);
+        if (owner === 'Sprite') screen?.add('sprite', store); else if (owner === 'Plane') screen?.add('plane', store); else if (owner === 'Window') screen?.add('window', store);
+        // Fields a game subclass set before calling `super` (Ruby allows it) exist now, before any setter this base calls on the way.
+        onConstruct?.(self, new.target);
         return self;
       }
     };
+    // The base methods a game subclass overrides (`def update; super; ...`): update advances nothing here, the screen draws bitmaps only.
+    Object.assign(Base.prototype, {
+      dispose() { const kept = this.__store; kept.__disposed = true; screen?.remove(kept); },
+      disposed() { return Boolean(this.__store.__disposed); },
+      flash(color, duration = 0) { const kept = this.__store; kept.__flashColor = color || null; kept.__flashFrames = Math.max(0, Number(duration) || 0); },
+      update() { return undefined; }
+    });
+    // `super.x` / `super.x = v` inside a game subclass's own accessor reaches the stored value (the base class has no accessors of its own).
+    Object.setPrototypeOf(Base.prototype, new Proxy(Object.prototype, {
+      get: (target, key, receiver) => { const kept = typeof key === 'string' && key !== '__store' ? receiver?.__store : null; return kept && Object.hasOwn(kept, key) ? kept[key] : Reflect.get(target, key, receiver); },
+      set: (target, key, value, receiver) => { const kept = typeof key === 'string' && key !== '__store' ? receiver?.__store : null; if (kept) { kept[key] = value; return true; } return Reflect.set(target, key, value, receiver); }
+    }));
+    const subclassMember = (proto, key) => {
+      for (let at = proto; at && at !== Base.prototype; at = Object.getPrototypeOf(at)) if (Object.hasOwn(at, key)) return true;
+      return false;
+    };
+    const subclassAccessor = (proto, key) => {
+      for (let at = proto; at && at !== Base.prototype; at = Object.getPrototypeOf(at)) {
+        const descriptor = Object.getOwnPropertyDescriptor(at, key);
+        if (descriptor && (descriptor.get || descriptor.set)) return descriptor;
+      }
+      return null;
+    };
+    return Base;
   };
   class BitmapBase {
     constructor(widthOrFile, height) {
@@ -174,7 +230,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     gradient_fill_rect() { loud('Bitmap', 'gradient_fill_rect')(); } hue_change() { loud('Bitmap', 'hue_change')(); } blur() { loud('Bitmap', 'blur')(); }
     set_pixel() { loud('Bitmap', 'set_pixel')(); }
     get_pixel() { loud('Bitmap', 'get_pixel')(); return new Color(0, 0, 0, 0); }
-    text_size(text) { loud('Bitmap', 'text_size')(); return new Rect(0, 0, String(text ?? '').length * Math.round((this.font?.size || 22) / 2), this.font?.size || 22); }
+    text_size(text) { loud('Bitmap', 'text_size')(); return new Rect(0, 0, String(text ?? '').length * Math.round(((this.font?.__raw ?? this.font)?.size || 22) / 2), (this.font?.__raw ?? this.font)?.size || 22); }
     // Animated-GIF playback (mkxp's `Bitmap#animated?`/`play`/`goto_and_stop`, wrapped by the game's own `AnimatedBitmap`
     // for both animated and plain images): nothing here is ever animated, so the game's own conditionals just skip it.
     animated() { return false; }
@@ -192,19 +248,50 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
     return null;
   };
-  const css = color => `rgba(${color?.red ?? color?._red ?? 0}, ${color?.green ?? color?._green ?? 0}, ${color?.blue ?? color?._blue ?? 0}, ${(color?.alpha ?? color?._alpha ?? 255) / 255})`;
+  // A colour is a Color (call-style fields: `red` may be a function) or a plain {red, green, blue, alpha}: read the raw field first.
+  const channel = (color, name, fallback) => { const value = color?.[`_${name}`] ?? color?.[name]; const number = typeof value === 'function' ? value() : value; return Number.isFinite(number) ? number : fallback; };
+  const css = color => `rgba(${channel(color, 'red', 0)}, ${channel(color, 'green', 0)}, ${channel(color, 'blue', 0)}, ${channel(color, 'alpha', 255) / 255})`;
   // A Rect's numbers (the fields, not the callable readers the game-facing object exposes).
   const rectValues = rect => [rect._x ?? rect.x, rect._y ?? rect.y, rect._width ?? rect.width, rect._height ?? rect.height];
   const rectArgs = (args, count) => (args[0] && typeof args[0] === 'object' ? [...rectValues(args[0]), ...args.slice(1)] : args).slice(0, count + 4);
+  // The dimensions of a served PNG/GIF read synchronously (a sync XHR, cached per URL), plus a blob URL for the decode.
+  const syncImages = new Map();
+  const syncImage = url => {
+    if (syncImages.has(url)) return syncImages.get(url);
+    let found = null;
+    try {
+      if (typeof XMLHttpRequest !== 'undefined' && !/^(?:blob|data):/.test(url) && !globalThis.mwg?.Resources?.isCompiled?.()) {
+        const request = new XMLHttpRequest();
+        request.open('GET', url, false);
+        request.overrideMimeType('text/plain; charset=x-user-defined');
+        request.send();
+        if (request.status >= 200 && request.status < 300) {
+          const text = request.responseText, byte = index => text.charCodeAt(index) & 255;
+          let width = 0, height = 0, type = 'image/png';
+          if (byte(0) === 0x89 && byte(1) === 0x50) { width = ((byte(16) << 24) | (byte(17) << 16) | (byte(18) << 8) | byte(19)) >>> 0; height = ((byte(20) << 24) | (byte(21) << 16) | (byte(22) << 8) | byte(23)) >>> 0; }
+          else if (byte(0) === 0x47 && byte(1) === 0x49) { width = byte(6) | (byte(7) << 8); height = byte(8) | (byte(9) << 8); type = 'image/gif'; }
+          if (width > 0 && height > 0 && width <= 16384 && height <= 16384) {
+            const bytes = new Uint8Array(text.length);
+            for (let index = 0; index < text.length; index++) bytes[index] = byte(index);
+            found = { width, height, blobUrl: URL.createObjectURL(new Blob([bytes], { type })) };
+          }
+        }
+      }
+    } catch { /* the asynchronous load below stays the fallback */ }
+    syncImages.set(url, found);
+    return found;
+  };
   class CanvasBitmap extends BitmapBase {
     constructor(widthOrFile, height) {
       super(widthOrFile, height);
       const fromFile = typeof widthOrFile === 'string';
+      this.__source = fromFile ? widthOrFile : `blank ${widthOrFile}x${height}`;   // what the screen debug listing shows
       this.__canvas = makeCanvas(fromFile ? 1 : widthOrFile, fromFile ? 1 : height);
       this.__ctx = this.__canvas?.getContext?.('2d', { willReadFrequently: true }) ?? null;
       if (fromFile) { this.width = 0; this.height = 0; this.__load(widthOrFile); }
     }
     __load(name) {
+      if (globalThis.__mwgpTraceBitmap && String(name).includes(globalThis.__mwgpTraceBitmap)) console.warn(`MWGP DEBUG bitmap ${name}`, new Error().stack.split(String.fromCharCode(10)).slice(2, 14).join(' | '));
       // An image the game itself wrote (`save_to_png`) is already a canvas: it loads at once, as RGSS's synchronous load does.
       const written = imageCanvas(name);
       if (written) {
@@ -216,15 +303,36 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
       }
       const url = imageUrl(name);
       if (!url || typeof Image === 'undefined') { warnOnce(`Bitmap.new(${name})`, 'has no image to load'); return; }
+      // RGSS knows a bitmap's size the moment it is made, and the game's own code sizes sprites from it. The image bytes are read
+      // synchronously (like nw.js's synchronous fs) so width/height are right at once; the pixels arrive when the image decodes.
+      const ready = decoded(url);
+      if (ready) {
+        this.__canvas.width = ready.width; this.__canvas.height = ready.height;
+        this.__ctx = this.__canvas.getContext('2d', { willReadFrequently: true });
+        this.__ctx.drawImage(ready, 0, 0);
+        this.width = ready.width; this.height = ready.height;
+        return;
+      }
+      const known = syncImage(url);
+      if (known) {
+        this.__canvas.width = known.width; this.__canvas.height = known.height;
+        this.__ctx = this.__canvas.getContext('2d', { willReadFrequently: true });
+        this.width = known.width; this.height = known.height;
+      }
+      // RGSS loads a file bitmap synchronously, so the game copies it into its windows at once; a browser decodes after the fact.
+      // Copies made meanwhile are kept and replayed when the pixels arrive.
+      this.__loading = true; this.__pending = [];
+      const finish = () => { this.__loading = false; const pending = this.__pending; this.__pending = []; for (const redo of pending.reverse()) { try { redo(); } catch { /* a copy whose destination was disposed */ } } };
       const image = new Image();
       image.onload = () => {
         this.__canvas.width = image.naturalWidth; this.__canvas.height = image.naturalHeight;
         this.__ctx = this.__canvas.getContext('2d', { willReadFrequently: true });
         this.__ctx.drawImage(image, 0, 0);
         this.width = image.naturalWidth; this.height = image.naturalHeight;
+        finish();
       };
-      image.onerror = () => warnOnce(`Bitmap.new(${name})`, 'could not be loaded');
-      loadAssetUrl(url).then(src => { image.src = src; });
+      image.onerror = () => { warnOnce(`Bitmap.new(${name})`, 'could not be loaded'); finish(); };
+      if (known?.blobUrl) image.src = known.blobUrl; else loadAssetUrl(url).then(src => { image.src = src; });
     }
     get canvas() { return this.__canvas; }
     // mkxp-z's Bitmap#save_to_png / #to_file: the pixels become a file of the in-memory file system (see writeImage in rgss-script.js).
@@ -234,7 +342,11 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     fill_rect(...args) { const [x, y, w, h, color] = rectArgs(args, 1); if (!this.__ctx) return; this.__ctx.fillStyle = css(color); this.__ctx.fillRect(x, y, w, h); }
     clear() { this.__ctx?.clearRect(0, 0, this.__canvas.width, this.__canvas.height); }
     clear_rect(...args) { const [x, y, w, h] = rectArgs(args, 0); this.__ctx?.clearRect(x, y, w, h); }
+    // A late copy goes under whatever was drawn on this bitmap in the meantime (the game drew its text on top of that copy), and
+    // copies made one after the other keep their order (they are replayed last to first).
+    __behind(draw) { const ctx = this.__ctx; if (!ctx) return; const before = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'destination-over'; try { draw(); } finally { ctx.globalCompositeOperation = before; } }
     blt(x, y, source, rect, opacity = 255) {
+      if (source?.__loading) { const [rx, ry, rw, rh] = rectValues(rect); source.__pending.push(() => this.__behind(() => this.blt(x, y, source, new Rect(rx, ry, rw, rh), opacity))); return; }
       if (!this.__ctx || !source?.canvas || source.canvas.width < 1) return;
       const [sx, sy, sw, sh] = rectValues(rect);
       if (sw <= 0 || sh <= 0) return;
@@ -243,6 +355,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
       this.__ctx.globalAlpha = 1;
     }
     stretch_blt(destRect, source, rect, opacity = 255) {
+      if (source?.__loading) { const [rx, ry, rw, rh] = rectValues(rect), [dx, dy, dw, dh] = rectValues(destRect); source.__pending.push(() => this.__behind(() => this.stretch_blt(new Rect(dx, dy, dw, dh), source, new Rect(rx, ry, rw, rh), opacity))); return; }
       if (!this.__ctx || !source?.canvas || source.canvas.width < 1) return;
       this.__ctx.globalAlpha = Math.max(0, Math.min(255, opacity)) / 255;
       const [rx, ry, rw, rh] = rectValues(rect), [dx, dy, dw, dh] = rectValues(destRect);
@@ -263,14 +376,14 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
     }
     set_pixel(x, y, color) { if (!this.__ctx) return; this.__ctx.fillStyle = css(color); this.__ctx.clearRect(x, y, 1, 1); this.__ctx.fillRect(x, y, 1, 1); }
     __applyFont() {
-      const font = this.font || {};
+      const font = this.font?.__raw ?? this.font ?? {};
       const name = Array.isArray(font.name) ? font.name[0] : font.name;
       this.__ctx.font = `${font.italic ? 'italic ' : ''}${font.bold ? 'bold ' : ''}${Math.max(1, Number(font.size) || 22)}px ${name ? `"${name}", ` : ''}sans-serif`;
     }
     text_size(text) {
       if (!this.__ctx) return super.text_size(text);
       this.__applyFont();
-      return new Rect(0, 0, Math.ceil(this.__ctx.measureText(String(text ?? '')).width), Math.max(1, Number(this.font?.size) || 22));
+      return new Rect(0, 0, Math.ceil(this.__ctx.measureText(String(text ?? '')).width), Math.max(1, Number((this.font?.__raw ?? this.font)?.size) || 22));
     }
     draw_text(...args) {
       const [x, y, w, h, text, align = 0] = args[0] && typeof args[0] === 'object' ? [...rectValues(args[0]), args[1], args[2]] : args;
@@ -281,9 +394,10 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
       ctx.textAlign = align === 1 ? 'center' : align === 2 ? 'right' : 'left';
       const px = align === 1 ? x + w / 2 : align === 2 ? x + w : x, py = y + h / 2;
       const maxWidth = w > 0 ? w : undefined;
-      if (this.font?.shadow) { ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'; ctx.fillText(string, px + 1, py + 1, maxWidth); }
-      if (this.font?.outline !== false && this.font?.out_color) { ctx.strokeStyle = css(this.font.out_color); ctx.lineWidth = 2; ctx.strokeText(string, px, py, maxWidth); }
-      ctx.fillStyle = css(this.font?.color ?? { red: 255, green: 255, blue: 255, alpha: 255 });
+      const font = this.font?.__raw ?? this.font;
+      if (font?.shadow) { ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'; ctx.fillText(string, px + 1, py + 1, maxWidth); }
+      if (font?.outline !== false && font?.out_color) { ctx.strokeStyle = css(font.out_color); ctx.lineWidth = 2; ctx.strokeText(string, px, py, maxWidth); }
+      ctx.fillStyle = css(font?.color ?? { red: 255, green: 255, blue: 255, alpha: 255 });
       ctx.fillText(string, px, py, maxWidth);
     }
   }
@@ -292,7 +406,7 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
   const Sprite = display('Sprite', ['dispose', 'disposed', 'flash', 'update'], { ...displayDefaults, zoom_x: 1, zoom_y: 1, angle: 0, mirror: false, blend_type: 0, bush_depth: 0 });
   const Viewport = display('Viewport', ['dispose', 'disposed', 'flash', 'update'], { ...displayDefaults });
   const Plane = display('Plane', ['dispose', 'disposed'], { ...displayDefaults, zoom_x: 1, zoom_y: 1, blend_type: 0 });
-  const Window = display('Window', ['dispose', 'disposed', 'update'], { ...displayDefaults, active: true, pause: false, opacity: 255, back_opacity: 255, contents_opacity: 255, stretch: true });
+  const Window = display('Window', ['dispose', 'disposed', 'update'], { ...displayDefaults, width: 0, height: 0, active: true, pause: false, opacity: 255, back_opacity: 255, contents_opacity: 255, stretch: true });
   const Tilemap = display('Tilemap', ['dispose', 'disposed', 'update'], { ...displayDefaults });
 
   // Table: RGSS's compact 1-3 dimensional integer array.
@@ -333,7 +447,11 @@ export function createRgssClasses({ warnOnce, files, uptime = () => 0, keys = nu
 
   // ---- System ------------------------------------------------------------------------------
   const system = {
-    uptime, delta: () => 0, data_directory: () => '', window_title: 'MWGP', set_window_title() {}, show_settings() {}, puts: (...args) => console.log('MWGP RGSS System.puts', ...args),
+    // `System.uptime` / `System.delta` read as numbers (a paren-less zero-argument read is a property read unless the game defines the
+    // name): a callable stand-in would be captured by `t = System.uptime` and keep moving with the clock.
+    get uptime() { return callableNames?.has('uptime') ? uptime : uptime(); },
+    get delta() { return callableNames?.has('delta') ? (() => delta()) : delta(); },
+    data_directory: () => '', window_title: 'MWGP', set_window_title() {}, show_settings() {}, puts: (...args) => console.log('MWGP RGSS System.puts', ...args),
     platform: () => 'Browser', is_mac: () => false, is_rosetta: () => false, is_linux: () => false, is_windows: () => false, is_wine: () => false,
     is_really_mac: () => false, is_really_linux: () => false, is_really_windows: () => false,
     user_language: callableValue(() => (typeof navigator !== 'undefined' ? navigator.language : 'en')), user_name: () => 'Player', game_title: () => 'MWGP',

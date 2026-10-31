@@ -142,7 +142,7 @@ export function attachConditionalMethods(js, unitName) {
 // Ruby resolves a bare constant through the classes it is written in: inside `class Player`, `Pokedex` is `Player::Pokedex` even when
 // a global `Pokedex` exists. The output keeps the bare name, which then finds the global one. Every reference to a class nested in the
 // unit (`Player.Pokedex = class ...`) is therefore qualified with its enclosing class.
-export function qualifyNestedConstants(js, unitName, knownNested = null) {
+export function qualifyNestedConstants(js, unitName, knownNested = null, knownPaths = null) {
   if (!unitName) return js;
   let ast;
   try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); }
@@ -160,10 +160,28 @@ export function qualifyNestedConstants(js, unitName, knownNested = null) {
   // class-style units, where a method body names a sibling class declared in another piece.
   const moduleBody = new RegExp(String.raw`\bconst\s+${unitName}\s*=\s*\(\s*\(\s*\)\s*=>`).test(js);
   if (moduleBody) for (const name of [...nested]) if (!assigned.has(name)) nested.delete(name);
-  if (!nested.size) return js;
+  if (!nested.size && !(knownPaths && (knownPaths.size ?? knownPaths.length))) return js;
   const edits = [];
-  const visit = (node, parent, key) => {
+  // Ruby looks a bare constant up through every class it is written in: inside `Battle::Scene`, `CommandMenu` is `Battle::Scene::CommandMenu`.
+  // `lexical` is the dotted path of the class being visited (`Battle.Scene`), found from the `Battle.Scene = class ...` assignments (and the
+  // root `class Battle`); the innermost enclosing path that has the name as a nested class wins.
+  const paths = knownPaths instanceof Set ? knownPaths : new Set(knownPaths || []);
+  const dotted = node => (node?.type === 'Identifier' ? node.name : node?.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' ? (dotted(node.object) ? `${dotted(node.object)}.${node.property.name}` : null) : null);
+  const deepName = (name, lexical) => { for (let depth = lexical.length; depth >= 1; depth--) { const candidate = `${lexical.slice(0, depth).join('.')}.${name}`; if (depth >= 2 && paths.has(candidate)) return candidate; } return null; };
+  const visit = (node, parent, key, lexical = [unitName]) => {
     if (!node || typeof node.type !== 'string') return;
+    if (paths.size && node.type === 'AssignmentExpression' && node.operator === '=') {
+      const target = dotted(node.left);
+      if (target && target.startsWith(`${unitName}.`)) { visit(node.left, node, 'left', lexical); visit(node.right, node, 'right', target.split('.')); return; }
+    }
+    if (paths.size && node.type === 'Identifier' && /^[A-Z]/.test(node.name) && !nested.has(node.name)) {
+      const skipDeep = (parent?.type === 'MemberExpression' && key === 'property' && !parent.computed)
+        || ((parent?.type === 'Property' || parent?.type === 'MethodDefinition' || parent?.type === 'PropertyDefinition') && key === 'key' && !parent.computed)
+        || ((parent?.type === 'ClassDeclaration' || parent?.type === 'ClassExpression' || parent?.type === 'FunctionDeclaration' || parent?.type === 'FunctionExpression') && key === 'id')
+        || (parent?.type === 'VariableDeclarator' && key === 'id') || key === 'params';
+      const qualified = skipDeep ? null : deepName(node.name, lexical);
+      if (qualified) edits.push({ start: node.start, end: node.end, text: qualified });
+    }
     if (node.type === 'Identifier' && nested.has(node.name)) {
       const skip = (parent?.type === 'MemberExpression' && key === 'property' && !parent.computed)
         || ((parent?.type === 'Property' || parent?.type === 'MethodDefinition' || parent?.type === 'PropertyDefinition') && key === 'key' && !parent.computed)
@@ -173,7 +191,7 @@ export function qualifyNestedConstants(js, unitName, knownNested = null) {
     }
     for (const field of Object.keys(node)) {
       const value = node[field];
-      if (Array.isArray(value)) value.forEach(child => visit(child, node, field)); else if (value && typeof value.type === 'string') visit(value, node, field);
+      if (Array.isArray(value)) value.forEach(child => visit(child, node, field, lexical)); else if (value && typeof value.type === 'string') visit(value, node, field, lexical);
     }
   };
   visit(ast, null, null);
@@ -191,7 +209,7 @@ export function classCaseSwitches(js) {
   let ast;
   try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); }
   catch { return js; }
-  const simple = node => node.type === 'Identifier' || node.type === 'ThisExpression' || (node.type === 'MemberExpression' && !node.computed && simple(node.object));
+  const simple = node => node.type === 'Identifier' || node.type === 'ThisExpression' || (node.type === 'MemberExpression' && (!node.computed || node.property.type === 'Literal') && simple(node.object));
   const classLabel = node => (node.type === 'Identifier' && /^[A-Z]/.test(node.name) && node.name !== 'NaN' && node.name !== 'Infinity')
     || (node.type === 'MemberExpression' && !node.computed && classLabel(node.property.type === 'Identifier' ? node.property : node.object) && /^[A-Z]/.test(node.property?.name ?? ''));
   const edits = [];
@@ -208,5 +226,138 @@ export function classCaseSwitches(js) {
   });
   let out = js;
   for (const edit of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
+  return out;
+}
+
+// Ruby's `break` inside a `case/when` leaves the enclosing loop (a `case` is not a loop). Ruby2JS emits a `switch`, where a `break`
+// leaves only the switch: Essentials' battle command loop (`when 0 then break if pbFightMenu`) then cancelled the choice it had
+// just made. A `break` nested in an if/try inside a case body (never the case's own terminating `break`) that is not inside a
+// deeper loop or switch gets the label of the loop around the switch.
+export function labelLoopBreaks(js) {
+  if (!/\bswitch\s*\(/.test(js) || !/\b(while|for|do)\b/.test(js)) return js;
+  let ast;
+  try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); }
+  catch { return js; }
+  const edits = [];
+  let counter = 0;
+  const labels = new Map();
+  const isLoop = node => node.type === 'WhileStatement' || node.type === 'DoWhileStatement' || node.type === 'ForStatement' || node.type === 'ForInStatement' || node.type === 'ForOfStatement';
+  const isFunction = node => node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression';
+  const nestedBreaks = (node, top, out) => {
+    if (!node || typeof node.type !== 'string') return;
+    if (isLoop(node) || node.type === 'SwitchStatement' || isFunction(node) || node.type === 'ClassBody') return;
+    if (node.type === 'BreakStatement') { if (!node.label && !top) out.push(node); return; }
+    const next = node.type === 'BlockStatement' ? top : false;
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (Array.isArray(value)) for (const child of value) nestedBreaks(child, next, out);
+      else if (value && typeof value.type === 'string') nestedBreaks(value, next, out);
+    }
+  };
+  const visit = (node, loop) => {
+    if (!node || typeof node.type !== 'string') return;
+    if (isFunction(node)) loop = null;
+    if (isLoop(node)) loop = node;
+    if (node.type === 'SwitchStatement' && loop) {
+      const found = [];
+      for (const item of node.cases) for (const statement of item.consequent) nestedBreaks(statement, true, found);
+      if (found.length) {
+        if (!labels.has(loop)) { labels.set(loop, `__loop${++counter}`); edits.push({ at: loop.start, del: 0, text: `${labels.get(loop)}: ` }); }
+        for (const found_ of found) edits.push({ at: found_.start, del: found_.end - found_.start, text: `break ${labels.get(loop)};` });
+      }
+    }
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (Array.isArray(value)) for (const child of value) visit(child, loop);
+      else if (value && typeof value.type === 'string') visit(value, loop);
+    }
+  };
+  visit(ast, null);
+  let out = js;
+  for (const edit of edits.sort((a, b) => b.at - a.at)) out = out.slice(0, edit.at) + edit.text + out.slice(edit.at + edit.del);
+  return out;
+}
+
+// A Ruby local that shares its name with an accessor of the class (`startX = 16` next to `def startX=`) is a local in Ruby, but
+// Ruby2JS emits the assignment as `this.startX = 16` while the later reads stay bare (`startX`). In a function that assigns `this.N`
+// and also reads an undeclared bare `N`, the assignments are locals: declare `let N` at the top of the function and drop the `this.`.
+export function hoistLocalSetters(js) {
+  if (!/this\.[a-z]\w*\s*[-+*/|&]?=[^=]/.test(js)) return js;
+  let ast;
+  try { ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true }); }
+  catch { return js; }
+  const edits = [];
+  const isFunction = node => node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression';
+  const GLOBALS = new Set(['undefined', 'arguments', 'console', 'window', 'document', 'globalThis', 'self', 'super']);
+  const handle = fn => {
+    if (fn.body.type !== 'BlockStatement') return;
+    const assigned = new Map();   // name -> assignment nodes
+    let declared = new Set();
+    const reads = new Map();      // name -> count of bare reads
+    const addPattern = pattern => { if (!pattern) return; if (pattern.type === 'Identifier') declared.add(pattern.name); else if (pattern.type === 'AssignmentPattern') addPattern(pattern.left); else if (pattern.type === 'RestElement') addPattern(pattern.argument); else if (pattern.type === 'ArrayPattern') pattern.elements.forEach(addPattern); else if (pattern.type === 'ObjectPattern') pattern.properties.forEach(property => addPattern(property.value ?? property.argument)); };
+    fn.params.forEach(addPattern);
+    const inner = [];    // `let` declarations in nested blocks of this function (not in arrows, not loop heads)
+    const shadow = [];   // parameter names of the arrows being walked: their bare reads are the parameters, not a local of ours
+    const visit = (node, parent, key) => {
+      if (!node || typeof node.type !== 'string') return;
+      if (node !== fn.body && isFunction(node)) {
+        // A nested arrow shares `this` and the locals of this function (its parameters hide ours); any other function has its own `this`
+        // and is handled on its own.
+        if (node.type !== 'ArrowFunctionExpression') return;
+        const names = new Set(); const hold = declared; const probe = new Set(); declared = probe; node.params.forEach(addPattern); declared = hold; probe.forEach(name => names.add(name)); shadow.push(names);
+        for (const k of Object.keys(node)) { const value = node[k]; if (Array.isArray(value)) for (const child of value) visit(child, node, k); else if (value && typeof value.type === 'string') visit(value, node, k); }
+        shadow.pop();
+        return;
+      }
+      // Only a declaration that covers the whole function counts (`var`, or a top-level `let`/`const`); a block's own `let` hides nothing
+      // outside it, and neither does the parameter of a nested arrow.
+      if (node.type === 'VariableDeclaration' && node.kind === 'let' && parent !== fn.body && !shadow.length && !(parent && /^For(In|Of)?Statement$/.test(parent.type))) inner.push(node);
+      if (node.type === 'VariableDeclaration' && (node.kind === 'var' || parent === fn.body)) node.declarations.forEach(declaration => addPattern(declaration.id));
+      if (node.type === 'CatchClause') addPattern(node.param);
+      if (node.type === 'FunctionDeclaration' && node.id) declared.add(node.id.name);
+      if (node.type === 'AssignmentExpression' && node.left.type === 'MemberExpression' && node.left.object.type === 'ThisExpression' && !node.left.computed && node.left.property.type === 'Identifier' && /^[a-z]/.test(node.left.property.name)) {
+        const list = assigned.get(node.left.property.name) ?? []; list.push(node); assigned.set(node.left.property.name, list);
+      }
+      if (node.type === 'Identifier' && !(parent?.type === 'MemberExpression' && key === 'property' && !parent.computed) && !(parent?.type === 'Property' && key === 'key' && !parent.computed) && !(parent?.type === 'MethodDefinition' && key === 'key')
+        && !(parent?.type === 'VariableDeclarator' && key === 'id') && !(parent?.type === 'LabeledStatement') && !(parent?.type === 'BreakStatement') && !(parent?.type === 'ContinueStatement')) {
+        if (!shadow.some(names => names.has(node.name))) reads.set(node.name, (reads.get(node.name) ?? 0) + 1);
+      }
+      for (const k of Object.keys(node)) {
+        const value = node[k];
+        if (Array.isArray(value)) for (const child of value) visit(child, node, k);
+        else if (value && typeof value.type === 'string') visit(value, node, k);
+      }
+    };
+    visit(fn.body, fn, 'body');
+    const names = [];
+    for (const [name, nodes] of assigned) {
+      if (declared.has(name) || GLOBALS.has(name) || !reads.get(name)) continue;
+      names.push(name);
+      for (const node of nodes) edits.push({ at: node.left.start, del: node.left.end - node.left.start, text: name });
+    }
+    if (names.length) {
+      edits.push({ at: fn.body.start + 1, del: 0, text: ` let ${names.join(', ')};` });
+      // Ruby has one variable per method: a block's own `let width` (Ruby2JS declared it where it was first assigned there) must not shadow it.
+      for (const declaration of inner) {
+        const ours = declaration.declarations.filter(declarator => declarator.id.type === 'Identifier' && names.includes(declarator.id.name));
+        if (!ours.length || ours.length !== declaration.declarations.length) continue;
+        const assigned = ours.filter(declarator => declarator.init).map(declarator => `${declarator.id.name} = ${js.slice(declarator.init.start, declarator.init.end)}`);
+        edits.push({ at: declaration.start, del: declaration.end - declaration.start, text: assigned.length ? `${assigned.join(', ')};` : '' });
+      }
+    }
+  };
+  const walkAll = node => {
+    if (!node || typeof node.type !== 'string') return;
+    if (isFunction(node) && node.type !== 'ArrowFunctionExpression') handle(node);
+    for (const k of Object.keys(node)) {
+      const value = node[k];
+      if (Array.isArray(value)) value.forEach(walkAll);
+      else if (value && typeof value.type === 'string') walkAll(value);
+    }
+  };
+  walkAll(ast);
+  if (!edits.length) return js;
+  let out = js;
+  for (const edit of edits.sort((a, b) => b.at - a.at || b.del - a.del)) out = out.slice(0, edit.at) + edit.text + out.slice(edit.at + edit.del);
   return out;
 }

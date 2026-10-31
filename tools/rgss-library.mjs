@@ -30,7 +30,7 @@ import { RgssCalls, setKnownMethods, addKnownMethods, setSelfMethods, collectDef
 import { resolveInitializeAliases } from './rgss-initialize-alias.mjs';
 import { repairCallAssignments } from './rgss-repair.mjs';
 import { renamePredicates } from './rgss-predicates.mjs';
-import { shiftTrailingBlock, bindYieldToBlock, emptyListForGlobalMatch, attachConditionalMethods, qualifyNestedConstants, classCaseSwitches } from './rgss-block-arg.mjs';
+import { shiftTrailingBlock, bindYieldToBlock, emptyListForGlobalMatch, attachConditionalMethods, qualifyNestedConstants, classCaseSwitches, labelLoopBreaks, hoistLocalSetters } from './rgss-block-arg.mjs';
 
 // `def`s inside these are callable bare from anywhere (Ruby's global functions), so they
 // are indexed as top-level defs: `module Kernel; def pbMessage ... end; end`.
@@ -314,6 +314,8 @@ export function indexScripts(scripts, log = () => {}) {
   }
   // Classes nested one level under each unit (`Battle::Move`), for qualifying their bare uses in every piece of the unit.
   for (const unit of units.values()) unit.nested = new Set(unit.pieces.flatMap(piece => [...(piece.nestedConsts || []), ...(piece.constName ? [piece.constName] : [])].map(path => path.split('::')).filter(parts => parts.length >= 2 && parts[0] === unit.name).map(parts => parts[1].replace(/[?!]$/, ''))));
+  // Every nested class path of a unit (`Battle.Scene.CommandMenu`), for the lexical lookup of a bare name inside its enclosing classes.
+  for (const unit of units.values()) unit.nestedPaths = new Set(unit.pieces.flatMap(piece => [...(piece.nestedConsts || []), ...(piece.constName ? [piece.constName] : [])].map(path => path.split('::').map(part => part.replace(/[?!]$/, '')))).filter(parts => parts.length >= 2 && parts[0] === unit.name).map(parts => parts.join('.')));
   const moduleMethods = new Map();
   for (const unit of units.values()) for (const piece of unit.pieces) if (piece.nodeType === 'module' && piece.constName) {
     const names = moduleMethods.get(piece.constName) || new Set();
@@ -487,6 +489,18 @@ function exportModuleMethods(js, pieces) {
   return js;
 }
 
+// Shapes Ruby2JS emits that are not valid JavaScript. Every analysis pass in the chain below parses the unit with acorn and
+// silently skips one it cannot parse, so these are repaired first (a big class such as Essentials' `Battle` otherwise missed
+// the nested-constant qualification, the conditional-method attachment, the yield binding...).
+//  - a method with an implicit block parameter arrives as `get each(_implicitBlockYield) {` (an accessor takes no parameters);
+//  - a parallel attribute assignment `a.x, a.y = a.y, a.x` arrives as `[a.x = , a.y = ] = [a.y, a.x]`: it is the destructuring
+//    assignment `[a.x, a.y] = [a.y, a.x]`, which also swaps (two plain assignments in a row would not);
+//  - a splatted return arrives as `return ...foo(...)`.
+const repairParseBlockers = js => js
+  .replace(/\bget\s+([A-Za-z_$][\w$]*)\s*\(([^()]+)\)\s*\{/g, '$1($2) {')
+  .replace(/\[([^\[\],]+?)\s*=\s*,\s*([^\[\],]+?)\s*=\s*\]\s*=\s*\[\s*([^\[\],]+)\s*,\s*([^\[\],]+)\s*\]/g, '[$1, $2] = [$3, $4]')
+  .replace(/\breturn\s+\.\.\./g, 'return ');
+
 export function transpileUnit(unit) {
   const singletonAliasTargets = new Map(unit.pieces.flatMap(piece => singletonAliases(piece.text, piece.script)));
   let source = unit.pieces.map(piece => {
@@ -528,8 +542,9 @@ export function transpileUnit(unit) {
       const escaped = short.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       // Qualify nested constants only when used as a receiver (`Nested.new`,
       // `Nested.lookup`). This avoids touching local variables and declaration
-      // names while preserving Ruby's lexical lookup in the generated module.
-      text = text.replace(new RegExp(`(?<![:\\w])${escaped}(?=\\s*\\.)`, 'g'), (match, offset) =>
+      // names while preserving Ruby's lexical lookup in the generated module. `Nested::Inner.new` is a receiver chain too
+      // (a bare `Move` there would find a global `Move`), unless it is the name in a `class`/`module` declaration.
+      text = text.replace(new RegExp(`(?<![:\\w])(?<!(?:class|module)\\s+)${escaped}(?=\\s*\\.|::[A-Z])`, 'g'), (match, offset) =>
         methodRanges.some(([start, end]) => offset >= start && offset < end) ? nestedPath : `__MWGP_SELF__::${short}`);
     }
     // Visibility does not matter to a running game, but Ruby2JS marks a private method by renaming it `_name`: a subclass in another unit
@@ -540,6 +555,9 @@ export function transpileUnit(unit) {
   }).join('\n\n');
   const resolvedAliases = resolveInitializeAliases(source);
   source = resolvedAliases.source;
+  // Ruby2JS emits `x&.clone` and `x&.dup` as `x?.()` (it reads them as a safe call of x itself), which calls the value instead of
+  // copying it. A plain operand (a name, an ivar or a dotted path) is written out as the nil test it means.
+  source = source.replace(/([@$]?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)&\.(clone|dup)\b(?!\()/g, '($1.nil? ? nil : $1.$2)');
   // Ruby plugins commonly add a constant only when the engine has not defined
   // it already (`VALUE = 1 if !const_defined?(:VALUE)`). Ruby2JS emits a const
   // declaration as the body of an if, which is invalid JavaScript. The guarded
@@ -651,9 +669,19 @@ export function transpileUnit(unit) {
   filters.push(RgssCalls.prototype);
   // `x.name += 1` compiles to `x.name() += 1` (an assignment to a call): repaired here, so the syntax check below does not
   // send the unit down the "no call heuristic" fallback, which would turn every zero-argument call in it into a property read.
-  let js = classCaseSwitches(qualifyNestedConstants(attachConditionalMethods(emptyListForGlobalMatch(bindYieldToBlock(shiftTrailingBlock(dropShadowedFunctions(repairCallAssignments(nilSafeToString(convert(source, { preset: true, eslevel: 2022, loose_break: true, underscored_private: true, filters }).toString())))))), unit.name), unit.name, unit.nested));
+  let js = hoistLocalSetters(labelLoopBreaks(classCaseSwitches(qualifyNestedConstants(attachConditionalMethods(emptyListForGlobalMatch(bindYieldToBlock(shiftTrailingBlock(dropShadowedFunctions(repairCallAssignments(repairParseBlockers(nilSafeToString(convert(source, { preset: true, eslevel: 2022, loose_break: true, underscored_private: true, filters }).toString()))))))), unit.name), unit.name, unit.nested, unit.nestedPaths))));
   // A method renamed by an alias keeps calling its parent's original: `super` inside `void_x` is `super.x`, not `super.void_x`.
-  for (const [alias, original] of resolvedAliases.renames || []) js = js.split(`super.${alias}(`).join(`super.${original}(`);
+  for (const [alias, original] of resolvedAliases.renames || []) {
+    if (!original.endsWith('=')) { js = js.split(`super.${alias}(`).join(`super.${original}(`); continue; }
+    // The renamed method was a setter (`def visible=(value)`), so its `super(value)` is the parent's setter: `super.visible = value`.
+    const head = `super.${alias}(`;
+    for (let at = js.indexOf(head); at >= 0; at = js.indexOf(head, at + 1)) {
+      let depth = 1, end = at + head.length;
+      while (end < js.length && depth > 0) { const char = js[end++]; if (char === '(') depth++; else if (char === ')') depth--; }
+      const args = js.slice(at + head.length, end - 1);
+      js = `${js.slice(0, at)}(super.${original.slice(0, -1)} = ${args})${js.slice(end)}`;
+    }
+  }
   // Namespaces emitted as IIFEs need the root dropped so eager references
   // resolve to local nested constants. Direct class/object units have already
   // initialized their root before later declarations, so keep that root.
@@ -743,6 +771,10 @@ export function transpileUnit(unit) {
     const targetEscaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     js = js.replace(new RegExp(`^([ \\t]*)this\\.\\$?${escaped}\\s*=\\s*this\\.\\$?${targetEscaped};?[ \\t]*$`, 'gm'), '$1static ' + name + ' = this.' + target + ';');
   }
+  // The nested-constant qualification above parses the unit, and a unit with a Ruby2JS shape that only the later repairs fix
+  // (a parallel attribute swap, say) was skipped whole: `Move::Struggle` inside `Battle` then found a global `Move`. The code
+  // parses by now, so it runs again (it leaves an already qualified name alone).
+  js = qualifyNestedConstants(js, unit.name, unit.nested, unit.nestedPaths);
   try {
     new Function(js); // a SyntaxError here means the unit is unusable
   } catch (error) {

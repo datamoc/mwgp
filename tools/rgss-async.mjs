@@ -50,7 +50,8 @@ function callReceiver(callee, kind, thisCls) {
   // that class. Only when the receiver is the instance's own scene field, never a guess for other fields.
   if (thisCls && at.type === 'MemberExpression' && !at.computed && at.object.type === 'MemberExpression' && !at.object.computed
     && at.object.object.type === 'ThisExpression' && at.object.property.type === 'Identifier' && /^_?scene$/.test(at.object.property.name)) {
-    return `${thisCls.replace(/Screen$/, '')}_Scene`;
+    // ... or, for a class that owns a nested `Scene` (`Battle::Scene`), that nested class.
+    return [`${thisCls.replace(/Screen$/, '')}_Scene`, 'Scene'];
   }
   return null;
 }
@@ -91,7 +92,7 @@ function collectFunctions(ast) {
         else if (parent.method) insertAt = parent.key.start;
       } else if (parent?.type === 'VariableDeclarator') name = parent.id.type === 'Identifier' ? parent.id.name : null;
       else if (parent?.type === 'AssignmentExpression') name = calleeName(parent.left);
-      found.push({ node, name, kind, insertAt, skip, anonymous: name === null });
+      found.push({ node, name, kind, insertAt, skip, anonymous: name === null, parent });
     }
   };
   // Full traversal (functions included) to find all function nodes with their parents.
@@ -116,8 +117,22 @@ function collectFunctions(ast) {
     let node = parents.get(child);
     while (node) {
       if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && node.id?.type === 'Identifier') return node.id.name;
+      // `Battle.Scene = class { ... }` (a nested class): the class is `Scene`.
+      if (node.type === 'ClassExpression') {
+        const assigned = parents.get(node);
+        const target = assigned?.type === 'AssignmentExpression' && assigned.right === node ? assigned.left : null;
+        if (target?.type === 'MemberExpression' && !target.computed && target.property.type === 'Identifier') return target.property.name;
+        if (target?.type === 'Identifier') return target.name;
+      }
       if (node.type === 'AssignmentExpression' && child === node.right) {
         let root = node.left;
+        // `Battle.Scene.prototype.pbUpdate = function ...` (a mod reopening a nested class): the class is `Scene`.
+        if (root?.type === 'MemberExpression' && !root.computed && root.object?.type === 'MemberExpression' && !root.object.computed
+          && root.object.property.type === 'Identifier' && root.object.property.name === 'prototype') {
+          const owner = root.object.object;
+          if (owner.type === 'Identifier') return owner.name;
+          if (owner.type === 'MemberExpression' && !owner.computed && owner.property.type === 'Identifier') return owner.property.name;
+        }
         if (root?.type === 'MemberExpression' && !root.computed && root.property.type === 'Identifier' && root.property.name === 'prototype') root = root.object;
         if (root?.type === 'MemberExpression' || root?.type === 'ThisExpression') { child = node; node = parents.get(node); continue; }
         if (root?.type === 'Identifier') return root.name;
@@ -131,6 +146,15 @@ function collectFunctions(ast) {
   return found;
 }
 
+// The name of the call an anonymous function is an argument of (`PBDebug.logonerr(() => ...)` is `logonerr`), else null.
+function callbackOwner(fn) {
+  const parent = fn.parent;
+  if (parent?.type !== 'CallExpression' || !parent.arguments.includes(fn.node)) return null;
+  const name = calleeName(parent.callee);
+  return name && !ITERATION_NAMES.has(name) ? name : null;
+}
+const ITERATION_NAMES = new Set(['map', 'forEach', 'each', 'filter', 'select', 'reject', 'find', 'some', 'every', 'reduce', 'flatMap', 'sort', 'sort_by', 'then', 'catch', 'setTimeout', 'requestAnimationFrame', 'push', 'call', 'apply']);
+
 // Names of functions that (transitively) block. `sources` = [{ js, ast, functions }] of every unit/snippet.
 function asyncNamesOf(parsed) {
   // The analysis is by name, and a name like `get` or `update` is defined in many unrelated classes. So a name is:
@@ -142,6 +166,7 @@ function asyncNamesOf(parsed) {
   //    back to the global rule.
   const all = new Set(), strong = new Set();
   const keyedStrong = new Set();
+  const yieldAsync = new Set();   // functions that run a block (`yield`) which some caller gives a blocking callback
   const bodies = [];
   const totals = new Map();
   const keyedTotals = new Map();
@@ -153,9 +178,10 @@ function asyncNamesOf(parsed) {
       walkShallow(fn.node.body, (node) => {
         if (node.type !== 'CallExpression') return;
         const kind = calleeKind(node.callee);
-        calls.push({ blocking: blockingCall(node.callee), name: calleeName(node.callee), kind, recv: callReceiver(node.callee, kind, fn.cls) });
+        calls.push({ blocking: blockingCall(node.callee), name: calleeName(node.callee), kind, recv: callReceiver(node.callee, kind, fn.cls), yieldCall: node.callee.type === 'Identifier' && node.callee.name === '_implicitBlockYield' });
       });
-      bodies.push({ fn, calls, async: false });
+      const yields = calls.some(call => call.yieldCall);
+      bodies.push({ fn, calls, async: false, yields });
       if (fn.name) {
         totals.set(fn.name, (totals.get(fn.name) || 0) + 1);
         const key = keyOf(fn);
@@ -166,14 +192,16 @@ function asyncNamesOf(parsed) {
   // Only a bare `name()` call is unambiguously "the" global function of that name; `this.name()` and `obj.name()` could
   // both reach any class that defines `name`, so both require every definition to agree (`strong`), not just one — or,
   // when the receiver names the class outright, every definition attributed to that class (`keyedStrong`).
-  const qualifies = call => call.name && all.has(call.name) && (call.kind === 'bare' || strong.has(call.name) || (call.recv != null && keyedStrong.has(`${call.recv}.${call.name}`)));
+  const qualifies = call => call.name && all.has(call.name) && (call.kind === 'bare' || strong.has(call.name) || (call.recv != null && [].concat(call.recv).some(recv => keyedStrong.has(`${recv}.${call.name}`))));
   let changed = true;
   while (changed) {
     changed = false;
     const asyncCounts = new Map();
     const keyedAsync = new Map();
     for (const body of bodies) {
-      if (!body.async && body.calls.some(call => call.blocking || qualifies(call))) { body.async = true; changed = true; if (body.fn.name) all.add(body.fn.name); }
+      if (!body.async && (body.calls.some(call => call.blocking || qualifies(call)) || (body.yields && body.fn.name && yieldAsync.has(body.fn.name)))) { body.async = true; changed = true; if (body.fn.name) all.add(body.fn.name); }
+      const callback = body.fn.anonymous ? callbackOwner(body.fn) : null;
+      if (body.async && callback && !yieldAsync.has(callback)) { yieldAsync.add(callback); changed = true; }
       if (body.async && body.fn.name) {
         asyncCounts.set(body.fn.name, (asyncCounts.get(body.fn.name) || 0) + 1);
         const key = keyOf(body.fn);
@@ -183,7 +211,7 @@ function asyncNamesOf(parsed) {
     for (const [name, count] of asyncCounts) if (count === totals.get(name) && !strong.has(name)) { strong.add(name); changed = true; }
     for (const [key, count] of keyedAsync) if (count === keyedTotals.get(key) && !keyedStrong.has(key)) { keyedStrong.add(key); changed = true; }
   }
-  return { all, strong, keyedStrong };
+  return { all, strong, keyedStrong, yieldAsync };
 }
 
 // Edits for one parsed source: `async` on every function that awaits, `(await ...)` around every call to an async name.
@@ -198,14 +226,16 @@ function editsFor(entry, names, report) {
     const kind = calleeKind(node.callee);
     if (kind === 'bare' || names.strong.has(name)) return true;
     const recv = callReceiver(node.callee, kind, inFunction?.cls);
-    return recv != null && names.keyedStrong?.has(`${recv}.${name}`);
+    return recv != null && [].concat(recv).some(owner => names.keyedStrong?.has(`${owner}.${name}`));
   };
   const handle = (bodyRoot, fn) => {
     const calls = [];
-    walkShallow(bodyRoot, node => { if (awaited(node, fn)) calls.push(node); });
+    const yieldsHere = fn && !fn.anonymous && fn.name && names.yieldAsync?.has(fn.name);
+    walkShallow(bodyRoot, node => { if (awaited(node, fn) || (yieldsHere && node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === '_implicitBlockYield')) calls.push(node); });
     if (!calls.length) return;
     // A function that cannot be async (constructor/getter/setter) or an anonymous callback keeps its calls as they are.
-    if (fn && (fn.skip || fn.anonymous || fn.node.generator)) { report.unawaited += calls.length; return; }
+    const lifted = fn?.anonymous && !fn.skip && !fn.node.generator && (() => { const owner = callbackOwner(fn); return owner && names.yieldAsync?.has(owner); })();
+    if (fn && !lifted && (fn.skip || fn.anonymous || fn.node.generator)) { report.unawaited += calls.length; return; }
     for (const call of calls) { edits.push({ pos: call.start, text: '(await ' }, { pos: call.end, text: ')' }); report.awaits++; }
     if (fn) { if (!fn.node.async) edits.push({ pos: fn.insertAt, text: 'async ' }); report.functions++; } else programAsync = true;
   };
@@ -324,6 +354,7 @@ function optionalReadEdits(ast, known) {
 // method (`MultipleForms.call("getForm", pkmn)` -> `MultipleForms(...)`,
 // uncallable). Restore the method call for consts the indexer saw defined as
 // a class/module (never proc variables or proc-holding constants).
+const JS_CONVERSION_FUNCTIONS = new Set(['String', 'Number', 'Boolean', 'Array', 'Object', 'Symbol', 'BigInt']);
 function moduleCallEdits(ast, callModules) {
   const edits = [];
   if (!callModules?.size) return edits;
@@ -332,7 +363,9 @@ function moduleCallEdits(ast, callModules) {
     // No shadowing guard: Ruby reserves uppercase identifiers for constants,
     // so a bare `Name(...)` is always the module (a same-name local or
     // parameter cannot exist), including the module's own later references.
-    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && callModules.has(node.callee.name)) {
+    // A game that reopens a built-in class (`class String`) lists it here, but `String(x)` stays the JS conversion function
+    // (the `.to_s` lowering emits it): `String.call(x)` would call it with `x` as `this` and no argument.
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && callModules.has(node.callee.name) && !JS_CONVERSION_FUNCTIONS.has(node.callee.name)) {
       edits.push({ pos: node.callee.end, text: '.call' });
     }
     for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value.type === 'string') visit(value); }
@@ -444,6 +477,12 @@ function constructorOrderEdits(ast, js) {
   };
   const visit = node => {
     if (!node || typeof node.type !== 'string') return;
+    // Ruby runs one `initialize` per object, and a derived one that never calls `super` skips its parents'. A JS constructor chain cannot
+    // skip: it raises `__RUBY_SKIP.on` around that implicit `super()`, and every transpiled constructor in the chain returns at once while it is up.
+    if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && !node.superClass && node.body?.body) {
+      const own = node.body.body.find(member => member.type === 'MethodDefinition' && member.kind === 'constructor');
+      if (own?.value?.body?.body?.length) edits.push({ pos: own.value.body.start + 1, text: ' if (__RUBY_SKIP.on) return; __RUBY_PRE.apply(this, new.target); ' });
+    }
     if ((node.type === 'ClassDeclaration' || node.type === 'ClassExpression') && node.superClass && node.body?.body) {
       const constructor = node.body.body.find(member => member.type === 'MethodDefinition' && member.kind === 'constructor');
       const statements = constructor?.value?.body?.body;
@@ -452,18 +491,94 @@ function constructorOrderEdits(ast, js) {
         // A derived constructor that never calls `super` (legal in Ruby: the parent's initialize is simply skipped) cannot run in
         // JS: it calls `super()` first.
         const callsSuper = (() => { const stack = [constructor.value.body]; while (stack.length) { const c = stack.pop(); if (!c || typeof c.type !== 'string') continue; if (c.type === 'CallExpression' && c.callee.type === 'Super') return true; for (const key of Object.keys(c)) { const v = c[key]; if (Array.isArray(v)) stack.push(...v); else if (v && typeof v.type === 'string') stack.push(v); } } return false; })();
-        if (!callsSuper) edits.push({ pos: constructor.value.body.start + 1, text: ' super(); ' });
+        edits.push({ pos: constructor.value.body.start + 1, text: callsSuper
+          ? ' if (__RUBY_SKIP.on) { super(); return; } '
+          : ' try { __RUBY_SKIP.on = true; super(); } finally { __RUBY_SKIP.on = false; } ' });
         if (superIndex > 0) {
-          const moved = statements.slice(0, superIndex).filter(usesThis);
+          // Ruby sets ivars before `super` and the parent's initialize may read them (it calls an overridable method). JS cannot touch
+          // `this` before `super()`: a plain `this._x = expr` is evaluated here and kept in `__RUBY_PRE`, which the root constructor of the
+          // chain (or the line after `super()`) applies to the object, so the parent's constructor already sees it. Anything else that uses
+          // `this` runs after `super()`, as before.
+          const early = statements.slice(0, superIndex).filter(usesThis);
+          const isPlainField = statement => statement.type === 'ExpressionStatement' && statement.expression.type === 'AssignmentExpression' && statement.expression.operator === '='
+            && statement.expression.left.type === 'MemberExpression' && statement.expression.left.object.type === 'ThisExpression' && !statement.expression.left.computed
+            && statement.expression.left.property.type === 'Identifier' && !usesThis(statement.expression.right);
+          // `@trainer = @battle.owner(@idx)`: a field assigned from other fields set a line earlier. Kept before `super` too, reading those fields
+          // from what `__RUBY_PRE` has stored so far (a call on `this` itself still has to wait for `super`).
+          const fieldReads = expression => {
+            const nodes = [];
+            let ok = true;
+            const stack = [[expression, null, null]];
+            while (stack.length && ok) {
+              const [node, parent, key] = stack.pop();
+              if (!node || typeof node.type !== 'string') continue;
+              if (node.type === 'ThisExpression') {
+                if (parent?.type === 'MemberExpression' && key === 'object' && !parent.computed && parent.property.type === 'Identifier' && parent.property.name.startsWith('_')) nodes.push(node);
+                else ok = false;
+                continue;
+              }
+              if (isFunction(node) || node.type === 'Super') { if (usesThis(node)) ok = false; continue; }
+              for (const k of Object.keys(node)) { const value = node[k]; if (Array.isArray(value)) value.forEach(child => stack.push([child, node, k])); else if (value && typeof value.type === 'string') stack.push([value, node, k]); }
+            }
+            return ok ? nodes : null;
+          };
+          const isReadingField = statement => statement.type === 'ExpressionStatement' && statement.expression.type === 'AssignmentExpression' && statement.expression.operator === '='
+            && statement.expression.left.type === 'MemberExpression' && statement.expression.left.object.type === 'ThisExpression' && !statement.expression.left.computed
+            && statement.expression.left.property.type === 'Identifier' && usesThis(statement.expression.right) && fieldReads(statement.expression.right) !== null;
+          const stored = early.filter(statement => isPlainField(statement) || isReadingField(statement));
+          const moved = early.filter(statement => !isPlainField(statement) && !isReadingField(statement));
+          const superStatement = statements[superIndex];
+          const newline = String.fromCharCode(10);
+          for (const statement of stored) {
+            const { left, right } = statement.expression;
+            let rightText = js.slice(right.start, right.end);
+            const reads = usesThis(right) ? fieldReads(right) : [];
+            for (const node of [...reads].sort((a, b) => b.start - a.start)) rightText = rightText.slice(0, node.start - right.start) + '__RUBY_PRE.self(new.target)' + rightText.slice(node.end - right.start);
+            edits.push({ pos: statement.start, del: statement.end - statement.start, text: `__RUBY_PRE.set(new.target, ${JSON.stringify(left.property.name)}, ${rightText});` });
+          }
           if (moved.length) {
-            const superStatement = statements[superIndex];
-            const newline = String.fromCharCode(10);
             const text = moved.map(statement => js.slice(statement.start, statement.end)).join(newline);
             for (const statement of moved) edits.push({ pos: statement.start, del: statement.end - statement.start, text: '' });
-            edits.push({ pos: superStatement.end, text: newline + text });
-          }
+            edits.push({ pos: superStatement.end, text: newline + '__RUBY_PRE.apply(this, new.target);' + newline + text });
+          } else if (stored.length) edits.push({ pos: superStatement.end, text: newline + '__RUBY_PRE.apply(this, new.target);' });
         }
       }
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) visit(child); else if (value && typeof value.type === 'string') visit(value); }
+  };
+  visit(ast);
+  return edits;
+}
+
+// Ruby's `Array.new(n) { |i| ... }` arrives as `new Array(n, (i) => ...)`: JS reads that as a two-element array `[n, fn]`, the block never runs
+// and everything built from it (a row of buttons, a list of sprites) is a number and a function. The block is the element factory, called
+// with the index.
+function arrayBlockEdits(ast) {
+  const edits = [];
+  const visit = node => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'NewExpression' && node.callee.type === 'Identifier' && node.callee.name === 'Array' && node.arguments.length === 2
+      && (node.arguments[1].type === 'ArrowFunctionExpression' || node.arguments[1].type === 'FunctionExpression')) {
+      const [size, block] = node.arguments;
+      edits.push({ pos: node.start, del: size.start - node.start, text: 'Array.from({ length: ' });
+      edits.push({ pos: size.end, del: block.start - size.end, text: ' }, (__v, __i) => (' });
+      edits.push({ pos: block.end, text: ')(__i)' });
+    }
+    for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) visit(child); else if (value && typeof value.type === 'string') visit(value); }
+  };
+  visit(ast);
+  return edits;
+}
+
+// `x.length` is always a property read here: Array's own `length` is one, and a game class defining `def length` keeps a getter (the call
+// filter never turns a JS-native name into a call). A `x.length()` that still comes out of the conversion would throw on every array.
+function lengthCallEdits(ast) {
+  const edits = [];
+  const visit = node => {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'CallExpression' && !node.optional && node.arguments.length === 0 && node.callee.type === 'MemberExpression' && !node.callee.computed
+      && !node.callee.optional && node.callee.property.type === 'Identifier' && node.callee.property.name === 'length') {
+      edits.push({ pos: node.callee.end, del: node.end - node.callee.end, text: '' });
     }
     for (const key of Object.keys(node)) { const value = node[key]; if (Array.isArray(value)) for (const child of value) visit(child); else if (value && typeof value.type === 'string') visit(value); }
   };
@@ -636,6 +751,17 @@ function rubyTruthinessEdits(ast, js) {
   const edits = [];
   const visit = node => {
     if (!node || typeof node.type !== 'string') return;
+    // Ruby2JS writes `!x.is_a?(K)` as `!x instanceof K`, which JS reads as `(!x) instanceof K` (always false). The negation
+    // belongs to the whole test: `!(x instanceof K)`. Only the unparenthesised shape is touched, and the operand keeps its
+    // own edits (the `!` here is consumed, so the truthiness rewrite below must not see it).
+    if (node.type === 'BinaryExpression' && node.operator === 'instanceof' && node.left.type === 'UnaryExpression'
+      && node.left.operator === '!' && js.slice(node.start, node.left.argument.start).trim() === '!') {
+      edits.push({ pos: node.start, del: node.left.argument.start - node.start, text: '!(' });
+      edits.push({ pos: node.end, del: 0, text: ')' });
+      visit(node.left.argument);
+      visit(node.right);
+      return;
+    }
     if (node.type === 'UnaryExpression' && node.operator === '!' && isPlainRubyValue(node.argument)) {
       // Wrap the operator only (`del`s the `!` and inserts the closing paren around the untouched argument text)
       // rather than re-slicing and replacing the whole span: the argument may itself be the target of another edit
@@ -695,11 +821,29 @@ export function lowerRuby(js, known = null, zeroArg = null, callModules = null) 
   js = js.split('Function("return this")()').join('__global');
   let ast;
   try { ast = parse(js); } catch { return js; }
-  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...moduleCallEdits(ast, callModules), ...selfStaticEdits(ast, js), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js), ...selfEachEdits(ast, js)];
+  const edits = [...ivarCollisionEdits(ast), ...optionalReadEdits(ast, known), ...bareFunctionCallEdits(ast, zeroArg), ...moduleCallEdits(ast, callModules), ...selfStaticEdits(ast, js), ...constructorOrderEdits(ast, js), ...setterSuperEdits(ast, js), ...moduleSelfEdits(ast, js), ...methodSetterClashEdits(ast), ...rubyTruthinessEdits(ast, js), ...selfEachEdits(ast, js), ...arrayBlockEdits(ast), ...lengthCallEdits(ast)];
   const stack = [ast];
   while (stack.length) {
     const node = stack.pop();
     if (!node || typeof node.type !== 'string') continue;
+    // `sprite.x *= zoom`: the game reads a name it `def`s anywhere as a call (`sprite.x()`), so the read half of a compound assignment is a
+    // call too; JS would multiply the accessor function itself. Skipped when the object has side effects (a call) so it is not evaluated twice.
+    if (node.type === 'AssignmentExpression' && node.operator !== '=' && node.operator !== '|=' && node.operator !== '&=' && known
+      && node.left.type === 'MemberExpression' && !node.left.computed && node.left.property.type === 'Identifier' && known.has(node.left.property.name)
+      && !node.left.property.name.startsWith('_') && !/[(]/.test(js.slice(node.left.start, node.left.end))) {
+      const at = js.slice(node.left.end, node.right.start).indexOf(node.operator);
+      if (at >= 0) {
+        const read = js.slice(node.left.start, node.left.end) + '()';
+        edits.push({ pos: node.left.end + at, del: node.operator.length, text: '= ' + read + ' ' + node.operator.slice(0, -1) + ' (' }, { pos: node.right.end, text: ')' });
+      }
+    }
+    // Ruby's `Array#concat` appends in place; JS's returns a new array and leaves the receiver alone. Ruby's `a + b` is also emitted as
+    // `a.concat(b)`, but its value is always used: a `concat` statement whose result is dropped can only be the mutating one.
+    if (node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && node.expression.callee.type === 'MemberExpression'
+      && !node.expression.callee.computed && node.expression.callee.property.type === 'Identifier' && node.expression.callee.property.name === 'concat' && node.expression.arguments.length) {
+      const call = node.expression, property = call.callee.property;
+      edits.push({ pos: property.start, del: property.end - property.start, text: 'push' }, { pos: call.arguments[0].start, text: '...[].concat(' }, { pos: call.arguments[call.arguments.length - 1].end, text: ')' });
+    }
     // Ruby's `a |= b` / `a &= b` on arrays is set union / intersection (and logical or/and on booleans); JS's operators are bitwise and
     // turn arrays into 0. The runtime's helpers choose by the left operand's type.
     if (node.type === 'AssignmentExpression' && (node.operator === '|=' || node.operator === '&=')) {
@@ -709,6 +853,19 @@ export function lowerRuby(js, known = null, zeroArg = null, callModules = null) 
     if (node.type === 'BinaryExpression' && node.operator === '%') {
       const at = js.slice(node.left.end, node.right.start).indexOf('%');
       if (at >= 0) edits.push({ pos: node.start, text: '__mod(' }, { pos: node.left.end + at, del: 1, text: ',' }, { pos: node.end, text: ')' });
+    }
+    // `super(*args)` arrives as `super(new $Range(null, args, true))` (the splat read as a beginless range): it is the splat.
+    if (node.type === 'CallExpression' && node.callee.type === 'Super' && node.arguments.length === 1) {
+      const only = node.arguments[0];
+      if (only.type === 'NewExpression' && only.callee.type === 'Identifier' && only.callee.name === '$Range' && only.arguments.length === 3
+        && only.arguments[0].type === 'Literal' && only.arguments[0].value === null && only.arguments[1].type === 'Identifier'
+        && only.arguments[2].type === 'Literal' && only.arguments[2].value === true) {
+        edits.push({ pos: only.start, del: only.end - only.start, text: `...${only.arguments[1].name}` });
+      }
+    }
+    // Ruby's `*x` splats nil as nothing; JS's `...x` throws on undefined/null. A spread of a variable or a member read reads `x ?? []` (calls and literals are left alone: other passes rewrite those spans).
+    if (node.type === 'SpreadElement' && (node.argument.type === 'Identifier' || node.argument.type === 'MemberExpression')) {
+      edits.push({ pos: node.argument.start, text: '(' }, { pos: node.argument.end, text: ' ?? [])' });
     }
     // A Ruby block is emitted as an arrow that declares its own `_implicitBlockYield=null`, shadowing the method's: in
     // Ruby, `yield` inside a block is the enclosing method's block, so the arrow must not declare one.
@@ -879,6 +1036,6 @@ export function liftBlocking(units, snippets, { knownMethods = null, callModules
     if (entry.kind === 'unit' && edits) outUnits[entry.key] = js;
     else if (entry.kind === 'snippet' && edits) outSnippets[entry.key] = { js, async: programAsync };
   }
-  return { units: outUnits, snippets: outSnippets, names: [...names.all].sort(), strongNames: [...names.strong].sort(), report };
+  return { units: outUnits, snippets: outSnippets, names: [...names.all].sort(), strongNames: [...names.strong].sort(), keyedStrongNames: [...names.keyedStrong].sort(), report };
 }
 

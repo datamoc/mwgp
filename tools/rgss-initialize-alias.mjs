@@ -9,6 +9,7 @@ export function resolveInitializeAliases(source) {
   const methods = new Set();
   const renames = new Map();   // alias -> the method name it was renamed from (for `super` inside the renamed body)
   let rootSuper = null;
+  let preSuper = [];   // `@x = value` lines the root initialize runs before its `super`: they stay ahead of it
   let sawInitialize = false;
   const skipped = new Set();
   for (let guard = 0; guard < 400; guard++) {
@@ -42,7 +43,17 @@ export function resolveInitializeAliases(source) {
       if (containerPath(source, found.index) === aliasContainer) sameContainer = found;
     }
     last = sameContainer || sameIndent || last;
-    if (!last) { skipped.add(line); continue; }      // aliasing something inherited or built in: nothing to rename
+    if (!last) {
+      // Aliasing something inherited or built in: nothing to rename. The exception is a reopened built-in value class with no
+      // superclass (`class Color; alias init_original initialize`): the original `initialize` is the engine's, which these classes
+      // also expose as `set`, so the call the new `initialize` makes to the alias is a `set` on itself.
+      if (original === 'initialize' && !setterOriginal && !/<\s*\S/.test(classHeader(source, alias.index))) {
+        const call = new RegExp(`(?<![.\\w:@$])${escapeName(name)}(?=\\()`, 'g');
+        const rewritten = source.slice(alias.index + line.length).replace(call, 'self.set');
+        source = source.slice(0, alias.index + line.length) + rewritten;
+      }
+      skipped.add(line); continue;
+    }
     // Ruby's `alias new old` only renames `old` to `new` when a REDEFINITION of `old` follows (the shadow-and-override
     // idiom this function exists for): `old` is about to be overwritten, so its prior body must survive under `new`.
     // Without a following redefinition, this is a PLAIN alias (Ruby's ordinary "give this method another name" idiom,
@@ -76,6 +87,15 @@ export function resolveInitializeAliases(source) {
         const withArgs = argsuper.exec(block);
         if (withArgs) rootSuper = withArgs[1];
         else if (zsuper.test(block)) rootSuper = paramNames.join(', ');
+        if (rootSuper !== null) {
+          // Ruby allows `@x = ...` before `super`, and the parent's constructor may already call setters that read it (a window sets
+          // its width, which its own setter answers by reading `@starting`): keep those leading assignments ahead of the super call.
+          const bodyLines = block.split('\n');
+          const superAt = bodyLines.findIndex((text, index) => index > 0 && (argsuper.test(text) || zsuper.test(text)));
+          let take = 1;
+          while (take < superAt && /^[ \t]*@\w+[ \t]*=[^=~>][^\n]*$/.test(bodyLines[take])) take++;
+          if (take > 1 && take === superAt) { preSuper = bodyLines.slice(1, take); block = [bodyLines[0], ...bodyLines.slice(take)].join('\n'); }
+        }
       }
       block = block.replace(argsuper, '').replace(zsuper, '');
     }
@@ -83,14 +103,15 @@ export function resolveInitializeAliases(source) {
     if (setterOriginal) block = block.replace(new RegExp(`def ${escapeName(name)}=`), `def ${name}`);
     source = source.slice(0, last.index) + block + source.slice(blockEnd);
     methods.add(name.replace(/[?!]$/, ''));
-    if (original !== 'initialize') renames.set(name.replace(/[?!]$/, ''), original.replace(/[?!]$/, ''));
+    if (original !== 'initialize') renames.set(name.replace(/[?!]$/, ''), original.replace(/[?!]$/, '') + (setterOriginal ? '=' : ''));
   }
   if (sawInitialize && rootSuper !== null) {
     const defs = [...source.matchAll(/^([ \t]*)def initialize\b[^\n]*$/gm)];
     const final = defs[defs.length - 1];
     if (final && !/^[ \t]*super\b/m.test(source.slice(final.index + final[0].length, final.index + final[0].length + 400))) {
       const insertAt = final.index + final[0].length;
-      source = `${source.slice(0, insertAt)}\n${final[1]}  super(${rootSuper})${source.slice(insertAt)}`;
+      const lead = preSuper.length ? preSuper.map(line => `${final[1]}  ${line.trim()}`).join('\n') + '\n' : '';
+      source = `${source.slice(0, insertAt)}\n${lead}${final[1]}  super(${rootSuper})${source.slice(insertAt)}`;
     }
   }
   return { source, methods, renames };
@@ -118,4 +139,23 @@ function containerPath(source, offset) {
     if (need === 0) break;
   }
   return names.join('/');
+}
+
+// The header line (`class Name < Parent`) of the class that encloses `offset`, or '' outside any class.
+function classHeader(source, offset) {
+  const lineStart = source.lastIndexOf('\n', offset - 1) + 1;
+  let need = source.slice(lineStart).match(/^[ \t]*/)[0].length;
+  let end = lineStart - 1;
+  while (end > 0 && need > 0) {
+    const start = source.lastIndexOf('\n', end - 1) + 1;
+    const text = source.slice(start, end);
+    end = start - 1;
+    if (/^# ---- /.test(text)) break;
+    if (!text.trim() || /^\s*#/.test(text)) continue;
+    const indent = text.match(/^[ \t]*/)[0].length;
+    if (indent >= need) continue;
+    need = indent;
+    if (/^[ \t]*class[ \t]/.test(text)) return text;
+  }
+  return '';
 }

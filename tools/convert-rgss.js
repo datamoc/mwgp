@@ -14,7 +14,7 @@ import { collidingPredicates, setPredicateRenames, renamePredicates, predicateRe
 import { readRgssScripts } from './rgss-scripts.mjs';
 import { indexScripts, buildRgssLibrary } from './rgss-library.mjs';
 import { buildAudioIndex } from './audio-index.mjs';
-import { convertRgssDatabase } from './rgss-database.mjs';
+import { convertRgssDatabase, convertAceDatabase, convertVxDatabase } from './rgss-database.mjs';
 import { liftBlocking } from './rgss-async.mjs';
 import { exportRubyData, buildFileIndex, readTextFiles } from './rgss-data.mjs';
 import { setKnownMethods } from './rgss-call-filter.mjs';
@@ -1163,11 +1163,15 @@ export async function convertRgss(extractedArg, outputArg, flags = []) {
   phase = progress.phase('converting the database', 2);
   const libraryFailures = Object.entries(rubyLibrary?.failed || {}).map(([name, error]) => ({ name, error }));
   const libraryPartials = Object.entries(rubyLibrary?.partial || {}).map(([name, detail]) => ({ name, ...detail }));
-  // The database mapper reads XP-shaped tables (stat names, rank curves);
-  // VX's flat fields and Table curves are not mapped, so VX manifests ship
-  // database {} (dialogue-duel battles, minimal menu) like the placeholder path.
-  const xpDatabase = isVxLike ? null : await convertRgssDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the RPG database (${error.message}); battles use the dialogue duel`); return null; });
-  if (isVxLike) console.warn(`MWGP convert: the ${ENGINE_LABEL} database is not mapped to MV-shaped tables yet; battles use the dialogue duel and the menu stays minimal`);
+  // The XP mapper reads XP-shaped tables (stat names, rank curves); Ace's
+  // MV-like tables go through convertAceDatabase. VX's flat fields are not
+  // mapped yet, so VX manifests ship database {} (dialogue-duel battles,
+  // minimal menu) like the placeholder path.
+  const xpDatabase = isAce
+    ? await convertAceDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the Ace database (${error.message}); battles use the dialogue duel`); return null; })
+    : isVx
+      ? await convertVxDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the VX database (${error.message}); battles use the dialogue duel`); return null; })
+      : await convertRgssDatabase(dataDir, decodeMarshal, { system, convertTroopCommands: (list, context) => convertCommands(list, context) }).catch(error => { console.warn(`MWGP convert: cannot convert the RPG database (${error.message}); battles use the dialogue duel`); return null; });
   if (xpDatabase) console.log(`MWGP convert: database ${xpDatabase.actors.length - 1} actors, ${xpDatabase.enemies.length - 1} enemies, ${xpDatabase.troops.length - 1} troops, ${xpDatabase.skills.length - 1} skills`);
   // VX/Ace start party comes straight from System (the database mapper is skipped).
   const vxParty = isVxLike && Array.isArray(field(system, 'party_members', [])) ? field(system, 'party_members', []).map(Number).filter(id => id > 0) : [];

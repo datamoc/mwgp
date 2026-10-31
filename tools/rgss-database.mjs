@@ -290,3 +290,320 @@ export async function convertRgssDatabase(dataDir, decodeMarshal, { system, conv
   };
   return database;
 }
+
+// ---- RPG Maker VX Ace (.rvdata2) ------------------------------------------------------
+// Ace's database is already MV-shaped in spirit (RGSS3 kept the feature/effect
+// codes MV inherited), so the mapping is mostly a rename: BaseItem features
+// become traits verbatim, UsableItem damage keeps its formula string, class
+// @params is the same [param][level] table MV reads. `tables` holds the
+// decoded Marshal records ({ class, ivars } objects), keyed like the files.
+
+const aceFeatures = record => list(field(record, 'features', [])).map(feature => ({ code: numberOrZero(field(feature, 'code', 0)), dataId: numberOrZero(field(feature, 'data_id', 0)), value: Number(field(feature, 'value', 0)) || 0 }));
+const aceEffects = record => list(field(record, 'effects', [])).map(effect => ({ code: numberOrZero(field(effect, 'code', 0)), dataId: numberOrZero(field(effect, 'data_id', 0)), value1: Number(field(effect, 'value1', 0)) || 0, value2: Number(field(effect, 'value2', 0)) || 0 }));
+const aceDamage = record => {
+  const damage = field(record, 'damage', {});
+  return { type: numberOrZero(field(damage, 'type', 0)), elementId: numberOrZero(field(damage, 'element_id', 0)), formula: String(field(damage, 'formula', '0') || '0'), variance: numberOrZero(field(damage, 'variance', 20)), critical: field(damage, 'critical', false) === true };
+};
+const aceBase = record => ({ id: Number(field(record, 'id')), name: String(field(record, 'name', '')), description: String(field(record, 'description', '')), iconIndex: numberOrZero(field(record, 'icon_index', 0)), note: String(field(record, 'note', '')) });
+
+function aceClassParams(record) {
+  const table = parseTable(field(record, 'params'));
+  const params = Array.from({ length: 8 }, () => Array(Math.max(1, table.y)).fill(0));
+  const columns = table.x || 8;
+  for (let level = 0; level < table.y; level++) for (let param = 0; param < Math.min(8, columns); param++) params[param][level] = numberOrZero(table.data[level * columns + param]);
+  return params;
+}
+
+export function convertAceDatabaseTables(tables, { system, convertTroopCommands } = {}) {
+  if (!tables?.Actors || !tables?.Classes || !tables?.Skills || !tables?.Enemies || !tables?.Troops) return null;
+  const namedEnemy = new Set(list(tables.Enemies).filter(enemy => enemy && String(field(enemy, 'name', '')).trim()).map(enemy => Number(field(enemy, 'id'))));
+  const playable = list(tables.Troops).some(troop => troop && list(field(troop, 'members', [])).some(member => namedEnemy.has(numberOrZero(field(member, 'enemy_id', 0)))));
+  if (!playable) return null;
+
+  const skills = byId(tables.Skills), states = byId(tables.States);
+  // Ace's own Attack/Guard skills (1/2) and Death state (1) keep MV's numbering;
+  // only Escape/Wait skills and the Guard state need spare ids, as in XP.
+  const battleIds = {
+    attackSkill: skills[1] ? 1 : skills.length, guardSkill: skills[2] ? 2 : skills.length + 1,
+    escapeSkill: skills.length + 2, waitSkill: skills.length + 3, guardState: states.length,
+  };
+  const usable = record => ({
+    scope: numberOrZero(field(record, 'scope', 0)), occasion: numberOrZero(field(record, 'occasion', 0)),
+    speed: numberOrZero(field(record, 'speed', 0)), successRate: numberOrZero(field(record, 'success_rate', 100)),
+    repeats: numberOrZero(field(record, 'repeats', 1)), tpGain: numberOrZero(field(record, 'tp_gain', 0)),
+    hitType: numberOrZero(field(record, 'hit_type', 0)), animationId: numberOrZero(field(record, 'animation_id', 0)),
+    damage: aceDamage(record), effects: aceEffects(record),
+  });
+  const database = { battleIds };
+  database.skills = skills.map(skill => skill && { ...aceBase(skill), ...usable(skill), stypeId: numberOrZero(field(skill, 'stype_id', 1)), mpCost: numberOrZero(field(skill, 'mp_cost', 0)), tpCost: numberOrZero(field(skill, 'tp_cost', 0)), message1: String(field(skill, 'message1', '')), message2: String(field(skill, 'message2', '')) });
+  if (!skills[1]) database.skills[battleIds.attackSkill] = { id: battleIds.attackSkill, name: 'Attack', stypeId: 0, scope: 1, occasion: 1, mpCost: 0, tpCost: 0, speed: 0, successRate: 100, repeats: 1, tpGain: 0, hitType: 1, animationId: -1, damage: { type: 1, elementId: -1, formula: 'a.atk * 4 - b.def * 2', variance: 20, critical: true }, effects: [], message1: '', message2: '', note: '' };
+  if (!skills[2]) database.skills[battleIds.guardSkill] = { id: battleIds.guardSkill, name: 'Guard', stypeId: 0, scope: 11, occasion: 1, mpCost: 0, tpCost: 0, speed: 2000, successRate: 100, repeats: 1, tpGain: 0, hitType: 0, animationId: 0, damage: { type: 0, elementId: 0, formula: '0', variance: 0, critical: false }, effects: [], message1: '', message2: '', note: '' };
+  database.skills[battleIds.escapeSkill] = { id: battleIds.escapeSkill, name: 'Escape', stypeId: 0, scope: 11, occasion: 1, mpCost: 0, tpCost: 0, speed: 0, successRate: 100, repeats: 1, tpGain: 0, hitType: 0, animationId: 0, damage: { type: 0, elementId: 0, formula: '0', variance: 0, critical: false }, effects: [{ code: 41, dataId: 0, value1: 0, value2: 0 }], message1: '', message2: '', note: '' };
+  database.skills[battleIds.waitSkill] = { id: battleIds.waitSkill, name: 'Wait', stypeId: 0, scope: 0, occasion: 1, mpCost: 0, tpCost: 0, speed: 0, successRate: 100, repeats: 1, tpGain: 0, hitType: 0, animationId: 0, damage: { type: 0, elementId: 0, formula: '0', variance: 0, critical: false }, effects: [], message1: '', message2: '', note: '' };
+  database.states = states.map(state => state && {
+    ...aceBase(state), restriction: numberOrZero(field(state, 'restriction', 0)), priority: numberOrZero(field(state, 'priority', 50)),
+    removeAtBattleEnd: field(state, 'remove_at_battle_end', false) === true, autoRemovalTiming: numberOrZero(field(state, 'auto_removal_timing', 0)),
+    minTurns: numberOrZero(field(state, 'min_turns', 1)), maxTurns: numberOrZero(field(state, 'max_turns', 1)),
+    removeByDamage: field(state, 'remove_by_damage', false) === true, chanceByDamage: numberOrZero(field(state, 'chance_by_damage', 100)),
+    traits: aceFeatures(state), message1: String(field(state, 'message1', '')), message2: String(field(state, 'message2', '')), message3: String(field(state, 'message3', '')), message4: String(field(state, 'message4', '')),
+  });
+  database.states[battleIds.guardState] = { id: battleIds.guardState, name: 'Guard', iconIndex: 0, restriction: 0, priority: 0, removeAtBattleEnd: true, autoRemovalTiming: 1, minTurns: 1, maxTurns: 1, removeByDamage: false, chanceByDamage: 0, traits: [], message1: '', message2: '', message3: '', message4: '', note: '' };
+  database.items = byId(tables.Items).map(item => item && { ...aceBase(item), ...usable(item), itypeId: numberOrZero(field(item, 'itype_id', 1)), price: numberOrZero(field(item, 'price', 0)), consumable: field(item, 'consumable', true) !== false });
+  const equip = (record, kind) => ({
+    ...aceBase(record), price: numberOrZero(field(record, 'price', 0)),
+    params: Array.from({ length: 8 }, (_, i) => numberOrZero(list(field(record, 'params', []))[i])),
+    traits: aceFeatures(record), animationId: kind === 'weapon' ? numberOrZero(field(record, 'animation_id', 0)) : 0,
+    ...(kind === 'weapon' ? { wtypeId: numberOrZero(field(record, 'wtype_id', 0)), etypeId: 1 } : { atypeId: numberOrZero(field(record, 'atype_id', 0)), etypeId: numberOrZero(field(record, 'etype_id', 2)) }),
+  });
+  database.weapons = byId(tables.Weapons).map(weapon => weapon && equip(weapon, 'weapon'));
+  database.armors = byId(tables.Armors).map(armor => armor && equip(armor, 'armor'));
+  database.classes = byId(tables.Classes).map(klass => klass && {
+    ...aceBase(klass), expParams: list(field(klass, 'exp_curve', [])).map(Number),
+    learnings: list(field(klass, 'learnings', [])).map(entry => ({ level: numberOrZero(field(entry, 'level', 1)), skillId: numberOrZero(field(entry, 'skill_id', 0)), note: String(field(entry, 'note', '')) })),
+    traits: aceFeatures(klass), params: aceClassParams(klass),
+  });
+  database.actors = byId(tables.Actors).map(actor => actor && {
+    ...aceBase(actor), nickname: String(field(actor, 'nickname', '')), classId: numberOrZero(field(actor, 'class_id', 1)),
+    initialLevel: numberOrZero(field(actor, 'initial_level', 1)), maxLevel: numberOrZero(field(actor, 'max_level', 99)) || 99,
+    characterName: String(field(actor, 'character_name', '')), characterIndex: numberOrZero(field(actor, 'character_index', 0)),
+    faceName: String(field(actor, 'face_name', '')), faceIndex: numberOrZero(field(actor, 'face_index', 0)),
+    equips: list(field(actor, 'equips', [])).map(numberOrZero), traits: aceFeatures(actor), profile: '',
+  });
+  database.enemies = byId(tables.Enemies).map(enemy => enemy && {
+    ...aceBase(enemy), battlerName: String(field(enemy, 'battler_name', '')), battlerHue: numberOrZero(field(enemy, 'battler_hue', 0)),
+    params: Array.from({ length: 8 }, (_, i) => numberOrZero(list(field(enemy, 'params', []))[i])),
+    exp: numberOrZero(field(enemy, 'exp', 0)), gold: numberOrZero(field(enemy, 'gold', 0)),
+    dropItems: list(field(enemy, 'drop_items', [])).map(drop => ({ kind: numberOrZero(field(drop, 'kind', 0)), dataId: numberOrZero(field(drop, 'data_id', 0)), denominator: Math.max(1, numberOrZero(field(drop, 'denominator', 1))) })),
+    actions: list(field(enemy, 'actions', [])).map(action => ({ skillId: numberOrZero(field(action, 'skill_id', 1)), rating: numberOrZero(field(action, 'rating', 5)), conditionType: numberOrZero(field(action, 'condition_type', 0)), conditionParam1: Number(field(action, 'condition_param1', 0)) || 0, conditionParam2: Number(field(action, 'condition_param2', 0)) || 0 })),
+    traits: aceFeatures(enemy),
+  });
+
+  const troopEvents = {};
+  database.troops = byId(tables.Troops).map(troop => {
+    if (!troop) return null;
+    const id = Number(field(troop, 'id'));
+    const pages = list(field(troop, 'pages', [])).map((page, index) => {
+      const condition = field(page, 'condition', {});
+      const converted = convertTroopCommands ? convertTroopCommands(list(field(page, 'list', [])).map(command => ({ code: field(command, 'code', 0), indent: field(command, 'indent', 0), parameters: field(command, 'parameters', []) })), { troopId: id, troopPage: index }) : [];
+      const conditions = {
+        turnEnding: field(condition, 'turn_ending', false) === true, turnValid: field(condition, 'turn_valid', false) === true, turnA: numberOrZero(field(condition, 'turn_a', 0)), turnB: numberOrZero(field(condition, 'turn_b', 0)),
+        enemyValid: field(condition, 'enemy_valid', false) === true, enemyIndex: numberOrZero(field(condition, 'enemy_index', 0)), enemyHp: numberOrZero(field(condition, 'enemy_hp', 50)),
+        actorValid: field(condition, 'actor_valid', false) === true, actorId: numberOrZero(field(condition, 'actor_id', 1)), actorHp: numberOrZero(field(condition, 'actor_hp', 50)),
+        switchValid: field(condition, 'switch_valid', false) === true, switchId: numberOrZero(field(condition, 'switch_id', 1)),
+      };
+      return { conditions, span: numberOrZero(field(page, 'span', 0)), commands: Array.isArray(converted) ? converted : [], ...(converted?.story ? { story: converted.story } : {}) };
+    });
+    troopEvents[String(id)] = pages.filter(page => page.commands.length || page.story);
+    return { id, name: String(field(troop, 'name', '')), members: list(field(troop, 'members', [])).map(member => ({ enemyId: numberOrZero(field(member, 'enemy_id', 0)), x: numberOrZero(field(member, 'x', 0)), y: numberOrZero(field(member, 'y', 0)), hidden: field(member, 'hidden', false) === true })), pages: pages.map(page => ({ conditions: page.conditions, span: page.span, list: [] })) };
+  });
+  database.troopEvents = troopEvents;
+
+  const terms = field(system, 'terms', null);
+  const messagesRaw = field(terms, 'messages', null);
+  const messages = messagesRaw?.$map ? Object.fromEntries(messagesRaw.$map.map(([key, value]) => [String(key), String(value)]))
+    : Object.fromEntries(Object.entries(terms && typeof terms === 'object' ? (messagesRaw || {}) : {}).map(([key, value]) => [key.replace(/^@/, ''), String(value)]));
+  database.system = {
+    partyMembers: list(field(system, 'party_members', [])).map(Number), currencyUnit: String(field(system, 'currency_unit', 'G') || 'G'), battleIds,
+    terms: {
+      basic: list(field(terms, 'basic', [])).map(String), commands: list(field(terms, 'commands', [])).map(String),
+      params: list(field(terms, 'params', [])).map(String), messages,
+    },
+  };
+  return database;
+}
+
+async function readAceTable(dataDir, name, decodeMarshal) {
+  const path = join(dataDir, `${name}.rvdata2`);
+  return existsSync(path) ? decodeMarshal(await readFile(path)) : null;
+}
+
+export async function convertAceDatabase(dataDir, decodeMarshal, { system, convertTroopCommands } = {}) {
+  const tables = Object.fromEntries(await Promise.all(['Actors', 'Classes', 'Skills', 'Items', 'Weapons', 'Armors', 'Enemies', 'Troops', 'States'].map(async name => [name, await readAceTable(dataDir, name, decodeMarshal)])));
+  return convertAceDatabaseTables(tables, { system, convertTroopCommands });
+}
+
+// ---- RPG Maker VX (.rvdata) -----------------------------------------------------------
+// VX sits between XP and Ace: actors carry their own stat table like XP, but
+// the stats are the flat VX set (maxhp, maxmp, atk, def, spi, agi; spi serves
+// as both magical attack and defence in MV's eight parameters, agi doubles
+// as luck), skills/items carry base_damage plus stat factors like XP, and
+// classes gate equipment by weapon/armor sets and learn from a level table.
+// Shapes beyond the Marshal envelope follow the VX RPG module; no VX project
+// is installed locally, so the synthetic fixture in the tests pins them.
+
+const VX_PARAM_ORDER = ['maxhp', 'maxmp', 'atk', 'def', 'spi', 'spi', 'agi', 'agi'];
+
+function vxFormula(record) {
+  const base = numberOrZero(field(record, 'base_damage', 0));
+  const factor = name => numberOrZero(field(record, name, 0));
+  if (base === 0 && !factor('atk_f') && !factor('spi_f') && !factor('agi_f')) return { formula: '0', type: 0 };
+  const stats = [['atk', factor('atk_f')], ['spi', factor('spi_f')], ['agi', factor('agi_f')]].filter(([, v]) => v)
+    .map(([name, v]) => `${name === 'spi' ? 'a.mat' : `a.${name}`} * ${v} / 100`);
+  const physical = field(record, 'physical_attack', false) === true || factor('atk_f') > 0;
+  const defence = physical ? `b.def * ${factor('atk_f') || 100} / 200` : `b.mdf * ${factor('spi_f') || 100} / 200`;
+  let text = `(${Math.abs(base)}${stats.length ? ` + ${stats.join(' + ')}` : ''} - ${defence})`;
+  if (base > 0) text = `Math.max(${text}, 0)`;
+  return { formula: text, type: base < 0 ? 3 : 1, physical };
+}
+
+function vxUsable(record, { item = false } = {}) {
+  const { formula, type, physical } = vxFormula(record);
+  const effects = [
+    ...list(field(record, 'plus_state_set', [])).map(id => ({ code: 21, dataId: Number(id), value1: 1, value2: 0 })),
+    ...list(field(record, 'minus_state_set', [])).map(id => ({ code: 22, dataId: Number(id), value1: 1, value2: 0 })),
+    ...(numberOrZero(field(record, 'common_event_id', 0)) ? [{ code: 44, dataId: numberOrZero(field(record, 'common_event_id', 0)), value1: 0, value2: 0 }] : []),
+  ];
+  if (item) {
+    const hp = numberOrZero(field(record, 'hp_recovery', 0)), hpRate = numberOrZero(field(record, 'hp_recovery_rate', 0));
+    const mp = numberOrZero(field(record, 'mp_recovery', 0)), mpRate = numberOrZero(field(record, 'mp_recovery_rate', 0));
+    if (hp || hpRate) effects.unshift({ code: 11, dataId: 0, value1: hpRate / 100, value2: hp });
+    if (mp || mpRate) effects.unshift({ code: 12, dataId: 0, value1: mpRate / 100, value2: mp });
+  }
+  const elements = list(field(record, 'element_set', []));
+  return {
+    scope: SCOPE[numberOrZero(field(record, 'scope', item ? 0 : 1))] ?? 0, occasion: numberOrZero(field(record, 'occasion', 0)),
+    mpCost: numberOrZero(field(record, 'mp_cost', 0)), tpCost: 0, speed: numberOrZero(field(record, 'speed', 0)),
+    successRate: 100, repeats: 1, tpGain: 0, hitType: type === 0 ? 0 : physical ? 1 : 2,
+    animationId: numberOrZero(field(record, 'animation_id', 0)),
+    damage: { type, elementId: elements.length ? Number(elements[0]) : 0, formula, variance: numberOrZero(field(record, 'variance', 15)), critical: false },
+    effects, message1: String(field(record, 'message1', '')), message2: String(field(record, 'message2', '')), note: '',
+  };
+}
+
+export function convertVxDatabaseTables(tables, { system, convertTroopCommands } = {}) {
+  if (!tables?.Actors || !tables?.Classes || !tables?.Skills || !tables?.Enemies || !tables?.Troops) return null;
+  const namedEnemy = new Set(list(tables.Enemies).filter(enemy => enemy && String(field(enemy, 'name', '')).trim()).map(enemy => Number(field(enemy, 'id'))));
+  const playable = list(tables.Troops).some(troop => troop && list(field(troop, 'members', [])).some(member => namedEnemy.has(numberOrZero(field(member, 'enemy_id', 0)))));
+  if (!playable) return null;
+
+  const skills = byId(tables.Skills), states = byId(tables.States);
+  const battleIds = { attackSkill: skills.length, guardSkill: skills.length + 1, escapeSkill: skills.length + 2, waitSkill: skills.length + 3, guardState: states.length };
+  const database = { battleIds };
+  database.skills = skills.map(skill => skill && { id: Number(field(skill, 'id')), name: String(field(skill, 'name', '')), description: String(field(skill, 'description', '')), iconIndex: numberOrZero(field(skill, 'icon_index', 0)), stypeId: 1, ...vxUsable(skill) });
+  database.skills[battleIds.attackSkill] = { id: battleIds.attackSkill, name: 'Attack', stypeId: 0, scope: 1, occasion: 1, mpCost: 0, tpCost: 0, speed: 0, successRate: 100, repeats: 1, tpGain: 0, hitType: 1, animationId: -1, damage: { type: 1, elementId: -1, formula: 'Math.max(a.atk * 2 - b.def, 0)', variance: 15, critical: false }, effects: [], message1: '', message2: '', note: '' };
+  database.skills[battleIds.guardSkill] = { id: battleIds.guardSkill, name: 'Guard', stypeId: 0, scope: 11, occasion: 1, mpCost: 0, tpCost: 0, speed: 2000, successRate: 100, repeats: 1, tpGain: 0, hitType: 0, animationId: 0, damage: { type: 0, elementId: 0, formula: '0', variance: 0, critical: false }, effects: [], message1: '', message2: '', note: '' };
+  database.skills[battleIds.escapeSkill] = { id: battleIds.escapeSkill, name: 'Escape', stypeId: 0, scope: 11, occasion: 1, mpCost: 0, tpCost: 0, speed: 0, successRate: 100, repeats: 1, tpGain: 0, hitType: 0, animationId: 0, damage: { type: 0, elementId: 0, formula: '0', variance: 0, critical: false }, effects: [{ code: 41, dataId: 0, value1: 0, value2: 0 }], message1: '', message2: '', note: '' };
+  database.skills[battleIds.waitSkill] = { id: battleIds.waitSkill, name: 'Wait', stypeId: 0, scope: 0, occasion: 1, mpCost: 0, tpCost: 0, speed: 0, successRate: 100, repeats: 1, tpGain: 0, hitType: 0, animationId: 0, damage: { type: 0, elementId: 0, formula: '0', variance: 0, critical: false }, effects: [], message1: '', message2: '', note: '' };
+  database.states = states.map(state => {
+    if (!state) return null;
+    const traits = [];
+    for (const [stat, index] of [['atk_rate', 2], ['def_rate', 3], ['spi_rate', 4], ['agi_rate', 6]]) {
+      const rate = numberOrZero(field(state, stat, 100));
+      if (rate !== 100) traits.push({ code: 21, dataId: index, value: rate / 100 });
+    }
+    if (field(state, 'slip_damage', false)) traits.push({ code: 22, dataId: 7, value: -0.1 });
+    const hold = numberOrZero(field(state, 'hold_turn', 0)), release = numberOrZero(field(state, 'auto_release_prob', 0));
+    return {
+      id: Number(field(state, 'id')), name: String(field(state, 'name', '')), iconIndex: numberOrZero(field(state, 'icon_index', 0)),
+      restriction: RESTRICTION[numberOrZero(field(state, 'restriction', 0))] ?? 0, priority: numberOrZero(field(state, 'priority', 50)),
+      removeAtBattleEnd: field(state, 'battle_only', false) === true, autoRemovalTiming: hold || release ? 2 : 0,
+      minTurns: hold || (release ? 1 : 0), maxTurns: hold || (release ? Math.max(1, Math.ceil(100 / release)) : 0),
+      removeByDamage: numberOrZero(field(state, 'release_by_damage', 0)) > 0, chanceByDamage: numberOrZero(field(state, 'release_by_damage', 0)),
+      traits, message1: String(field(state, 'message1', '')), message2: String(field(state, 'message2', '')), message3: String(field(state, 'message3', '')), message4: String(field(state, 'message4', '')), note: '',
+    };
+  });
+  database.states[battleIds.guardState] = { id: battleIds.guardState, name: 'Guard', iconIndex: 0, restriction: 0, priority: 0, removeAtBattleEnd: true, autoRemovalTiming: 1, minTurns: 1, maxTurns: 1, removeByDamage: false, chanceByDamage: 0, traits: [], message1: '', message2: '', message3: '', message4: '', note: '' };
+  database.items = byId(tables.Items).map(item => item && { id: Number(field(item, 'id')), name: String(field(item, 'name', '')), description: String(field(item, 'description', '')), iconIndex: numberOrZero(field(item, 'icon_index', 0)), itypeId: 1, price: numberOrZero(field(item, 'price', 0)), consumable: field(item, 'consumable', true) !== false, ...vxUsable(item, { item: true }) });
+  const vxEquipParams = record => { const params = Array(8).fill(0); VX_PARAM_ORDER.forEach((name, i) => { if (i < 6) params[i] = numberOrZero(field(record, name === 'maxhp' || name === 'maxmp' ? name : name, 0)); }); params[2] = numberOrZero(field(record, 'atk', 0)); params[3] = numberOrZero(field(record, 'def', 0)); params[4] = numberOrZero(field(record, 'spi', 0)); params[5] = numberOrZero(field(record, 'spi', 0)); params[6] = numberOrZero(field(record, 'agi', 0)); return params; };
+  database.weapons = byId(tables.Weapons).map(weapon => weapon && {
+    id: Number(field(weapon, 'id')), name: String(field(weapon, 'name', '')), description: String(field(weapon, 'description', '')), iconIndex: numberOrZero(field(weapon, 'icon_index', 0)),
+    price: numberOrZero(field(weapon, 'price', 0)), wtypeId: Number(field(weapon, 'id')), etypeId: 1, params: vxEquipParams(weapon),
+    traits: [...list(field(weapon, 'element_set', [])).map(id => ({ code: 31, dataId: Number(id), value: 1 })), ...(numberOrZero(field(weapon, 'critical', 0)) ? [{ code: 22, dataId: 2, value: numberOrZero(field(weapon, 'critical', 0)) / 100 }] : [])],
+    animationId: numberOrZero(field(weapon, 'animation_id', 0)), note: '',
+  });
+  database.armors = byId(tables.Armors).map(armor => armor && {
+    id: Number(field(armor, 'id')), name: String(field(armor, 'name', '')), description: String(field(armor, 'description', '')), iconIndex: numberOrZero(field(armor, 'icon_index', 0)),
+    price: numberOrZero(field(armor, 'price', 0)), atypeId: Number(field(armor, 'id')), etypeId: 2 + numberOrZero(field(armor, 'kind', 0)), params: vxEquipParams(armor),
+    traits: [...list(field(armor, 'guard_element_set', [])).map(id => ({ code: 11, dataId: Number(id), value: 0.5 })), ...list(field(armor, 'guard_state_set', [])).map(id => ({ code: 14, dataId: Number(id), value: 1 }))], animationId: 0, note: '',
+  });
+  database.classes = byId(tables.Classes).map(klass => {
+    if (!klass) return null;
+    const rawLearnings = field(klass, 'learnings', null);
+    const learnings = rawLearnings?.$map ? rawLearnings.$map.flatMap(([level, ids]) => list(ids).map(skillId => ({ level: Number(level) || 1, skillId: Number(skillId), note: '' })))
+      : list(rawLearnings).map(entry => ({ level: numberOrZero(field(entry, 'level', 1)), skillId: numberOrZero(field(entry, 'skill_id', 0)), note: '' }));
+    return {
+      id: Number(field(klass, 'id')), name: String(field(klass, 'name', '')), learnings, params: [], expParams: [30, 20, 30, 30], note: '',
+      traits: [...list(field(klass, 'weapon_set', [])).map(id => ({ code: 51, dataId: Number(id) })), ...list(field(klass, 'armor_set', [])).map(id => ({ code: 52, dataId: Number(id) })), ...rankTraits(field(klass, 'element_ranks'), ELEMENT_RANK_RATE, 11), ...rankTraits(field(klass, 'state_ranks'), STATE_RANK_RATE, 13)],
+    };
+  });
+  database.actors = byId(tables.Actors).map(actor => {
+    if (!actor) return null;
+    const table = parseTable(field(actor, 'parameters'));
+    const params = Array.from({ length: 8 }, () => Array(101).fill(0));
+    const columns = table.x || 6;
+    for (let level = 1; level <= Math.min(100, table.y - 1); level++) {
+      const row = table.data.slice(level * columns, level * columns + columns);
+      [params[0][level], params[1][level], params[2][level], params[3][level], params[4][level], params[6][level]] = row.map(numberOrZero);
+      params[5][level] = params[4][level]; params[7][level] = params[6][level];
+    }
+    return {
+      id: Number(field(actor, 'id')), name: String(field(actor, 'name', '')), classId: numberOrZero(field(actor, 'class_id', 1)),
+      initialLevel: numberOrZero(field(actor, 'initial_level', 1)), maxLevel: numberOrZero(field(actor, 'final_level', 99)) || 99,
+      characterName: String(field(actor, 'character_name', '')), characterIndex: numberOrZero(field(actor, 'character_index', 0)),
+      equips: [field(actor, 'weapon_id', 0), field(actor, 'armor1_id', 0), field(actor, 'armor2_id', 0), field(actor, 'armor3_id', 0), field(actor, 'armor4_id', 0)].map(numberOrZero),
+      params, expCurve: expCurve(actor), traits: [], profile: '', nickname: '', note: '',
+    };
+  });
+  database.enemies = byId(tables.Enemies).map(enemy => {
+    if (!enemy) return null;
+    const params = Array(8).fill(0);
+    params[0] = numberOrZero(field(enemy, 'maxhp', 0)); params[1] = numberOrZero(field(enemy, 'maxmp', 0));
+    params[2] = numberOrZero(field(enemy, 'atk', 0)); params[3] = numberOrZero(field(enemy, 'def', 0));
+    params[4] = params[5] = numberOrZero(field(enemy, 'spi', 0)); params[6] = params[7] = numberOrZero(field(enemy, 'agi', 0));
+    const actions = list(field(enemy, 'actions', [])).map(action => ({
+      skillId: numberOrZero(field(action, 'kind', 0)) === 1 ? numberOrZero(field(action, 'skill_id', 1)) : [battleIds.attackSkill, battleIds.guardSkill, battleIds.escapeSkill, battleIds.waitSkill][numberOrZero(field(action, 'basic', 0))] ?? battleIds.attackSkill,
+      rating: numberOrZero(field(action, 'rating', 5)),
+      conditionType: numberOrZero(field(action, 'condition_type', 0)), conditionParam1: Number(field(action, 'condition_param1', 0)) || 0, conditionParam2: Number(field(action, 'condition_param2', 0)) || 0,
+    }));
+    const drops = [['item_id', 1], ['weapon_id', 2], ['armor_id', 3]].filter(([name]) => numberOrZero(field(enemy, name, 0)) > 0)
+      .map(([name, kind]) => ({ kind, dataId: numberOrZero(field(enemy, name, 0)), denominator: Math.max(1, Math.round(100 / Math.max(1, numberOrZero(field(enemy, 'treasure_prob', 0))))) }));
+    return {
+      id: Number(field(enemy, 'id')), name: String(field(enemy, 'name', '')), battlerName: String(field(enemy, 'battler_name', '')), battlerHue: numberOrZero(field(enemy, 'battler_hue', 0)),
+      params, exp: numberOrZero(field(enemy, 'exp', 0)), gold: numberOrZero(field(enemy, 'gold', 0)),
+      dropItems: numberOrZero(field(enemy, 'treasure_prob', 0)) ? drops : [], actions,
+      traits: [...(numberOrZero(field(enemy, 'eva', 0)) ? [{ code: 22, dataId: 1, value: numberOrZero(field(enemy, 'eva', 0)) / 100 }] : []), ...rankTraits(field(enemy, 'element_ranks'), ELEMENT_RANK_RATE, 11), ...rankTraits(field(enemy, 'state_ranks'), STATE_RANK_RATE, 13)], note: '',
+    };
+  });
+
+  const troopEvents = {};
+  database.troops = byId(tables.Troops).map(troop => {
+    if (!troop) return null;
+    const id = Number(field(troop, 'id'));
+    const pages = list(field(troop, 'pages', [])).map((page, index) => {
+      const condition = field(page, 'condition', {});
+      const converted = convertTroopCommands ? convertTroopCommands(list(field(page, 'list', [])).map(command => ({ code: field(command, 'code', 0), indent: field(command, 'indent', 0), parameters: field(command, 'parameters', []) })), { troopId: id, troopPage: index }) : [];
+      const conditions = {
+        turnEnding: false, turnValid: field(condition, 'turn_valid', false) === true, turnA: numberOrZero(field(condition, 'turn_a', 0)), turnB: numberOrZero(field(condition, 'turn_b', 0)),
+        enemyValid: field(condition, 'enemy_valid', false) === true, enemyIndex: numberOrZero(field(condition, 'enemy_index', 0)), enemyHp: numberOrZero(field(condition, 'enemy_hp', 50)),
+        actorValid: field(condition, 'actor_valid', false) === true, actorId: numberOrZero(field(condition, 'actor_id', 1)), actorHp: numberOrZero(field(condition, 'actor_hp', 50)),
+        switchValid: field(condition, 'switch_valid', false) === true, switchId: numberOrZero(field(condition, 'switch_id', 1)),
+      };
+      return { conditions, span: numberOrZero(field(page, 'span', 0)), commands: Array.isArray(converted) ? converted : [], ...(converted?.story ? { story: converted.story } : {}) };
+    });
+    troopEvents[String(id)] = pages.filter(page => page.commands.length || page.story);
+    return { id, name: String(field(troop, 'name', '')), members: list(field(troop, 'members', [])).map(member => ({ enemyId: numberOrZero(field(member, 'enemy_id', 0)), x: numberOrZero(field(member, 'x', 0)), y: numberOrZero(field(member, 'y', 0)), hidden: field(member, 'hidden', false) === true })), pages: pages.map(page => ({ conditions: page.conditions, span: page.span, list: [] })) };
+  });
+  database.troopEvents = troopEvents;
+
+  const terms = field(system, 'terms', null);
+  const messagesRaw = field(terms, 'messages', null);
+  const messages = messagesRaw?.$map ? Object.fromEntries(messagesRaw.$map.map(([key, value]) => [String(key), String(value)])) : {};
+  database.system = {
+    partyMembers: list(field(system, 'party_members', [])).map(Number), currencyUnit: 'G', battleIds,
+    terms: {
+      basic: list(field(terms, 'basic', [])).map(String).length ? list(field(terms, 'basic', [])).map(String) : ['Level', 'Lv', 'HP', 'HP', 'MP', 'MP', 'TP', 'TP', 'EXP'],
+      commands: list(field(terms, 'commands', [])).map(String), params: list(field(terms, 'params', [])).map(String), messages,
+    },
+  };
+  return database;
+}
+
+async function readVxTable(dataDir, name, decodeMarshal) {
+  const path = join(dataDir, `${name}.rvdata`);
+  return existsSync(path) ? decodeMarshal(await readFile(path)) : null;
+}
+
+export async function convertVxDatabase(dataDir, decodeMarshal, { system, convertTroopCommands } = {}) {
+  const tables = Object.fromEntries(await Promise.all(['Actors', 'Classes', 'Skills', 'Items', 'Weapons', 'Armors', 'Enemies', 'Troops', 'States'].map(async name => [name, await readVxTable(dataDir, name, decodeMarshal)])));
+  return convertVxDatabaseTables(tables, { system, convertTroopCommands });
+}
